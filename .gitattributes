@@ -1,0 +1,5 @@
+# 服务器部署脚本必须保持 LF：容器内 bash 无法执行 CRLF 脚本
+# （entrypoint 以宿主卷/镜像拷贝方式进入 Linux，CRLF 会导致 \r 污染 shebang）
+deploy/*.sh text eol=lf
+start.sh text eol=lf
+*.sh text eol=lf

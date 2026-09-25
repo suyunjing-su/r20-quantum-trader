@@ -33,6 +33,14 @@ else
     chmod 600 "$ROOT_DIR/.env"
 fi
 
+# 2.5 双容器部署硬前提：.env 是配置唯一事实源（SSOT），其值会覆盖 compose 注入的
+# R20_STANDALONE_GATEWAY。若该键留空，backend 容器会在 lifespan 里重复拉起网关
+# worker，抢走共享卷上的 flock → gateway 容器抢锁失败秒退，陷入 exit 0 重启循环。
+if grep -qE '^[[:space:]]*R20_STANDALONE_GATEWAY[[:space:]]*=[[:space:]]*$' "$ROOT_DIR/.env"; then
+    echo "🔧 Enforcing R20_STANDALONE_GATEWAY=true for compose dual-container deployment..."
+    sed -i 's/^[[:space:]]*R20_STANDALONE_GATEWAY[[:space:]]*=.*/R20_STANDALONE_GATEWAY=true/' "$ROOT_DIR/.env"
+fi
+
 # 3. 检查 Docker 与 Docker Compose 命令
 if command -v docker &> /dev/null && docker compose version &> /dev/null; then
     COMPOSE_CMD="docker compose"
