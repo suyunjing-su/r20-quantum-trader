@@ -17,12 +17,35 @@ from r20_backend.schemas import (
     RiskResetRequest,
     InitialCapitalUpdate,
     InstrumentAddRequest,
+    InstrumentVenuesUpdate,
     InstrumentDeleteRequest,
     ManualCloseRequest,
 )
 from r20_backend.okx_trade_service import fast_close_confirmed
 from scripts.okx_rest import OKXNotConfigured
 from scripts.instrument_pool import from_okx_instrument, load_instruments, mutate_instruments, save_instruments
+
+VENUES = ("okx", "binance", "gate")
+
+
+def _venue_validation_text(inst_id: str, report: dict[str, dict[str, Any]]) -> str:
+    """把三所校验报告压成可直接显示在后台弹窗中的中文提示。"""
+    available = [v.upper() for v, row in report.items() if row.get("available") is True]
+    unavailable = [
+        f"{v.upper()}（{row.get('reason') or '目录中不存在'}）"
+        for v, row in report.items() if row.get("available") is False
+    ]
+    unknown = [
+        f"{v.upper()}（{row.get('reason') or '无法确认'}）"
+        for v, row in report.items() if row.get("available") is None
+    ]
+    parts = [f"{inst_id} 交易所合约校验结果："]
+    parts.append(f"可用：{', '.join(available) or '无'}")
+    if unavailable:
+        parts.append(f"不可用：{'; '.join(unavailable)}")
+    if unknown:
+        parts.append(f"未知：{'; '.join(unknown)}")
+    return "；".join(parts)
 
 router = APIRouter(tags=["risk"])
 
@@ -223,6 +246,8 @@ def admin_instruments(x_r20_admin_token: str | None = Header(default=None)) -> d
         report = _holdings_report(item["instId"], trackers)
         rows.append({
             **item,
+            "venues": [str(v).lower() for v in (item.get("venues") or ["okx"])
+                       if str(v).lower() in VENUES],
             "protected": item["instId"] == "BTC-USDT-SWAP",
             # 审计 P1-5：旧实现在这里拿 inst_id 直接 in trackers（真实键带 _long/_short 后缀）
             # → 恒 False，UI「存在持仓追踪记录，禁止删除」徽标与禁用态永不出现。
@@ -251,27 +276,67 @@ def add_admin_instrument(payload: InstrumentAddRequest, x_r20_admin_token: str |
     refresh_settings()
     require_admin_header(x_r20_admin_token)
     inst_id = payload.inst_id.upper()
+    explicit_venues = payload.venues is not None
+    requested_venues = ["okx"] if payload.venues is None else sorted({str(v).strip().lower() for v in payload.venues if str(v).strip()})
+    invalid_venues = [v for v in requested_venues if v not in VENUES]
+    if invalid_venues or not requested_venues:
+        raise HTTPException(status_code=400, detail=f"交易所选择无效：{', '.join(invalid_venues) or '至少选择一个交易所'}")
+
+    # 新契约：保存标的前同时核对三所公共合约目录，报告中明确区分
+    # 可用/明确不可用/目录不可达未知；用户勾选的交易所必须可用。
+    venue_validation: dict[str, dict[str, Any]] = {}
+    if explicit_venues:
+        from r20_backend.exchanges.listing import validate_contract_multi_venue
+        venue_validation = validate_contract_multi_venue(inst_id)
+        rejected = [v for v in requested_venues
+                    if venue_validation.get(v, {}).get("available") is not True]
+        if rejected:
+            raise HTTPException(
+                status_code=400,
+                detail=_venue_validation_text(inst_id, venue_validation)
+                + f"；已选择但不可交易：{', '.join(v.upper() for v in rejected)}，请取消勾选后重试")
+
+    # OKX 原始规格仍作为最佳元数据来源；当合约仅存在于 Binance/Gate 时，
+    # 允许用统一保守规格入池，真实下单前仍会读取目标所原生规格并再次校验。
     try:
         matches = okx.instruments("SWAP", inst_id)
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"OKX 合约校验失败：{exc}") from exc
+        if not explicit_venues:
+            raise HTTPException(status_code=502, detail=f"OKX 合约校验失败：{exc}") from exc
+        matches = []
     raw = matches[0] if matches else {}
-    if raw.get("instId") != inst_id or raw.get("settleCcy") != "USDT" or raw.get("state") != "live":
+    okx_live = raw.get("instId") == inst_id and raw.get("settleCcy") == "USDT" and raw.get("state") == "live"
+    if not okx_live:
+        if explicit_venues:
+            # 当前交易核心用 OKX ctVal/tickSz/minSz 构造统一下单数量与报价精度。
+            # 不可用虚构占位规格把 Binance/Gate-only 合约写入主池；必须先接入
+            # 目标所原生规格映射，否则数量/最小步长可能错误。
+            validation_text = _venue_validation_text(inst_id, venue_validation)
+            raise HTTPException(
+                status_code=400,
+                detail=validation_text
+                + "；当前交易池规格模型要求 OKX 在线合约规格，暂不能安全添加仅由 Binance/Gate 支持的合约")
         raise HTTPException(status_code=400, detail="仅允许添加 OKX 在线可交易的 USDT 永续合约")
+
     item = from_okx_instrument(raw)
+    item["venues"] = requested_venues
 
     # 审计 P2-6：load→校验→改→save 整段持锁（旧实现无锁 → 两个并发保存丢标的）；
     # 去重与容量不变量放进锁内，避免"检查通过后另一个请求插进来"。
     def _append(pool: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if any(row["instId"] == inst_id for row in pool):
-            raise HTTPException(status_code=409, detail="该币种已在交易池中")
+            raise HTTPException(status_code=409, detail="该合约已在交易标的池中")
         if len(pool) >= MAX_POOL_SIZE:
             raise HTTPException(status_code=409, detail=f"交易池最多允许 {MAX_POOL_SIZE} 个币种；请先删除一个无持仓币种，或调整环境变量 R20_MAX_POOL_SIZE")
         return [*pool, item]
 
     updated = mutate_instruments(_append)
-    audit_record("instrument.add", "success", {"instId": inst_id})
-    return {"added": item, "count": len(updated), "effective": "immediate", "message": f"{item['name']} 已成功加入交易池并实时同步全网大屏与因果雷达"}
+    audit_record("instrument.add", "success", {"instId": inst_id, "venues": requested_venues})
+    return {
+        "added": item, "count": len(updated), "effective": "immediate",
+        "venue_validation": venue_validation,
+        "message": f"{item['name']} 已加入交易标的池，可交易场所：{', '.join(v.upper() for v in requested_venues)}",
+    }
 
 
 @router.delete("/api/v1/admin/instruments/{inst_id}")
@@ -316,6 +381,65 @@ def delete_admin_instrument(
     updated = mutate_instruments(lambda pool: [item for item in pool if item["instId"] != inst_id])
     audit_record("instrument.remove", "success", {"instId": inst_id, "holdings_cleared": {"tracker_keys": [], "held_live": False}})
     return {"removed": inst_id, "count": len(updated), "effective": "immediate", "message": f"{inst_id} 已从交易池移除并实时同步全网大屏与因果雷达"}
+
+
+@router.put("/api/v1/admin/instruments/{inst_id}/venues")
+def update_admin_instrument_venues(
+    inst_id: str,
+    payload: InstrumentVenuesUpdate,
+    x_r20_admin_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """更新标的池中某个合约可参与撮合的交易所列表（关闸/勾选配置面）。"""
+    refresh_settings()
+    require_admin_header(x_r20_admin_token)
+    target = inst_id.upper()
+    requested = [str(v).strip().lower() for v in (payload.venues or []) if str(v).strip()]
+    invalid = [v for v in requested if v not in VENUES]
+    if invalid or not requested:
+        raise HTTPException(status_code=400, detail=f"交易所选择无效：{', '.join(invalid) or '至少选择一个交易所'}")
+    requested = sorted(set(requested))
+
+    # 勾选的交易所必须真实挂有该合约；目录明确不存在时给出可配置/不可配置清单。
+    from r20_backend.exchanges.listing import validate_contract_multi_venue
+    validation = validate_contract_multi_venue(target)
+    rejected = [v for v in requested if validation.get(v, {}).get("available") is not True]
+    if rejected:
+        raise HTTPException(
+            status_code=400,
+            detail=_venue_validation_text(target, validation)
+            + f"；已勾选但不可交易：{', '.join(v.upper() for v in rejected)}，请取消勾选后重试")
+
+    # 所池编辑不得把已有仓位从维护范围中摘掉；快照未知时 fail-closed。
+    holdings = _live_holdings(target)
+    if holdings[2]:
+        raise HTTPException(status_code=503, detail=f"无法确认 {target} 的实时持仓，暂不允许修改交易所：{holdings[2]}")
+    held_venues = set(holdings[1]) if holdings[0] else set()
+    removed_held = sorted(held_venues - set(requested))
+    if removed_held:
+        raise HTTPException(
+            status_code=409,
+            detail=f"{target} 在 {', '.join(v.upper() for v in removed_held)} 仍有持仓，不能从该所移除；请先平仓并确认归零")
+
+    found = {"n": 0}
+
+    def _update(pool: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        for item in pool:
+            if str(item.get("instId") or "").upper() == target:
+                found["n"] += 1
+        if not found["n"]:
+            raise HTTPException(status_code=404, detail="该合约不在交易标的池中")
+        for item in pool:
+            if str(item.get("instId") or "").upper() == target:
+                item["venues"] = requested
+        return pool
+
+    updated = mutate_instruments(_update)
+    audit_record("instrument.venues.update", "success", {"instId": target, "venues": requested})
+    return {
+        "updated": target, "venues": requested, "effective": "immediate",
+        "venue_validation": validation,
+        "message": f"{target} 可交易场所已更新为：{', '.join(v.upper() for v in requested)}",
+    }
 
 
 @router.post("/api/v1/admin/positions/close")

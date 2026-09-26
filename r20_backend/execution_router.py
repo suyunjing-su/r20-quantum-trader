@@ -675,7 +675,7 @@ def close_position(symbol: str, *, venue: str = "gate", adapter: Any = None,
     if environment and is_sandbox_environment(environment) and v == "gate" and environment != "sandbox":
         environment = "sandbox"
     ad = adapter or get_adapter(v, environment=environment)
-    require_execution(v, environment=str(getattr(ad, "environment", "live") or "live"))
+    require_execution(v, environment=str(getattr(ad, "environment", "live") or "live"), maintenance=True)
     asset = canonical_base(symbol)
     # 平仓**前**抓一份待平仓的事实：归属判定要用它的量/方向，而平完就读不到了
     # （本刀实测踩到：平完再读只剩空仓 ⇒ matched 判不出来 ⇒ 一张腿都没撤）。

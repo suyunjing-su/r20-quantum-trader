@@ -218,17 +218,23 @@ def is_registered(venue: str) -> bool:
     return str(venue or "").strip().lower() in _ADAPTERS
 
 
-def require_execution(venue: str, environment: Optional[str] = None) -> None:
+def require_execution(venue: str, environment: Optional[str] = None,
+                       maintenance: bool = False) -> None:
     """执行门禁：任何场所经适配器下单前先问这里。未开闸一律 fail-closed。
 
     environment=None → 按解析出的适配器实例档位取轴（旧 TESTNET 布尔 → 沙盒档
     检查 ``R20_GATE_DEMO_EXECUTION``；live 档维持 ``R20_GATE_EXECUTION``）。
     拒绝文案指向**当前档位实际缺的那把开关**，不误导去开另一档。
+
+    maintenance=True（2026-09-26 关闸语义收口）：关闸只停**新开仓**，
+    关闸前在执行的交易必须继续维护（平仓/止损收紧/保护腿续期）。维护类
+    写操作在闸关时放行——闸是「新仓闸」，不是「全站熔断」。supports_orders
+    的结构性检查仍然生效（适配器没实装下单，维护同样无从谈起）。
     """
     adapter = get_adapter(venue, environment)
     cap = adapter.capabilities
     env = str(getattr(adapter, "environment", "live") or "live")
-    if not execution_open(cap.venue, env):
+    if not execution_open(cap.venue, env) and not maintenance:
         if cap.venue == "gate":
             needed = ("R20_GATE_DEMO_EXECUTION" if is_sandbox_environment(env)
                       else "R20_GATE_EXECUTION")
@@ -247,6 +253,7 @@ def require_execution(venue: str, environment: Optional[str] = None) -> None:
         )
     if not cap.supports_orders:
         raise ExchangeCapabilityError(f"{cap.display_name}: supports_orders=False，适配器未实装下单")
+
 
 
 def resolve_symbol(symbol: str, venue: str) -> str:

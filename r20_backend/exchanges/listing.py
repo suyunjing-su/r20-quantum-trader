@@ -166,11 +166,43 @@ def ensure_contract_listed(venue: str, environment: str,
     return ListingCheck(ok=True, reason=None, checked_at=checked_at, source=source)
 
 
+def validate_contract_multi_venue(inst_id: str, environment: str | None = None) -> Dict[str, Dict[str, Any]]:
+    """校验 canonical 合约在三所目录中的可用性。
+
+    这是后台配置期的诊断报告，不改变下单时 listing gate 的 fail-open 语义：
+    目录不可用返回 ``available=None``，而不是把未知误报成可用或不存在。
+    ``available=False`` 只表示目录明确返回不存在、下架或非交易状态。
+    """
+    from .base import canonical_base
+    from .env_profiles import legacy_environment_for
+    from .registry import native_symbol_pure
+
+    base = canonical_base(inst_id)
+    report: Dict[str, Dict[str, Any]] = {}
+    for venue in ("okx", "binance", "gate"):
+        env = str(environment or legacy_environment_for(venue)).strip().lower()
+        # Gate 的旧环境名沿用适配器/目录的 sandbox 语义。
+        if venue == "gate" and env in {"demo", "testnet"}:
+            env = "sandbox"
+        native = native_symbol_pure(base, venue)
+        check = ensure_contract_listed(venue, env, native)
+        unknown = check.reason == "行情目录不可用，跳过对账"
+        report[venue] = {
+            "available": None if unknown else bool(check.ok),
+            "reason": check.reason,
+            "native_symbol": native,
+            "environment": env,
+            "source": check.source,
+            "checked_at": check.checked_at,
+        }
+    return report
+
+
 def listing_snapshot(venue: str, environment: str) -> ListingSnapshot:
     """场所级目录快照（只读面，前端展示用；复用 TTL 缓存，零新增出网压力）。
 
     - 目录可用 → ok=True + listed_count（source='cache'/'fresh'）；
-    - 目录拉取失败 → **fail-open 同语义**：ok=True（表示不阻塞交易）但
+    - 目录拉取失�� → **fail-open 同语义**：ok=True（表示不阻塞交易）但
       listed_count=None + source='unavailable' + 中文 reason；
     - venue/环境档未知 → ok=False（结构性错误，须显式暴露不能装没事）。
     """

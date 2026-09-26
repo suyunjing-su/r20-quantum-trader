@@ -112,7 +112,12 @@ export const zhAdminSecurity = {
   savePool: '保存该所池',
   toastPoolSaved: '{venue} 永续合约池已保存',
 
-  poolDesc: 'USDT 永续合约标的池管理。',
+  poolDesc: 'USDT 永续合约标的池管理；每个合约在此直接选择可参与撮合的交易所，多个交易所由撮合路由策略决定最终执行所。',
+  instVenuesLabel: '可交易所',
+  saveInstrumentVenues: '保存交易所',
+  venueRequired: '至少选择一个交易所',
+  toastVenuesSaved: '合约可交易所已更新',
+  errVenueValidation: '交易所合约校验失败：{msg}',
   instPlaceholder: '例如: XRP-USDT-SWAP',
   addInstrument: '添加标的',
   colInstId: '合约代码',

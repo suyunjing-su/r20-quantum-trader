@@ -346,11 +346,17 @@ def admin_multi_exchange_update(payload: MultiExchangeUpdate,
         "gate": payload.gate_instruments,
     }
     if any(items is not None for items in pool_updates.values()):
+        # 三所池现由交易标的池（instrument_pool.json 的 venues 字段）派生；
+        # 直接写三所池的旧入口仅作兼容保留——写前先同步到主池，防两处漂移。
         from r20_backend.exchanges import routing_policy
+        from r20_backend.instrument_venues import sync_venue_pools_to_master
         try:
-            for venue, items in pool_updates.items():
-                if items is not None:
-                    routing_policy.save_venue_pool(venue, items)
+            updates = {v: items for v, items in pool_updates.items() if items is not None}
+            # 先在主池锁内应用并校验「每个合约至少归属一个所」；否则旧配置文件
+            # 不应先落盘，避免部分失败后出现主池/旧视图分叉。
+            sync_venue_pools_to_master(updates)
+            for venue, items in updates.items():
+                routing_policy.save_venue_pool(venue, items)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     try:

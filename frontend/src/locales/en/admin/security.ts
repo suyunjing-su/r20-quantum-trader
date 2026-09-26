@@ -111,7 +111,12 @@ export const enAdminSecurity = {
   savePool: 'Save venue pool',
   toastPoolSaved: '{venue} perpetual pool saved',
 
-  poolDesc: 'Manage the USDT perpetual symbol pool.',
+  poolDesc: 'Manage the USDT perpetual instrument pool. Select eligible venues on each instrument here; routing chooses the final venue when several are selected.',
+  instVenuesLabel: 'Eligible venues',
+  saveInstrumentVenues: 'Save venues',
+  venueRequired: 'Select at least one venue',
+  toastVenuesSaved: 'Instrument venues updated',
+  errVenueValidation: 'Venue contract validation failed: {msg}',
   instPlaceholder: 'e.g. XRP-USDT-SWAP',
   addInstrument: 'Add symbol',
   colInstId: 'Contract',

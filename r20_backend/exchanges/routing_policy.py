@@ -170,6 +170,32 @@ def load_venue_pool(venue: str) -> Dict[str, Any]:
                         base_pool[k] = v_cfg[k]
     except Exception:
         pass
+    # 新契约：交易标的池中的 venues 字段是三所准入池的单一事实源。
+    # 旧 venue_routing.json 仍可读取；只要主池出现 venues 字段，就按主池派生，
+    # 防止「标的池已取消某所」但旧路由文件仍继续放行。
+    try:
+        from scripts.instrument_pool import load_instruments
+        active_pool = load_instruments()
+        assigned = [item for item in active_pool
+                    if isinstance(item, dict) and "venues" in item]
+        if assigned:
+            legacy_ids = set(base_pool.get("instruments") or [])
+            derived: set[str] = set()
+            for item in active_pool:
+                inst = str(item.get("instId") or "").strip().upper()
+                if not inst:
+                    continue
+                raw_venues = {
+                    str(v).strip().lower()
+                    for v in (item.get("venues") or [])
+                    if str(v).strip().lower() in POOL_VENUES
+                }
+                if vkey in raw_venues or ("venues" not in item and inst in legacy_ids):
+                    derived.add(inst)
+            base_pool["instruments"] = sorted(derived)
+    except Exception as exc:
+        # 主池不可读时保留旧路由配置；交易侧的主池可信闸会阻止新开仓。
+        print(f"[routing_policy] warn 无法从交易标的池派生 {vkey} 准入清单: {exc!r}")
     assets = [str(a).upper() for a in (base_pool.get("assets") or []) if str(a).strip()]
     base_pool["assets"] = sorted(set(assets))
     if base_pool.get("instruments") is not None:

@@ -68,7 +68,7 @@ class Rig:
         self.listing_raises = None
         self.geometry_calls = []
 
-    def run(self, *, venue_ctx=None, src=None, pos_side="long", **over):
+    def run(self, *, venue_ctx=None, src=None, pos_side="long", execution_open=True, **over):
         params = dict(
             confirm_signal_reservation=lambda r: self.confirmed.append(r),
             record_open_intent=lambda i, s: self.recorded.append((i, s)),
@@ -91,6 +91,7 @@ class Rig:
                                return_value=SimpleNamespace(ok=self.listing_ok,
                                                             reason=self.listing_reason)))
         with _listing, \
+             patch("r20_backend.exchanges.registry.execution_open", return_value=execution_open), \
              patch("scripts.order_risk.validate_quote_geometry_and_rr",
                    side_effect=lambda *a, **k: (self.geometry_calls.append(a),
                                                 self.geometry)[1]):
@@ -108,13 +109,20 @@ class RoutingGateTest(unittest.TestCase):
         self.assertEqual(rig.okx.orders, [], "路由拒绝 ⇒ 一单都不许发")
         self.assertEqual(rig.confirmed, [])
 
-    def test_missing_venue_ctx_only_warns(self):
-        """非 AI 信号通路不带 ctx：只 warn 不闸门（保留 US-007 契约）。"""
+    def test_missing_venue_ctx_only_warns_when_execution_is_open(self):
+        """通用直下入口可省略 AI 路由，但仍必须遵守新仓执行闸。"""
         rig = Rig()
-        with patch("sys.stdout") as out:
+        with patch("sys.stdout"):
             rig.run(venue_ctx=None)
-        self.assertEqual(len(rig.okx.orders), 1, "通用通路仍可下单")
+        self.assertEqual(len(rig.okx.orders), 1, "闸开时通用通路仍可下单")
         self.assertTrue(rig.confirmed, "成功要确认预留（此时应为 None）")
+
+    def test_missing_venue_ctx_is_blocked_when_execution_is_closed(self):
+        rig = Rig()
+        ok, why = rig.run(venue_ctx=None, execution_open=False)
+        self.assertFalse(ok)
+        self.assertIn("执行已关闸", why)
+        self.assertEqual(rig.okx.orders, [], "关闸必须覆盖不带 venue_ctx 的直下入口")
 
     def test_reservation_is_confirmed_on_success(self):
         rig = Rig()

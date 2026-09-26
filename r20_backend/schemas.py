@@ -195,6 +195,12 @@ class GatewayReplayRequest(BaseModel):
 
 class InstrumentAddRequest(BaseModel):
     inst_id: str = Field(pattern=r"^[A-Z0-9]{2,15}-USDT-SWAP$")
+    # 交易标的池内直接配置参与交易的场所；未提供时兼容旧客户端，仅加入 OKX。
+    venues: list[str] | None = None
+
+
+class InstrumentVenuesUpdate(BaseModel):
+    venues: list[str] = Field(min_length=1)
 
 
 class InstrumentDeleteRequest(BaseModel):

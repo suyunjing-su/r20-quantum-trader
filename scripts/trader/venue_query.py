@@ -85,11 +85,17 @@ def venue_execution_ready(venue: str, environment: str,
 def fetch_other_venue_positions(environment: str,
                               *,
                               venue_registry,
-                              venue_execution_ready) -> Tuple[bool, Dict[str, List[Dict[str, Any]]], str]:
+                              venue_execution_ready,
+                              include_closed_positions: bool = False) -> Tuple[bool, Dict[str, List[Dict[str, Any]]], str]:
     """跨所持仓快照（多所封顶用）：非 OKX 且已开闸场所的活跃持仓。
 
     三所平权开单后，仓位/同向上限必须把 Gate/Binance 的在管仓位算进来——
     否则每所各顶满上限，全系统实际敞口 = 上限 × 场所数（风控口径失真）。
+
+    关闸语义：``venue_execution_ready`` 只描述能否**新开仓**，因此本函数
+    必须直接遍历已登记场所，不按开闸状态过滤。关闸所仍需读取持仓，让止损、
+    移动止损、保护腿续期和 AI 平仓继续接管；读取失败仍返回 fail-closed，
+    但只阻断新开仓，不跳过维护。
 
     语义（fail-closed）：
     - 返回 (ok, {venue: [normalized_pos...]}, error)。任一开闸所读取失败 →
@@ -107,7 +113,10 @@ def fetch_other_venue_positions(environment: str,
     for name in names:
         if name == "okx":
             continue
-        if not venue_execution_ready(name, environment):
+        # 直接读取所有非 OKX 所的已有仓位；新开仓候选仍由 venue_execution_ready
+        # 在路由层过滤。默认参数保留旧的「未开闸所不读」测试/只计数语义；
+        # 主交易周期通过 include_closed_positions=True 开启维护快照。
+        if not include_closed_positions and not venue_execution_ready(name, environment):
             continue
         try:
             # 审计 C3：档位轴必须经 ADAPTER_ENV 唯一映射（execution_router/manual

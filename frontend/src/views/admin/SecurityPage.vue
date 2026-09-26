@@ -98,6 +98,8 @@ const capitalConfirmOk = computed(() => capitalConfirm.value.trim().toUpperCase(
 const instruments = ref<any[]>([])
 const instLimits = ref<any>({ minimum: 1, maximum: 20 })
 const newInstId = ref('')
+const newInstVenues = ref<string[]>(['okx'])
+const editingInstVenues = ref<string>('')
 
 // ---- positions & close ----
 const snapshot = ref<any>(null)
@@ -132,8 +134,6 @@ const binanceExec = ref(false)
 const binanceExecPhrase = ref('')
 const okxExec = ref(false)
 const okxExecPhrase = ref('')
-const venuePools = ref<Record<'okx' | 'binance' | 'gate', string[]>>({ okx: [], binance: [], gate: [] })
-const savingPool = ref<'okx' | 'binance' | 'gate' | ''>('')
 const okxCredViewLive = ref(false)
 const venueLatencies = ref<Record<string, number>>({})
 const savingMx = ref(false)
@@ -250,7 +250,7 @@ async function addInstrument() {
   const instId = newInstId.value.trim().toUpperCase()
   if (!/^[A-Z0-9]{2,15}-USDT-SWAP$/.test(instId)) { toast.err(t('admin.security.errInstFormat')); return }
   try {
-    const res = await api('/api/v1/admin/instruments', { method: 'POST', body: JSON.stringify({ inst_id: instId }) })
+    const res = await api('/api/v1/admin/instruments', { method: 'POST', body: JSON.stringify({ inst_id: instId, venues: newInstVenues.value }) })
     toast.ok(res.message || t('admin.security.toastInstAdded', undefined, { inst: instId }))
     newInstId.value = ''
     await loadAll()
@@ -354,11 +354,6 @@ async function loadMx() {
       binanceExec.value = !!mx.value.venues.binance?.execution_open
     }
     okxExec.value = !!mx.value?.okx_execution_open
-    venuePools.value = {
-      okx: Array.isArray(mx.value?.pools?.okx) ? [...mx.value.pools.okx] : [],
-      binance: Array.isArray(mx.value?.pools?.binance) ? [...mx.value.pools.binance] : [],
-      gate: Array.isArray(mx.value?.pools?.gate) ? [...mx.value.pools.gate] : [],
-    }
     if (mx.value?.health?.venues) {
       for (const [k, v] of Object.entries(mx.value.health.venues as Record<string, any>)) {
         if (v?.avg_ms) {
@@ -488,27 +483,38 @@ async function saveVenue(venue: 'binance' | 'gate') {
   }
 }
 
-async function saveVenuePool(venue: 'okx' | 'binance' | 'gate') {
-  savingPool.value = venue
+async function updateInstrumentVenues(item: any) {
+  const venues = Array.isArray(item.venues) ? [...item.venues] : []
+  if (!venues.length) {
+    toast.warn(t('admin.security.venueRequired'))
+    return
+  }
+  editingInstVenues.value = item.instId
   try {
-    await api('/api/v1/admin/multi-exchange', {
-      method: 'PUT',
-      body: JSON.stringify({ [`${venue}_instruments`]: venuePools.value[venue] }),
+    const res = await api(`/api/v1/admin/instruments/${encodeURIComponent(item.instId)}/venues`, {
+      method: 'PUT', body: JSON.stringify({ venues }),
     })
-    toast.ok(t('admin.security.toastPoolSaved', undefined, { venue: venue.toUpperCase() }))
-    await loadMx()
+    item.venues = res.venues || venues
+    toast.ok(res.message || t('admin.security.toastVenuesSaved'))
   } catch (e: any) {
-    toast.err(t('admin.security.errSaveFailed', undefined, { msg: e.message }))
+    toast.err(t('admin.security.errVenueValidation', undefined, { msg: e.message }))
+    await loadAll()
   } finally {
-    savingPool.value = ''
+    editingInstVenues.value = ''
   }
 }
 
-function toggleVenueInstrument(venue: 'okx' | 'binance' | 'gate', instId: string) {
-  const current = venuePools.value[venue]
-  venuePools.value[venue] = current.includes(instId)
-    ? current.filter(item => item !== instId)
-    : [...current, instId].sort()
+function toggleInstrumentVenue(item: any, venue: string) {
+  const current = Array.isArray(item.venues) ? item.venues : []
+  item.venues = current.includes(venue)
+    ? current.filter((v: string) => v !== venue)
+    : [...current, venue].sort()
+}
+
+function toggleNewInstrumentVenue(venue: string) {
+  newInstVenues.value = newInstVenues.value.includes(venue)
+    ? newInstVenues.value.filter(v => v !== venue)
+    : [...newInstVenues.value, venue].sort()
 }
 
 // ---- 总览派生（纯计算，零请求） ----
@@ -1053,38 +1059,18 @@ onMounted(() => { loadAll(); loadMx() })
           <p class="sc-hint pad">{{ t('admin.security.capitalFooter') }}</p>
         </SettingsSection>
 
-        <SettingsSection :title="t('admin.security.venuePoolsTitle')" :description="t('admin.security.venuePoolsDesc')" :icon="Route">
-          <div class="sc-venue-pools">
-            <article v-for="venue in (['okx', 'binance', 'gate'] as const)" :key="venue" class="sc-venue-pool">
-              <div class="sc-venue-pool-head">
-                <div>
-                  <b>{{ venue.toUpperCase() }}</b>
-                  <span class="sc-hint">{{ t('admin.security.venuePoolHint') }}</span>
-                </div>
-                <button type="button" class="btn btn-primary btn-sm" :disabled="savingPool !== ''" @click="saveVenuePool(venue)">
-                  <Loader2 v-if="savingPool === venue" :size="12" class="animate-spin shrink-0" />
-                  <Save v-else :size="12" />
-                  {{ savingPool === venue ? t('admin.security.saving') : t('admin.security.savePool') }}
-                </button>
-              </div>
-              <div class="sc-pool-options">
-                <label v-for="item in instruments" :key="`${venue}-${item.instId}`" class="sc-pool-option">
-                  <input
-                    type="checkbox"
-                    :checked="venuePools[venue].includes(item.instId)"
-                    @change="toggleVenueInstrument(venue, item.instId)"
-                  />
-                  <span class="mono">{{ item.instId }}</span>
-                </label>
-                <span v-if="!instruments.length" class="sc-hint">{{ t('admin.security.poolEmpty') }}</span>
-              </div>
-              <p class="sc-pool-count">{{ t('admin.security.venuePoolCount', undefined, { count: venuePools[venue].length }) }}</p>
-            </article>
-          </div>
-        </SettingsSection>
-
         <SettingsSection :title="t('admin.security.poolTitle')" :description="t('admin.security.poolDesc')" :icon="Layers">
           <template #actions>
+            <div class="sc-inst-venues" role="group" :aria-label="t('admin.security.instVenuesLabel')">
+              <label v-for="venue in (['okx', 'binance', 'gate'] as const)" :key="`new-${venue}`" class="sc-check">
+                <input
+                  type="checkbox"
+                  :checked="newInstVenues.includes(venue)"
+                  @change="toggleNewInstrumentVenue(venue)"
+                />
+                <span>{{ venue.toUpperCase() }}</span>
+              </label>
+            </div>
             <input
               v-model="newInstId"
               :aria-label="t('admin.security.instAria')"
@@ -1092,7 +1078,7 @@ onMounted(() => { loadAll(); loadMx() })
               class="field mono sc-inst-input"
               @keyup.enter="addInstrument"
             />
-            <button type="button" class="btn btn-primary btn-sm" @click="addInstrument">
+            <button type="button" class="btn btn-primary btn-sm" :disabled="!newInstVenues.length" @click="addInstrument">
               <Layers :size="13" />
               <span>{{ t('admin.security.addInstrument') }}</span>
             </button>
@@ -1114,6 +1100,22 @@ onMounted(() => { loadAll(); loadMx() })
               <span class="sc-name truncate">{{ item.name }}</span>
               <span class="sc-type mono">{{ item.ctType || 'SWAP' }}</span>
               <span class="sc-badges">
+                <span class="sc-venue-inline-label">{{ t('admin.security.instVenuesLabel') }}</span>
+                <label v-for="venue in (['okx', 'binance', 'gate'] as const)" :key="`${item.instId}-${venue}`" class="sc-venue-check">
+                  <input
+                    type="checkbox"
+                    :checked="(item.venues || ['okx']).includes(venue)"
+                    @change="toggleInstrumentVenue(item, venue)"
+                  />
+                  <span>{{ venue.toUpperCase() }}</span>
+                </label>
+                <button
+                  v-if="editingInstVenues !== item.instId"
+                  type="button" class="btn btn-quiet btn-sm"
+                  :disabled="!(item.venues || []).length"
+                  @click="updateInstrumentVenues(item)"
+                >{{ t('admin.security.saveInstrumentVenues') }}</button>
+                <Loader2 v-else :size="13" class="animate-spin shrink-0" />
                 <span v-if="item.protected" class="badge badge-warn">{{ t('admin.security.protectedBadge') }}</span>
                 <span v-else-if="item.held_live" class="badge badge-accent">
                   {{ t('admin.security.holdingLiveBadge', undefined, { venues: (item.held_venues || []).join('/') || '—' }) }}

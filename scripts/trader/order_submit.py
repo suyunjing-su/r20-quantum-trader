@@ -65,8 +65,27 @@ def submit_protected_limit_order(inst_id: str, side: str, pos_side: str, size: f
     else:
         print(f"[US-003 决策面] warn {inst_id} 提交未携带 venue_ctx——"
               f"未经选所路由/预算预留，仅限非 AI 信号通用路径")
+        # 通用直签入口仍必须服从该所新仓闸；否则 OKX 关闸只会从路由候选中
+        # 摘除，却能被不带 venue_ctx 的调用绕过。
+        try:
+            from r20_backend.exchanges.registry import execution_open
+            if not execution_open(target_venue, str(env.mode)):
+                return False, f"{target_venue.upper()} 执行已关闸，拒绝新开仓"
+        except Exception as _exec_exc:
+            return False, f"无法确认 {target_venue.upper()} 执行闸状态，拒绝新开仓: {_exec_exc}"
 
-    # 环境维合约存在性对账（US-007）：目录拉不到 → fail-open 放行（对账是增强不是闸门）；
+    # 交易标的池是场所准入的单一事实源：无论信号是否经过 AI 路由，
+    # 目标所未勾选该合约都不能直下。多所均勾选时，前面的撮合路由已选定 target_venue。
+    try:
+        from r20_backend.exchanges.routing_policy import venue_pool_allows
+        if not venue_pool_allows(target_venue, inst_id):
+            release_signal_reservation(_reservation, "目标交易所未被标的池勾选")
+            return False, f"{target_venue.upper()} 未被交易标的池允许交易 {inst_id}"
+    except Exception as _pool_exc:
+        # 交易池读取失败不猜测放行；资金面配置读不到时宁可停发。
+        release_signal_reservation(_reservation, "交易标的池不可读")
+        return False, f"交易标的池不可读，拒绝 {target_venue.upper()} 新开仓: {_pool_exc}"
+
     # 已下架/未上市（如 SUI 在 demo 被下架）→ fail-closed 拒单，reason 透传。
     #
     # Listing Gate Parity（三所平权命门）：inst_id 是 OKX 形态（BTC-USDT-SWAP），而

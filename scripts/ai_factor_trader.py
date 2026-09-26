@@ -716,7 +716,8 @@ def fetch_other_venue_positions(environment: str):
     """壳（第八十六刀搬至 `scripts/trader/venue_query.py`）。"""
     return _venue_query_other_positions(
         environment, venue_registry=venue_registry,
-        venue_execution_ready=venue_execution_ready)
+        venue_execution_ready=venue_execution_ready,
+        include_closed_positions=True)
 
 def _venue_health_stamp():
     """壳（第八十六刀搬至 `scripts/trader/venue_query.py`）。"""
