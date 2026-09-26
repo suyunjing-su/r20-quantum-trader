@@ -63,7 +63,11 @@ def venue_execution_ready(venue: str, environment: str,
             return False
         if key == "okx":
             env = current_environment()
-            return bool(env.configured) and str(env.mode) == str(environment)
+            # OKX 使用 trader 的 V5 直签链路，但开闸状态仍由 registry
+            # 统一控制；关闸时保留行情/账户探针，仅从可执行候选中移除。
+            return (bool(env.configured)
+                    and str(env.mode) == str(environment)
+                    and bool(venue_registry.execution_open(key, environment)))
         # 审计(2026-09-13)·坏键所自动摘除：execution_open 只看旗标——gate 旗开着
         # 但密钥已死时仍会以最低费率赢下评分，信号派过去死在下单阶段白白烧掉
         # （且外所回收侧只能吼 CRITICAL 跳过）。回收枚举在周期开头已实测凭证生死，

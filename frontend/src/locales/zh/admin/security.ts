@@ -105,6 +105,13 @@ export const zhAdminSecurity = {
   sandboxTag: '沙盒',
   noHealthData: '尚无周期数据，等待下个 15 分钟周期。',
   poolTitle: '交易标的池',
+  venuePoolsTitle: '三所独立永续合约池',
+  venuePoolsDesc: '每个交易所单独维护可参与撮合的 USDT 永续合约；同一合约可同时勾选多个交易所，最终由撮合路由策略选所。',
+  venuePoolHint: '勾选后才允许该所参与该合约的执行',
+  venuePoolCount: '已选 {count} 个合约',
+  savePool: '保存该所池',
+  toastPoolSaved: '{venue} 永续合约池已保存',
+
   poolDesc: 'USDT 永续合约标的池管理。',
   instPlaceholder: '例如: XRP-USDT-SWAP',
   addInstrument: '添加标的',

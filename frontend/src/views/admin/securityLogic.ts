@@ -46,6 +46,7 @@ export interface VenueLike {
 
 export interface MxLike {
   venues?: Record<string, VenueLike | undefined>
+  okx_execution_open?: boolean
   health?: { venues?: Record<string, { ok?: unknown[]; failed?: Record<string, unknown>; avg_ms?: number; testnet?: boolean }> }
 }
 
@@ -85,7 +86,7 @@ export function deriveBinanceExecDirty(binanceExec: boolean, mx: MxLike | null |
 
 /** OKX 执行闸开关是否有未保存改动。 */
 export function deriveOkxExecDirty(okxExec: boolean, mx: MxLike | null | undefined): boolean {
-  return okxExec !== !!mx?.venues?.okx?.execution_open
+  return okxExec !== !!mx?.okx_execution_open
 }
 
 /** 三所状态徽章：**未知一律 warn，不升级为已就绪**。 */

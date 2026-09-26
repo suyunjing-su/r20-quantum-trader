@@ -56,6 +56,10 @@ class MultiExchangeUpdate(BaseModel):
     okx_environment: str | None = None     # OKX 资金环境：demo|live
     preferred_venue: str | None = None  # 全局路由首选：okx|binance|gate|auto
     routing_mode: str | None = None     # 选所路由模式：auto|balanced|split
+    # 三所独立 USDT 永续合约池；允许同一合约同时出现在多个池，由撮合路由策略选所。
+    okx_instruments: list[str] | None = None
+    binance_instruments: list[str] | None = None
+    gate_instruments: list[str] | None = None
     confirmation: str = ""               # 变更执行开关必须精确确认短语
 
 

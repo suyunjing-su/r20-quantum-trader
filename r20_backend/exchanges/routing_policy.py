@@ -105,6 +105,40 @@ def _normalize_assets(raw_assets: Any, venue: str) -> List[str]:
     return out
 
 
+def _normalize_instruments(raw_instruments: Any, venue: str) -> List[str]:
+    """规范化某交易所的 USDT 永续合约池。
+
+    新配置保存完整的 ``BTC-USDT-SWAP`` 合约 ID，避免只保存裸币名后无法
+    表达「三所各自的永续合约池」。非法条目 fail-closed 丢弃并记录告警。
+    """
+    if raw_instruments in (None, ""):
+        return []
+    items = ([raw_instruments] if isinstance(raw_instruments, str)
+             else list(raw_instruments) if isinstance(raw_instruments, (list, tuple, set))
+             else None)
+    if items is None:
+        print(f"[routing_policy] warn {venue} 的 instruments 不是字符串或列表，已按空池处理")
+        return []
+    out: List[str] = []
+    for item in items:
+        token = str(item or "").strip().upper()
+        if not _INSTRUMENT_ID_RE.fullmatch(token):
+            print(f"[routing_policy] warn {venue} 的 instruments 项 {item!r} 不是合法 USDT 永续合约，已丢弃")
+            continue
+        if token not in out:
+            out.append(token)
+    return sorted(out)
+
+
+def _pool_instrument_for_venue(inst_id: str, venue: str) -> str:
+    """将 canonical/任意合约写法归一为该所池使用的 OKX-style 合约 ID。"""
+    raw = str(inst_id or "").strip().upper()
+    if _INSTRUMENT_ID_RE.fullmatch(raw):
+        return raw
+    base = raw.split("-")[0]
+    return f"{base}-USDT-SWAP" if base else ""
+
+
 def load_venue_pool(venue: str) -> Dict[str, Any]:
     """统一多所池配置加载：优先读取各所覆盖项，缺省自动继承全局风控单一事实源。"""
     vkey = str(venue or "").strip().lower()
@@ -124,6 +158,9 @@ def load_venue_pool(venue: str) -> Dict[str, Any]:
                 for k in ("assets", "dry_run"):
                     if k in v_cfg:
                         base_pool[k] = v_cfg[k]
+                # 新版以完整合约 ID 为池粒度；保留 assets 读取兼容旧配置。
+                if "instruments" in v_cfg:
+                    base_pool["instruments"] = _normalize_instruments(v_cfg.get("instruments"), vkey)
                 # 审计 P2-10：assets 旧实现直接拿配置值去迭代 → 写成字符串 "BTC" 时
                 # 会变成 ['B','C','T']，于是"准入币种"静默变成三个单字母垃圾。
                 base_pool["assets"] = _normalize_assets(base_pool.get("assets"), vkey)
@@ -135,6 +172,10 @@ def load_venue_pool(venue: str) -> Dict[str, Any]:
         pass
     assets = [str(a).upper() for a in (base_pool.get("assets") or []) if str(a).strip()]
     base_pool["assets"] = sorted(set(assets))
+    if base_pool.get("instruments") is not None:
+        base_pool["instruments"] = sorted(set(base_pool.get("instruments") or []))
+        # 旧执行器仍读取 assets；让新池同时提供 canonical 裸币兼容视图。
+        base_pool["assets"] = sorted({item.split("-", 1)[0] for item in base_pool["instruments"]})
     try:
         base_pool["margin_per_trade_usdt"] = max(0.0, float(base_pool.get("margin_per_trade_usdt") or defaults["margin_per_trade_usdt"]))
         base_pool["max_open"] = max(1, int(base_pool.get("max_open") or defaults["max_open"]))
@@ -145,6 +186,49 @@ def load_venue_pool(venue: str) -> Dict[str, Any]:
         base_pool["dry_run"] = True
     return base_pool
 
+
+def venue_pool_instruments(venue: str) -> List[str]:
+    """返回某所池的完整合约视图；老 assets 配置也转换成 OKX-style 合约 ID。"""
+    pool = load_venue_pool(venue)
+    if pool.get("instruments") is not None:
+        return list(pool.get("instruments") or [])
+    return [f"{str(asset).upper()}-USDT-SWAP" for asset in (pool.get("assets") or [])]
+
+
+def venue_pool_allows(venue: str, inst_id: str) -> bool:
+    """按完整合约池判断准入；老 assets 配置继续按裸币名判断。"""
+    pool = load_venue_pool(venue)
+    if pool.get("instruments") is not None:
+        return _pool_instrument_for_venue(inst_id, venue) in set(pool.get("instruments") or [])
+    assets = set(pool.get("assets") or [])
+    return not assets or _pool_instrument_for_venue(inst_id, venue).split("-", 1)[0] in assets
+
+
+def save_venue_pool(venue: str, instruments: Any) -> List[str]:
+    """原子保存某所永续合约池，不改变其它所、凭证或路由设置。"""
+    vkey = str(venue or "").strip().lower()
+    if vkey not in POOL_VENUES:
+        raise ValueError(f"未知交易所：{venue}")
+    normalized = _normalize_instruments(instruments, vkey)
+    data = _read_raw_routing()
+    v_cfg = data.get(vkey) if isinstance(data.get(vkey), dict) else {}
+    v_cfg["instruments"] = normalized
+    # 保留旧消费者的裸币视图，但路由决策优先使用 instruments。
+    v_cfg["assets"] = sorted({item.split("-", 1)[0] for item in normalized})
+    data[vkey] = v_cfg
+    tmp = ROUTING_FILE.with_suffix(".json.tmp")
+    try:
+        ROUTING_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+        os.replace(tmp, ROUTING_FILE)
+    except Exception:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except Exception:
+            pass
+        raise
+    return normalized
 
 def load_gate_pool() -> Dict[str, Any]:
     return load_venue_pool("gate")
@@ -189,6 +273,8 @@ VALID_PREFERRED_VENUES = tuple(sorted(set(registered_venues()) | {"auto"}))
 
 #: 选所路由模式（架构 A/B/C 三档；split 执行面接线前仅在证据中给出拆单方案）
 VALID_ROUTING_MODES = ("auto", "balanced", "split")
+POOL_VENUES = ("okx", "binance", "gate")
+_INSTRUMENT_ID_RE = re.compile(r"^[A-Z0-9]{2,15}-USDT-SWAP$")
 
 
 def load_preferred_venue(raw: Dict[str, Any] = None) -> str:

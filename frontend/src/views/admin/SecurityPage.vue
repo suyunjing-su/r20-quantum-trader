@@ -23,7 +23,7 @@
  *   DELETE /api/v1/admin/instruments/{instId}
  *
  * ⚠️ 高风险门禁逐字保留：切 LIVE 需逐字 `LIVE`；改本金需超管 + 逐字 `UPDATE CAPITAL`；
- *    删标的需逐字 `REMOVE <instId>`；Gate 开闸需短语；平仓需管理员密码 + 令牌短语。
+ *    删标的需逐字 `REMOVE <instId>`；三所执行开关变更需对应短语；平仓需管理员密码 + 令牌短语。
  * ⚠️ 派生逻辑仍全部来自 `./securityLogic.ts`（未触碰）。
  */
 import { useToast } from '../../composables/useToast'
@@ -39,7 +39,7 @@ import { useApi } from '../../composables/useApi'
 import { useAuthStore } from '../../stores/auth'
 import { fmtDateTime } from '../../utils/format'
 import {
-  deriveOkxLinked, deriveMxHealthChips, deriveGateExecDirty, deriveBinanceExecDirty,
+  deriveOkxLinked, deriveMxHealthChips, deriveGateExecDirty, deriveBinanceExecDirty, deriveOkxExecDirty,
   venueStatus, envTextOf, okxEnvText as okxEnvTextOf, envBadge,
 } from './securityLogic'
 import VenueCredentialCard from '../../components/admin/page-parts/VenueCredentialCard.vue'
@@ -130,6 +130,10 @@ const gateExec = ref(false)
 const gateExecPhrase = ref('')
 const binanceExec = ref(false)
 const binanceExecPhrase = ref('')
+const okxExec = ref(false)
+const okxExecPhrase = ref('')
+const venuePools = ref<Record<'okx' | 'binance' | 'gate', string[]>>({ okx: [], binance: [], gate: [] })
+const savingPool = ref<'okx' | 'binance' | 'gate' | ''>('')
 const okxCredViewLive = ref(false)
 const venueLatencies = ref<Record<string, number>>({})
 const savingMx = ref(false)
@@ -197,9 +201,16 @@ async function saveEnvironment() {
     if (keys.value.demo_secret) body.okx_demo_secret_key = keys.value.demo_secret
     if (keys.value.demo_pass) body.okx_demo_passphrase = keys.value.demo_pass
     await api('/api/v1/admin/config', { method: 'PUT', body: JSON.stringify(body) })
+    if (okxExecDirty.value) {
+      await api('/api/v1/admin/multi-exchange', {
+        method: 'PUT',
+        body: JSON.stringify({ okx_execution: okxExec.value, confirmation: okxExecPhrase.value.trim() }),
+      })
+      okxExecPhrase.value = ''
+    }
     keys.value = { live_key: '', live_secret: '', live_pass: '', demo_key: '', demo_secret: '', demo_pass: '' }
     toast.ok(t('admin.security.toastEnvSaved', undefined, { env: environment.toUpperCase() }))
-    await loadAll()
+    await Promise.all([loadAll(), loadMx()])
   } catch (e: any) {
     toast.err(t('admin.security.errSaveFailed', undefined, { msg: e.message }))
   } finally {
@@ -342,6 +353,12 @@ async function loadMx() {
       gateExec.value = !!mx.value.venues.gate?.execution_open
       binanceExec.value = !!mx.value.venues.binance?.execution_open
     }
+    okxExec.value = !!mx.value?.okx_execution_open
+    venuePools.value = {
+      okx: Array.isArray(mx.value?.pools?.okx) ? [...mx.value.pools.okx] : [],
+      binance: Array.isArray(mx.value?.pools?.binance) ? [...mx.value.pools.binance] : [],
+      gate: Array.isArray(mx.value?.pools?.gate) ? [...mx.value.pools.gate] : [],
+    }
     if (mx.value?.health?.venues) {
       for (const [k, v] of Object.entries(mx.value.health.venues as Record<string, any>)) {
         if (v?.avg_ms) {
@@ -433,7 +450,7 @@ async function saveRouting() {
   }
 }
 
-/** 逐所保存凭证与档位：只提交本所键位，留空即不改；Gate / Binance 承载执行总闸。 */
+/** 逐所保存凭证与档位：只提交本所键位，留空即不改；三所均承载执行总闸。 */
 async function saveVenue(venue: 'binance' | 'gate') {
   savingVenue.value = venue
   try {
@@ -471,6 +488,29 @@ async function saveVenue(venue: 'binance' | 'gate') {
   }
 }
 
+async function saveVenuePool(venue: 'okx' | 'binance' | 'gate') {
+  savingPool.value = venue
+  try {
+    await api('/api/v1/admin/multi-exchange', {
+      method: 'PUT',
+      body: JSON.stringify({ [`${venue}_instruments`]: venuePools.value[venue] }),
+    })
+    toast.ok(t('admin.security.toastPoolSaved', undefined, { venue: venue.toUpperCase() }))
+    await loadMx()
+  } catch (e: any) {
+    toast.err(t('admin.security.errSaveFailed', undefined, { msg: e.message }))
+  } finally {
+    savingPool.value = ''
+  }
+}
+
+function toggleVenueInstrument(venue: 'okx' | 'binance' | 'gate', instId: string) {
+  const current = venuePools.value[venue]
+  venuePools.value[venue] = current.includes(instId)
+    ? current.filter(item => item !== instId)
+    : [...current, instId].sort()
+}
+
 // ---- 总览派生（纯计算，零请求） ----
 // 显示派生逻辑已抽至 ./securityLogic.ts（阶段 4·B3 第三十四刀）——
 // 纯函数、可脱离组件单测；此处只保留响应式包装。
@@ -478,6 +518,7 @@ const okxLinked = computed(() => deriveOkxLinked(runtime.value))
 const mxHealthChips = computed(() => deriveMxHealthChips(mx.value))
 const gateExecDirty = computed(() => deriveGateExecDirty(gateExec.value, mx.value))
 const binanceExecDirty = computed(() => deriveBinanceExecDirty(binanceExec.value, mx.value))
+const okxExecDirty = computed(() => deriveOkxExecDirty(okxExec.value, mx.value))
 
 const binanceStatus = computed(() => venueStatus('binance', mx.value, t))
 const gateStatus = computed(() => venueStatus('gate', mx.value, t))
@@ -750,6 +791,22 @@ onMounted(() => { loadAll(); loadMx() })
               </div>
 
               <template #extra>
+                <div class="sc-gate">
+                  <label class="sc-check" :class="{ 'is-danger': okxExec }">
+                    <BaseSwitch v-model="okxExec" :label="t('admin.security.okxMaster')" />
+                    <span>
+                      {{ t('admin.security.okxMaster') }}
+                      <b>{{ okxExec ? t('admin.security.okxMasterOpen') : t('admin.security.okxMasterClosed') }}</b>
+                    </span>
+                  </label>
+                  <input
+                    v-if="okxExecDirty"
+                    v-model="okxExecPhrase"
+                    :aria-label="t('admin.security.okxExecPhraseAria')"
+                    :placeholder="t('admin.security.okxPhrasePlaceholder')"
+                    class="field mono"
+                  />
+                </div>
                 <div class="sc-channel-box">
                   <div class="sc-channel-row">
                     <span class="sc-channel-label">{{ t('admin.security.okxBrokerTagLabel') }}</span>
@@ -818,7 +875,7 @@ onMounted(() => { loadAll(); loadMx() })
                     </span>
                   </label>
                   <input
-                    v-if="binanceExecDirty && binanceExec"
+                    v-if="binanceExecDirty"
                     v-model="binanceExecPhrase"
                     :aria-label="t('admin.security.binanceExecPhraseAria')"
                     :placeholder="t('admin.security.binancePhrasePlaceholder')"
@@ -880,7 +937,7 @@ onMounted(() => { loadAll(); loadMx() })
                     </span>
                   </label>
                   <input
-                    v-if="gateExecDirty && gateExec"
+                    v-if="gateExecDirty"
                     v-model="gateExecPhrase"
                     :aria-label="t('admin.security.gateExecPhraseAria')"
                     :placeholder="t('admin.security.gatePhrasePlaceholder')"
@@ -994,6 +1051,36 @@ onMounted(() => { loadAll(); loadMx() })
           </div>
 
           <p class="sc-hint pad">{{ t('admin.security.capitalFooter') }}</p>
+        </SettingsSection>
+
+        <SettingsSection :title="t('admin.security.venuePoolsTitle')" :description="t('admin.security.venuePoolsDesc')" :icon="Route">
+          <div class="sc-venue-pools">
+            <article v-for="venue in (['okx', 'binance', 'gate'] as const)" :key="venue" class="sc-venue-pool">
+              <div class="sc-venue-pool-head">
+                <div>
+                  <b>{{ venue.toUpperCase() }}</b>
+                  <span class="sc-hint">{{ t('admin.security.venuePoolHint') }}</span>
+                </div>
+                <button type="button" class="btn btn-primary btn-sm" :disabled="savingPool !== ''" @click="saveVenuePool(venue)">
+                  <Loader2 v-if="savingPool === venue" :size="12" class="animate-spin shrink-0" />
+                  <Save v-else :size="12" />
+                  {{ savingPool === venue ? t('admin.security.saving') : t('admin.security.savePool') }}
+                </button>
+              </div>
+              <div class="sc-pool-options">
+                <label v-for="item in instruments" :key="`${venue}-${item.instId}`" class="sc-pool-option">
+                  <input
+                    type="checkbox"
+                    :checked="venuePools[venue].includes(item.instId)"
+                    @change="toggleVenueInstrument(venue, item.instId)"
+                  />
+                  <span class="mono">{{ item.instId }}</span>
+                </label>
+                <span v-if="!instruments.length" class="sc-hint">{{ t('admin.security.poolEmpty') }}</span>
+              </div>
+              <p class="sc-pool-count">{{ t('admin.security.venuePoolCount', undefined, { count: venuePools[venue].length }) }}</p>
+            </article>
+          </div>
         </SettingsSection>
 
         <SettingsSection :title="t('admin.security.poolTitle')" :description="t('admin.security.poolDesc')" :icon="Layers">
@@ -1451,6 +1538,59 @@ onMounted(() => { loadAll(); loadMx() })
 }
 
 /* ══ 行式清单 ══ */
+
+.sc-venue-pools {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--ds-space-3);
+}
+.sc-venue-pool {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: var(--ds-space-3);
+  border: 1px solid var(--ds-color-border-default);
+  border-radius: var(--r-ctl);
+  background: var(--ds-color-bg-surface-inset);
+}
+.sc-venue-pool-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+.sc-venue-pool-head > div {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.sc-pool-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 220px;
+  overflow: auto;
+}
+.sc-pool-option {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: var(--text-4xs);
+}
+.sc-pool-option input {
+  accent-color: var(--ds-color-brand);
+}
+.sc-pool-count {
+  margin: 0;
+  color: var(--ds-color-text-placeholder);
+  font-size: var(--text-4xs);
+}
+@media (max-width: 900px) {
+  .sc-venue-pools {
+    grid-template-columns: 1fr;
+  }
+}
+
 .sc-rows {
   display: flex;
   flex-direction: column;

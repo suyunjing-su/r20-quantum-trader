@@ -79,10 +79,25 @@ def _venue_pool_assets(venue: str) -> Optional[List[str]]:
             RuntimeWarning,
         )
         return None
-    assets = pool.get("assets") if isinstance(pool, dict) else None
+    if not isinstance(pool, dict):
+        return None
+    # 新版池按完整 OKX-style 永续合约 ID 保存；None 只代表老配置未启用
+    # 合约池。明确保存为空列表时返回 []，调用方会淘汰该所而不会误发。
+    if pool.get("instruments") is not None:
+        return [str(a).strip().upper() for a in pool.get("instruments") or [] if str(a).strip()]
+    assets = pool.get("assets")
     if not assets:
         return None
     return [str(a).strip().upper() for a in assets if str(a).strip()]
+
+
+def _venue_pool_uses_instruments(venue: str) -> bool:
+    """区分「旧 assets 兼容池」与「新版完整合约池」，包括明确的空池。"""
+    try:
+        from ..exchanges.routing_policy import load_venue_pool
+        return load_venue_pool(venue).get("instruments") is not None
+    except Exception:
+        return False
 
 
 def _parse_iso_utc(ts: str) -> Optional[float]:
@@ -153,9 +168,16 @@ def _hard_filters(signal: Dict[str, Any], cand: Dict[str, Any],
     # 清单非空且标的不在其中的所，路由阶段就淘汰 —— 否则会选出一个**注定被
     # 执行层拒单**的所，而 route_signal 选中即不回退 ⇒ 主脑发单全灭。
     pool_assets = _venue_pool_assets(venue)
-    if pool_assets:
+    if pool_assets is not None:
         pool_asset = _canonical_base(raw_sym)
-        if pool_asset and pool_asset not in pool_assets:
+        if _venue_pool_uses_instruments(venue):
+            # raw_sym 统一成 OKX-style 合约 ID；同一合约在多个所的池中出现时，
+            # 保留所有合格候选，交给 routing_mode / preferred_venue 决定撮合所。
+            pool_inst = raw_sym.upper() if "-USDT-SWAP" in raw_sym.upper() else f"{pool_asset}-USDT-SWAP"
+            if pool_inst not in pool_assets:
+                fails.append(
+                    f"不在 {venue.upper()} 永续合约池（{', '.join(pool_assets) or '池为空'}）")
+        elif pool_asset and pool_asset not in pool_assets:
             fails.append(
                 f"不在 {venue.upper()} 准入币种清单（{', '.join(pool_assets)}）")
 

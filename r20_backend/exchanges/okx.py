@@ -30,6 +30,9 @@ class OKXPublicAdapter(BaseExchangeAdapter):
         has_taker_ratio=True,
         supports_account=True,
         supports_orders=True,
+        # OKX 直签执行链路也使用统一的执行总闸，允许后台选择
+        # 「可交易」或「仅混合参考行情」。
+        adapter_execution_flag="R20_OKX_EXECUTION",
         mainland_ip_restricted=False,
         rate_limit_note="公共行情约 20req/2s，429 常见需退避",
         order_id_type="string",

@@ -267,7 +267,12 @@ def admin_multi_exchange_status(x_r20_admin_token: str | None = Header(default=N
     pref = routing_policy.load_preferred_venue()
     return {"venues": venues, "health": health, "preferred_venue": pref,
             "routing_mode": routing_policy.load_routing_mode(),
-            "accounts_status": accounts_status}
+            "accounts_status": accounts_status,
+            # OKX 仍不进入旧版通用 venues/账户字段，但暴露统一执行总闸状态。
+            "okx_execution_open": execution_open("okx", okx_env.mode),
+            # 三所各自的完整 USDT 永续合约池；同一合约可同时存在于多个池。
+            "pools": {venue: routing_policy.venue_pool_instruments(venue)
+                      for venue in ("okx", "binance", "gate")}}
 
 
 @router.put("/api/v1/admin/multi-exchange")
@@ -335,6 +340,19 @@ def admin_multi_exchange_update(payload: MultiExchangeUpdate,
             raise HTTPException(
                 status_code=400,
                 detail=f"非法 routing_mode，允许 {list(routing_policy.VALID_ROUTING_MODES)}")
+    pool_updates = {
+        "okx": payload.okx_instruments,
+        "binance": payload.binance_instruments,
+        "gate": payload.gate_instruments,
+    }
+    if any(items is not None for items in pool_updates.values()):
+        from r20_backend.exchanges import routing_policy
+        try:
+            for venue, items in pool_updates.items():
+                if items is not None:
+                    routing_policy.save_venue_pool(venue, items)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     try:
         from r20_backend.exchanges import clear_instances
         clear_instances()
@@ -346,6 +364,7 @@ def admin_multi_exchange_update(payload: MultiExchangeUpdate,
         "env_updated": sorted(env_values.keys()),
         "preferred_venue": payload.preferred_venue,
         "routing_mode": payload.routing_mode,
+        "pool_updates": sorted(venue for venue, items in pool_updates.items() if items is not None),
     })
     refresh_settings()
     return {"ok": True, "saved_secret_keys": sorted(secret_values.keys())}

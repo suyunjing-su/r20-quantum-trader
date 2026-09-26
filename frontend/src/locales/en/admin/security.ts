@@ -104,6 +104,13 @@ export const enAdminSecurity = {
   sandboxTag: 'sandbox',
   noHealthData: 'No cycle data yet; waiting for the next 15-minute cycle.',
   poolTitle: 'Trading symbol pool',
+  venuePoolsTitle: 'Independent perpetual pools',
+  venuePoolsDesc: 'Maintain a separate USDT perpetual pool for each venue. A contract may be selected on multiple venues and the routing strategy decides where to execute.',
+  venuePoolHint: 'Only checked contracts may execute on this venue',
+  venuePoolCount: '{count} contracts selected',
+  savePool: 'Save venue pool',
+  toastPoolSaved: '{venue} perpetual pool saved',
+
   poolDesc: 'Manage the USDT perpetual symbol pool.',
   instPlaceholder: 'e.g. XRP-USDT-SWAP',
   addInstrument: 'Add symbol',

@@ -34,8 +34,8 @@ _ADAPTERS: Dict[str, type] = {
 }
 
 # 经「适配器」下单的场所开闸——G9 统一后不再手工维护双源：单一事实 =
-# 各所能力表 ``adapter_execution_flag`` 声明（gate 已声明；okx 实盘执行走
-# ai_factor_trader 直签链路、binance orders 未实装 → 均未声明，恒关）。
+# 各所能力表 ``adapter_execution_flag`` 声明；OKX 的实际下单仍走
+# ai_factor_trader V5 直签链路，但共享同一把 R20_OKX_EXECUTION 总闸。
 # 本映射仅为向后兼容再导出保留，由能力表推导，勿再手改。
 ADAPTER_EXECUTION_ENABLED: Dict[str, bool] = {}
 
@@ -51,8 +51,8 @@ def execution_open(venue: str, environment: str = "live") -> bool:
     """场所执行开闸的统一判定（运行时读 env，支持热切换无需改码）。
 
     G9 单源判定 = 能力表 ``adapter_execution_flag`` 声明 AND 环境双轴旗标：
-    - 能力表未声明旗标（okx 实盘走 ai_factor_trader 直签链路）→ 结构性恒关，
-      与 env 无关；binance/gate 均已声明（US-005 起三家执行面平权）；
+    - OKX 与 Binance/Gate 均声明独立执行旗标；OKX 的直签链路只使用同一把
+      R20_OKX_EXECUTION，不复制 DEMO_EXECUTION 变体；
     - 已声明（gate/binance）：live 档读声明旗标原样，沙盒档（sandbox/demo/testnet）
       读 ``<前缀>DEMO_EXECUTION`` 变体（R20_GATE_EXECUTION→R20_GATE_DEMO_
       EXECUTION）——打开只放行**模拟盘真实发送**，绝不标示/充当 LIVE 实盘。
@@ -63,6 +63,10 @@ def execution_open(venue: str, environment: str = "live") -> bool:
     base_flag = getattr(getattr(cls, "capabilities", None), "adapter_execution_flag", "")
     if not base_flag:
         return False
+    # OKX 的 V5 直签账户当前只维护一把统一开关；环境切换只改变
+    # 凭证/端点，不复制出另一把容易被误配的 DEMO_EXECUTION 闸。
+    if key == "okx":
+        return _env_on(base_flag)
     if is_sandbox_environment(environment):
         return _env_on(base_flag.replace("EXECUTION", "DEMO_EXECUTION"))
     return _env_on(base_flag)

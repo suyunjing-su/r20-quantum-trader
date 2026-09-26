@@ -66,9 +66,8 @@ def _exposure_venues(venue: str, environment: Optional[str]):
     判据 = **凭证已配置**（本部署是否在这里有账户），注册表驱动、不硬编码。
 
     ⚠️ 为什么**不用** `execution_open` 判（本刀实测踩到的第二处坑）：
-    OKX 走的是 `ai_factor_trader` 直签链路，能力表里**没有**声明
-    `adapter_execution_flag` ⇒ `execution_open("okx")` **结构性恒 False**
-    （见 `registry.execution_open` 文档）。而 OKX 恰恰是持仓最多的那一所
+    跨所敞口统计不能因为某所当前关闸就漏掉它的存量持仓；OKX 走
+    `ai_factor_trader` 直签链路但也受 R20_OKX_EXECUTION 总闸控制，恰恰是持仓最多的那一所
     （实盘日志「持仓 OKX 1/9｜跨所 4 笔」）。若按开闸判，跨所敞口会**把 OKX 整个漏掉**
     —— 本机实测第一版就是这样：只统计到 binance 的 726U，而 OKX 在持仓位完全没算。
 
@@ -300,11 +299,18 @@ def open_protected_position(decision: Dict[str, Any], *,
             return _fail("venue_dry_run",
                          f"{venue.upper()} 池配置 dry_run=true（本地演算不发单）；"
                          f"如需真实发送请改 data/venue_routing.json 并确认执行开关", venue=venue)
-        pool_assets = [str(a).upper() for a in (pool.get("assets") or [])]
-        if not pool_assets:
-            return _fail("venue_pool", f"{venue.upper()} 准入币种清单为空（空池=不发单）", venue=venue)
-        if asset.upper() not in pool_assets:
-            return _fail("venue_pool", f"{asset} 不在 {venue.upper()} 准入币种清单（{', '.join(pool_assets)}）", venue=venue)
+        pool_instruments = pool.get("instruments") if isinstance(pool, dict) else None
+        if pool_instruments is not None:
+            inst_id = str(decision.get("inst_id") or decision.get("instId") or f"{asset}-USDT-SWAP").strip().upper()
+            allowed = {str(item).strip().upper() for item in pool_instruments}
+            if inst_id not in allowed:
+                return _fail("venue_pool", f"{inst_id} 不在 {venue.upper()} 永续合约池（{', '.join(sorted(allowed)) or '池为空'}）", venue=venue)
+        else:
+            pool_assets = [str(a).upper() for a in (pool.get("assets") or [])]
+            if not pool_assets:
+                return _fail("venue_pool", f"{venue.upper()} 准入币种清单为空（空池=不发单）", venue=venue)
+            if asset.upper() not in pool_assets:
+                return _fail("venue_pool", f"{asset} 不在 {venue.upper()} 准入币种清单（{', '.join(pool_assets)}）", venue=venue)
         pool_conf = float(pool.get("min_confidence") or 0.0)
         try:
             decision_conf = float(decision.get("confidence") or 0.0)
