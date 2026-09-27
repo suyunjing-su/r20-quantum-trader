@@ -4,6 +4,10 @@ export interface AccountSummary {
 
   total_eq: number
   avail_eq: number
+  // 该快照取自哪一档（`dashboard_cache.py` 按 OKX 实际档位写入 "demo"/"live"）。
+  // 消费点：`KpiRibbon` 的单所回落闸 —— 快照档位必须与用户所选档位一致，
+  // 否则会把模拟盘余额当成实盘总权益显示。
+  environment?: string
   cash_bal?: number
   upl?: number
   pos_upl_total?: number
@@ -247,6 +251,9 @@ export interface DashboardResponse {
   ai_brain_history?: any[]
   data_health?: any
   state_snapshot?: any
+  environment?: 'demo' | 'live'
+  venue_environments?: Record<string, string>
+  is_mixed_environment?: boolean
   /** US-004 · 组合风险占用（预算/已预留/可用余量；未接入时为缺省） */
   portfolio_risk?: PortfolioRiskRow | null
   [key: string]: any

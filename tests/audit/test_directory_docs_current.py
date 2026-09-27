@@ -12,7 +12,7 @@
 |---|---|
 | `scripts/trader/` | `position_universe.py`（第三十一刀新增） |
 | `scripts/factors/` | `scoring.py`、`candles_15m.py`（第二十九/三十二刀新增） |
-| `r20_backend/council/` | 完全没有模块清单 |
+| `astra_backend/council/` | 完全没有模块清单 |
 | `scripts/ledger/` | 完全没有模块清单 |
 
 而且**没有任何测试会红** —— 文档腐烂是静默的。等到有人照着清单找模块时才发现。
@@ -45,31 +45,31 @@ ROOT = Path(__file__).resolve().parents[2]
 #: 受管子包 → 该子包的文件名出现形式。
 #: `allowed_extra` 是在文档里**有意**提到但不在本目录的文件（如门面、测试）。
 #: `docs` 是"登记名册"的额外来源 —— 有些子包把清单写在 README 而不是 __init__.py
-#: （`dashboard_payload/` 就是：它的总约定在 r20_backend/README.md）。
+#: （`dashboard_payload/` 就是：它的总约定在 astra_backend/README.md）。
 MANAGED = {
     "scripts/trader": {"allowed_extra": set()},
     "scripts/brain": {"allowed_extra": {"ai_brain_trader.py"}},
     "scripts/factors": {"allowed_extra": {"factor_library.py"}},
     "scripts/ledger": {"allowed_extra": {"sync_full_ledger.py"}},
-    "r20_backend/council": {"allowed_extra": {"council_manager.py"}},
+    "astra_backend/council": {"allowed_extra": {"council_manager.py"}},
     # 第五十九刀补登记：本子包此前**不在受管名单**里（.py 文件靠 __init__ 的
     # 项目符号清单导航）。既然已有该约定，顺手纳入监管，防止新模块漏登记。
-    "r20_backend/exchanges": {"allowed_extra": set()},
-    "r20_backend/dashboard_payload": {
+    "astra_backend/exchanges": {"allowed_extra": set()},
+    "astra_backend/dashboard_payload": {
         "allowed_extra": {"dashboard.py", "app.py"},
-        "docs": ["r20_backend/README.md"],
+        "docs": ["astra_backend/README.md"],
     },
     # 第三十八刀补登记：`execution_router.py::open_protected_position` 的风控闸门
     # 抽成 `risk_gates.py` 后才发现本子包**此前根本不在受管名单里** ——
     # 也就是说 `indicators.py` / `sizing.py` / `circuit_breaker.py` 烂了文档也没人管。
     # 顺手纳入。
-    "r20_backend/execution": {"allowed_extra": {"execution_router.py"}},
+    "astra_backend/execution": {"allowed_extra": {"execution_router.py"}},
     # 第三十九刀新增：回测引擎的成块领域逻辑外提（门面仍是单文件 backtest_engine.py）。
     "scripts/backtest": {"allowed_extra": {"backtest_engine.py"}},
     # 第四十二刀新增：自进化引擎的可观测性聚簇外提。
     "scripts/evolution": {"allowed_extra": {"self_improvement_engine.py"}},
     # 第四十三刀新增：选所质量域外提（门面仍是单文件 venue_router.py）。
-    "r20_backend/venue_routing": {"allowed_extra": {"venue_router.py"}},
+    "astra_backend/venue_routing": {"allowed_extra": {"venue_router.py"}},
     # 第四十四刀新增：快讯纯判断逻辑外提（门面仍是 news_sentiment_harvester.py）。
     "scripts/news": {"allowed_extra": {"news_sentiment_harvester.py"}},
     # 第四十五刀新增：微积分引擎实现外提（门面仍只做再导出）。
@@ -89,7 +89,7 @@ def _doc_names(init_py: Path, extra_docs: list[str] | None = None) -> set[str]:
     """该子包**登记名册**里提到的所有 `xxx.py`。
 
     名册来源 = `__init__.py` 文档串 + 任意 `docs` 里的 Markdown。
-    （`dashboard_payload/` 的清单写在 `r20_backend/README.md` —— 那里才是
+    （`dashboard_payload/` 的清单写在 `astra_backend/README.md` —— 那里才是
     新人会去翻的地方，所以在 README 里登记是合理的，不该被本测试判为漏登记。）
     """
     tree = ast.parse(init_py.read_text(encoding="utf-8"))
@@ -156,7 +156,7 @@ class DirectoryDocsTest(unittest.TestCase):
     def test_manifest_tables_are_present(self):
         """受管子包的文档串里应有一张「模块清单」表（便于"新文件放哪"）。"""
         for rel in ("scripts/trader", "scripts/brain", "scripts/factors",
-                    "scripts/ledger", "r20_backend/council"):
+                    "scripts/ledger", "astra_backend/council"):
             init = ROOT / rel / "__init__.py"
             doc = ast.get_docstring(ast.parse(init.read_text(encoding="utf-8"))) or ""
             with self.subTest(pkg=rel):
@@ -172,11 +172,11 @@ class DirectoryDocsTest(unittest.TestCase):
 class RootLevelModulesRegisteredTest(unittest.TestCase):
     """⚠️ 第六十五刀补：**根层模块**此前不在任何门禁里。
 
-    `MANAGED` 只覆盖**子包**，而 `r20_backend/*.py`（根层，38 个）靠
-    `r20_backend/README.md` 的 §L3/§L4 表格导航 —— 那张表**没有任何测试看着**。
+    `MANAGED` 只覆盖**子包**，而 `astra_backend/*.py`（根层，38 个）靠
+    `astra_backend/README.md` 的 §L3/§L4 表格导航 —— 那张表**没有任何测试看着**。
 
-    后果实测：第四十九刀抽出的 `r20_backend/redact.py` 与
-    第五十一刀抽出的 `r20_backend/math_utils.py` **从未登记进 README**，
+    后果实测：第四十九刀抽出的 `astra_backend/redact.py` 与
+    第五十一刀抽出的 `astra_backend/math_utils.py` **从未登记进 README**，
     直到本刀才发现。而这两刀恰恰就是"新增模块"的操作 ——
     **说明这个洞一直在漏**。
 
@@ -184,9 +184,9 @@ class RootLevelModulesRegisteredTest(unittest.TestCase):
     反向也查（README 提到的 `.py` 必须真实存在，避免把人引到死路）。
     """
 
-    README = ROOT / "r20_backend" / "README.md"
+    README = ROOT / "astra_backend" / "README.md"
 
-    #: 文档里**有意**提到但不在 `r20_backend/` 根层的文件
+    #: 文档里**有意**提到但不在 `astra_backend/` 根层的文件
     #: （子包内的、以及作为门面被引用的上层脚本）。
     ALLOWED_EXTRA = {
         "dashboard.py", "app.py",                       # dashboard_payload 的门面
@@ -196,7 +196,7 @@ class RootLevelModulesRegisteredTest(unittest.TestCase):
     }
 
     def _disk_modules(self) -> set:
-        pkg = ROOT / "r20_backend"
+        pkg = ROOT / "astra_backend"
         return {p.name for p in pkg.glob("*.py")
                 if p.name != "__init__.py" and not p.name.startswith("_")}
 
@@ -225,7 +225,7 @@ class RootLevelModulesRegisteredTest(unittest.TestCase):
         missing = sorted(m for m in self._disk_modules() if m not in entries)
         self.assertEqual(
             missing, [],
-            f"这些 r20_backend/ 根层模块未登记在 {self.README.name} —— "
+            f"这些 astra_backend/ 根层模块未登记在 {self.README.name} —— "
             f"新增模块后请补进 §L3/§L4 的表格或 §L1/§L2 的列举: {missing}")
 
     def test_documented_root_names_exist(self):
@@ -236,7 +236,7 @@ class RootLevelModulesRegisteredTest(unittest.TestCase):
         dangling = sorted(
             n for n in referenced
             if n not in on_disk and n not in self.ALLOWED_EXTRA
-            and not any((ROOT / "r20_backend" / sub / n).exists()
+            and not any((ROOT / "astra_backend" / sub / n).exists()
                         for sub in ("dashboard_payload", "council", "execution",
                                     "exchanges", "routers", "llm", "policy",
                                     "sandbox", "venue_routing")))
@@ -269,7 +269,7 @@ class ScriptsRootModulesRegisteredTest(unittest.TestCase):
     README = ROOT / "scripts" / "README.md"
 
     #: 文档里**有意**提到但不在 `scripts/` 根层的文件
-    #: （子包内的部件、以及 `r20_backend/` 的兄弟模块）。
+    #: （子包内的部件、以及 `astra_backend/` 的兄弟模块）。
     ALLOWED_EXTRA = {
         "app.py", "dashboard.py", "ai_factor_trader.py",   # 提及的调用方/门面
     }
@@ -331,7 +331,16 @@ class ScriptsRootModulesRegisteredTest(unittest.TestCase):
         #    第一版没排除 → 误报 "['scripts']"。
         listed.discard("scripts")
         listed.discard(ROOT.name)
-        missing = sorted(s for s in listed if not (ROOT / "scripts" / s).is_dir())
+        # ⚠️ 还要排除**仓库根下的兄弟目录**：文档会正常引用它们
+        #    （`astra_backend/README.md`、前端/文档/部署目录说明）。
+        #    历史注记（2026-09-27）：旧名 `r20_backend` 含**数字**，`[a-z_]+` 根本
+        #    匹配不到，所以这个洞在改名成纯小写之前从未暴露；改成 `astra_backend`
+        #    的当天就假红了一次。判据改为"既不是 scripts/ 的子目录、也不是仓库根的
+        #    兄弟目录 ⇒ 才算文档列了不存在的子包"，对今后新增兄弟包也不再误伤。
+        sibling_dirs = {q.name for q in ROOT.iterdir() if q.is_dir()}
+        missing = sorted(s for s in listed
+                         if s not in sibling_dirs
+                         and not (ROOT / "scripts" / s).is_dir())
         self.assertEqual(missing, [], f"文档列了不存在的子包: {missing}")
 
     def test_daemons_and_main_entry_are_registered(self):
@@ -358,7 +367,7 @@ class ExtractedModulesHaveTestsTest(unittest.TestCase):
     | `dashboard_payload/reset_state.py` | 27 | **0** |
     | `dashboard_payload/ledger_view.py` | 79 | 1（仅间接） |
 
-    它们只经 `r20_backend/dashboard_cache.py` 门面被调用，而门面级用例只验证
+    它们只经 `astra_backend/dashboard_cache.py` 门面被调用，而门面级用例只验证
     "载荷非空 / 某几个键在"，**从不验证这些模块内部的取值优先级链**。
     这三个模块的 docstring 都写着"路径由门面注入（测试会指向沙箱）" ——
     **为可测性做了准备，却始终没人测。**
@@ -418,7 +427,7 @@ class ExtractedModulesHaveTestsTest(unittest.TestCase):
 
 
 class ProjectReadmeStructureEntryTest(unittest.TestCase):
-    """`README.md` 的「代码结构入口」章节必须指向**真实存在**的文件。
+    """仓库根 README 的「代码结构入口 / Code map」章节必须指向**真实存在**的文件。
 
     ## 为什么加这条
 
@@ -435,24 +444,49 @@ class ProjectReadmeStructureEntryTest(unittest.TestCase):
     1. 该章节**存在**且仍指向那几份真实文档（防止被人顺手删掉，
        于是又退回"只能靠 OPENCODE.md"的状态）；
     2. 章节里引用的每个**具体路径**都真实存在（防止文档链接腐烂）。
+
+    ## 2026-09-27：README 拆成中英两版 ⇒ 本门**两版都守**
+
+    英文 `README.md` 是默认（GitHub 仓库搜索权重主要吃这一份），中文在
+    `README.zh-CN.md`。只守默认那份的话，另一版的章节结构烂掉没人会知道 ——
+    所以按语言参数化：标题、表格用途串、否定性事实的措辞各按本语言钉。
     """
 
-    README = ROOT / "README.md"
-    HEADING = "代码结构入口"
+    #: (文件名, 章节标题, [(被指向的文档, 该行必须说明的用途串)], OPENCODE 否定性事实的正则)
+    CASES = (
+        ("README.md", "Code map", (
+            ("astra_backend/README.md", "Backend layering"),
+            ("scripts/README.md", "Runtime scripts & daemons"),
+            ("frontend/src/components/admin/README.md", "Frontend components & state"),
+        ), r"never contained|non-existent|does not exist"),
+        ("README.zh-CN.md", "代码结构入口", (
+            ("astra_backend/README.md", "后端分层"),
+            ("scripts/README.md", "哪个是入口/守护"),
+            ("frontend/src/components/admin/README.md", "前端组件"),
+        ), r"从未存在|不存在"),
+    )
 
     #: 章节里**有意**提到但不必存在的名字
     #: （`OPENCODE.md` 是被点名"不存在"的反面教材；
     #:  `__init__.py` 是泛指的清单载体，不是某一条路径）。
     ALLOWED_ABSENT = {"OPENCODE.md", "__init__.py"}
 
-    def _section(self) -> str:
-        text = self.README.read_text(encoding="utf-8")
-        self.assertIn(self.HEADING, text,
-                      f"README.md 缺少「{self.HEADING}」章节 —— "
-                      f"新人将只能靠 AGENTS.md 里那条指向不存在文件的指引")
-        start = text.index(self.HEADING)
+    def _section(self, filename: str, heading: str) -> str:
+        """取章节正文。
+
+        ⚠️ **必须锚定「`## ` 开头的标题行」**，不能用 `text.index(heading)`：
+        顶部导航条里就有一句 `[Code map](#code-map-...)` / `[架构索引](#architecture-index)`，
+        按裸串定位会**切到导航条那几行**，于是断言全部落在一个只有 60 字的片段上
+        （2026-09-27 拆中英双语时实测踩到：中英两侧同时假红）。
+        """
+        text = (ROOT / filename).read_text(encoding="utf-8")
+        m_head = re.search(r"^##[^\n]*" + re.escape(heading), text, re.M)
+        self.assertIsNotNone(
+            m_head,
+            f"{filename} 缺少「{heading}」章节 —— "
+            f"新人将只能靠 AGENTS.md 里那条指向不存在文件的指引")
+        rest = text[m_head.start():]
         # 到下一个二级标题为止
-        rest = text[start:]
         m = re.search(r"\n## ", rest[3:])
         return rest[: m.start() + 3] if m else rest
 
@@ -463,26 +497,25 @@ class ProjectReadmeStructureEntryTest(unittest.TestCase):
         用例仍然绿 —— 因为该文件名在紧邻的另一行（"抽取约定"那行）里
         又出现了一次。断言过宽的又一例。
         """
-        sec = self._section()
-        for doc, purpose in (
-            ("r20_backend/README.md", "后端分层"),
-            ("scripts/README.md", "哪个是入口/守护"),
-            ("frontend/src/components/admin/README.md", "前端组件"),
-        ):
-            row = re.search(r"^\|.*`" + re.escape(doc) + r"`.*\|\s*$", sec, re.M)
-            self.assertIsNotNone(row, f"结构入口章节缺少指向 {doc} 的表格行")
-            self.assertIn(purpose, row.group(0),
-                          f"指向 {doc} 的那行应说明它解决什么问题（含「{purpose}」）")
+        for filename, heading, rows, _absent in self.CASES:
+            sec = self._section(filename, heading)
+            for doc, purpose in rows:
+                with self.subTest(readme=filename, doc=doc):
+                    row = re.search(r"^\|.*`" + re.escape(doc) + r"`.*\|\s*$", sec, re.M)
+                    self.assertIsNotNone(row, f"{filename} 的结构章节缺少指向 {doc} 的表格行")
+                    self.assertIn(purpose, row.group(0),
+                                  f"指向 {doc} 的那行应说明它解决什么问题（含「{purpose}」）")
 
     def test_every_referenced_path_exists(self):
-        sec = self._section()
-        refs = set(re.findall(r"`([A-Za-z0-9_./\-]+\.(?:md|py))`", sec))
-        self.assertTrue(refs, "未解析到任何路径引用")
-        dangling = sorted(
-            r for r in refs
-            if r not in self.ALLOWED_ABSENT and not (ROOT / r).exists())
-        self.assertEqual(dangling, [],
-                         f"结构入口章节引用了不存在的路径（会把人引到死路）: {dangling}")
+        for filename, heading, _rows, _absent in self.CASES:
+            sec = self._section(filename, heading)
+            refs = set(re.findall(r"`([A-Za-z0-9_./\-]+\.(?:md|py))`", sec))
+            self.assertTrue(refs, f"{filename} 结构章节未解析到任何路径引用")
+            dangling = sorted(
+                r for r in refs
+                if r not in self.ALLOWED_ABSENT and not (ROOT / r).exists())
+            self.assertEqual(dangling, [],
+                             f"{filename} 结构章节引用了不存在的路径（会把人引到死路）: {dangling}")
 
     def test_it_records_the_dead_opencode_pointer(self):
         """⚠️ 把"AGENTS.md 指向不存在的 OPENCODE.md"这个事实留在文档里。
@@ -490,22 +523,25 @@ class ProjectReadmeStructureEntryTest(unittest.TestCase):
         不要求 README 永远提它，但若有人删掉这段说明，
         下一个人就会重新踩同一个坑。
         """
-        sec = self._section()
         # ⚠️ 同样不能只断言"OPENCODE.md 出现过" —— 它在引言里本就出现，
         #    把"从未存在过"那句删掉后用例仍然绿（负向验证抓到的第二个洞）。
         #    改为断言**否定性事实**必须写明。
-        self.assertIn("OPENCODE.md", sec, "应点名那份空路径指引")
-        self.assertRegex(
-            sec, r"从未存在|不存在",
-            "必须写明 AGENTS.md 指向的 OPENCODE.md **并不存在** —— "
-            "只提名字而不说它不存在，等于把坑留着")
+        for filename, heading, _rows, absent_re in self.CASES:
+            sec = self._section(filename, heading)
+            with self.subTest(readme=filename):
+                self.assertIn("OPENCODE.md", sec, f"{filename} 应点名那份空路径指引")
+                self.assertRegex(
+                    sec, absent_re,
+                    f"{filename} 必须写明 AGENTS.md 指向的 OPENCODE.md **并不存在** —— "
+                    "只提名字而不说它不存在，等于把坑留着")
 
     def test_it_lists_the_three_gates(self):
         """把本阶段建的三道门禁写进入口章节，否则新人不知道有闸。"""
-        sec = self._section()
-        for gate in ("test_directory_docs_current.py",
-                     "test_readme_baseline_numbers.py"):
-            self.assertIn(gate, sec, f"结构入口章节应列出 {gate}")
+        for filename, heading, _rows, _absent in self.CASES:
+            sec = self._section(filename, heading)
+            for gate in ("test_directory_docs_current.py",
+                         "test_readme_baseline_numbers.py"):
+                self.assertIn(gate, sec, f"{filename} 结构入口章节应列出 {gate}")
 
 
 class DocsDescribeRealityTest(unittest.TestCase):

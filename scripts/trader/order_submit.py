@@ -68,7 +68,7 @@ def submit_protected_limit_order(inst_id: str, side: str, pos_side: str, size: f
         # 通用直签入口仍必须服从该所新仓闸；否则 OKX 关闸只会从路由候选中
         # 摘除，却能被不带 venue_ctx 的调用绕过。
         try:
-            from r20_backend.exchanges.registry import execution_open
+            from astra_backend.exchanges.registry import execution_open
             if not execution_open(target_venue, str(env.mode)):
                 return False, f"{target_venue.upper()} 执行已关闸，拒绝新开仓"
         except Exception as _exec_exc:
@@ -77,7 +77,7 @@ def submit_protected_limit_order(inst_id: str, side: str, pos_side: str, size: f
     # 交易标的池是场所准入的单一事实源：无论信号是否经过 AI 路由，
     # 目标所未勾选该合约都不能直下。多所均勾选时，前面的撮合路由已选定 target_venue。
     try:
-        from r20_backend.exchanges.routing_policy import venue_pool_allows
+        from astra_backend.exchanges.routing_policy import venue_pool_allows
         if not venue_pool_allows(target_venue, inst_id):
             release_signal_reservation(_reservation, "目标交易所未被标的池勾选")
             return False, f"{target_venue.upper()} 未被交易标的池允许交易 {inst_id}"
@@ -93,7 +93,7 @@ def submit_protected_limit_order(inst_id: str, side: str, pos_side: str, size: f
     # 查不到 → 误判「沙盒未上市」，导致非 OKX 所一单都开不了。对账前必须先经
     # native_symbol_pure 翻译成目标所原生合约码（纯元数据，绝不实例化适配器→零出网）。
     try:
-        from r20_backend.exchanges.listing import ensure_contract_listed
+        from astra_backend.exchanges.listing import ensure_contract_listed
         native_contract = venue_registry.native_symbol_pure(
             canonical_base(inst_id), target_venue)
         _check = ensure_contract_listed(target_venue, "demo" if env.simulated else "live", native_contract)
@@ -149,6 +149,49 @@ def submit_protected_limit_order(inst_id: str, side: str, pos_side: str, size: f
             # （仍按原价/已算出的值提交、仍不阻断），但必须出声。
             print(f"[demo rescale] warn {inst_id} 沙盒报价重算失败，按当前值提交: {_rsc_exc}")
 
+    # 委托订单模式（限价 / 市价）。**在此处读**而不是发单前才读：市价单必须先在
+    # 这里按现价重锚保护价，才能进下面的几何复验与穿价闸。
+    order_mode = str(os.getenv("ASTRA_ORDER_MODE", "limit")).strip().lower()
+
+    # 市价单：真实成交价 = 下单一刻的现价，而 `effective_px/tp/sl` 是按**限价挂单
+    # 计划**算的。若计划是回踩挂单位（做多、计划价明显低于现价），市价单会在现价
+    # 成交而止盈价留在计划价上方不远处 ⇒ 止盈价低于真实成交价，做多的「止盈」
+    # 变成亏损价并当场触发（开-秒平放血）。故先整体等比缩放到现价（保 R:R）。
+    # 现价读不到 ⇒ **拒单**（fail-closed）：退回计划价继续下单正是要消除的形态。
+    if order_mode == "market":
+        from scripts.trader.brackets import reanchor_brackets_to_market
+        _mk_prec = len(str(_tick_last_raw).split(".")[1]) if "." in str(_tick_last_raw) else 4
+        _plan_tp, _plan_sl = effective_tp, effective_sl
+        _anchored = reanchor_brackets_to_market(
+            entry=effective_px, tp=effective_tp, sl=effective_sl,
+            market=_anchor_last, is_long=(pos_side == "long"), prec=_mk_prec)
+        if _anchored is None:
+            _mk_rej = (f"市价单需按现价锚定保护价，但现价不可用"
+                       f"（现价={_anchor_last:g}、计划价={effective_px:g}）")
+            print(f"[市价锚定] 拒单 {inst_id}: {_mk_rej}")
+            release_signal_reservation(_reservation, "市价锚定缺现价")
+            return False, f"市价锚定拒绝: {_mk_rej}"
+        effective_px, effective_tp, effective_sl = _anchored
+        # ⚠️ 审计留痕：**上游拿不到这三个值**。`entry_execution.py` 组装的通知
+        # （`entry_action_message`）用的是**计划价** TP/SL，与交易所实收的保护价不同；
+        # 而 trader 子进程的 stdout 由 gateway 调度器 `capture_output=True` 只留末尾
+        # 2000 字符 ⇒ 这行 print 不保证存活。故它只是**尽力留痕**，权威记录要靠
+        # 「通知里的 TP/SL 是计划值」这一事实本身（已在 notifications 侧文档化）。
+        print(f"[市价锚定] {inst_id} 现价={_anchor_last:g} "
+              f"计划TP={_plan_tp:g}/SL={_plan_sl:g} → 实提TP={effective_tp:g}/SL={effective_sl:g}")
+
+    # 通知复用：把**实际提交**的三价写回 `venue_ctx`（上游 `entry_execution.py`
+    # 组装通知时读它）。市价档重锚后上游手里的 `limit_px/tp_px/sl_px` 已是**计划值**，
+    # 与交易所实收不同 —— 2026-09 实测：ADA 空单通知写 TP=0.24/SL=0.2624，
+    # 交易所实收 TP=0.2391/SL=0.2614（这笔只差 0.4%，因为计划价恰在现价附近）。
+    # 计划价离现价越远偏差越大：计划是回踩挂单时，通知里的止损会落在**真实成交价的
+    # 错误一侧**（多单计划 100000/现价 110000 ⇒ 通知说 SL=95000，实收却是 104500），
+    # 看通知会误以为"止损已被击穿"。故这里无条件回写（限价档即原值，逐位不变）。
+    if isinstance(venue_ctx, dict):
+        venue_ctx["submitted_px"] = effective_px
+        venue_ctx["submitted_tp"] = effective_tp
+        venue_ctx["submitted_sl"] = effective_sl
+
     # Final Non-Bypassable Verification: verify actual effective price, tp and sl
     from scripts.order_risk import validate_quote_geometry_and_rr
     action_type = "BUY_LONG" if pos_side == "long" else "SELL_SHORT"
@@ -165,8 +208,8 @@ def submit_protected_limit_order(inst_id: str, side: str, pos_side: str, size: f
     # 是合法策略（不穿价即放行，OKX 侧 4 分钟超时撤兜底）。_anchor_last 来自上方
     # 单次读价；取价失败不阻断（行情断时黑天鹅哨兵/熔断已另行 fail-closed），但必吼。
     if _anchor_last > 0 and effective_px > 0:
-        _cross_pct = float(os.getenv("R20_MAX_PRICE_CROSS_PCT", "0.005") or 0.005)
-        _far_pct = float(os.getenv("R20_MAX_PRICE_FAR_PCT", "0.50") or 0.50)
+        _cross_pct = float(os.getenv("ASTRA_MAX_PRICE_CROSS_PCT", "0.005") or 0.005)
+        _far_pct = float(os.getenv("ASTRA_MAX_PRICE_FAR_PCT", "0.50") or 0.50)
         if action_type == "BUY_LONG" and effective_px > _anchor_last * (1.0 + _cross_pct):
             _rej = f"入场价穿价幻觉：BUY 限价 {effective_px:g} 高于现价 {_anchor_last:g} 超阈值({max(0.0,(effective_px/_anchor_last-1)*100):.2f}%>{_cross_pct*100:.1f}%)，将即时成交于意外价且 SL 锚点失真"
             print(f"[价格锚定] 拒单 {inst_id}: {_rej}")
@@ -186,7 +229,7 @@ def submit_protected_limit_order(inst_id: str, side: str, pos_side: str, size: f
     # 多所平权执行：若路由选定 Gate 或 Binance，走统一原生受保护执行路由
     if target_venue in ("gate", "binance"):
         try:
-            from r20_backend import execution_router
+            from astra_backend import execution_router
             asset_canonical = str(inst_id).split("-")[0].upper()
             default_lever = float(MIN_LEVERAGE or 3.0)
             margin_val = float(venue_ctx.get("margin_usdt") or (size * price / default_lever)) if isinstance(venue_ctx, dict) else (size * price / default_lever)
@@ -240,11 +283,15 @@ def submit_protected_limit_order(inst_id: str, side: str, pos_side: str, size: f
             print(f"[杠杆落地] warn {inst_id} 设档至 {int(_want_lever)}x 失败，"
                   f"按账户现档发单（不影响 TP/SL 覆盖）: {lev_exc}")
 
+    # `order_mode` 已在本函数前半段读过（市价重锚需要它）；此处只据它选单型与是否带价。
+    ord_type = "market" if order_mode == "market" else "limit"
+    entry_px = None if ord_type == "market" else effective_px
+
     try:
         rows = okx_rest.place_order(
             inst_id, side, f"{size:g}",
-            pos_side=pos_side, td_mode="cross", ord_type="limit",
-            px=effective_px, attach_tp=effective_tp, attach_sl=effective_sl,
+            pos_side=pos_side, td_mode="cross", ord_type=ord_type,
+            px=entry_px, attach_tp=effective_tp, attach_sl=effective_sl,
         )
     except Exception as exc:
         release_signal_reservation(_reservation, "下单异常")

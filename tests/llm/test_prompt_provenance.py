@@ -34,7 +34,7 @@ def setUpModule():
     就是「线上那份库是否健康」（含绝对金额/来源标注等），属**有意的线上守卫**。
 
     只读、不改；声明在此是为了把「依赖线上配置内容」从**静默**变成**可审计**
-    （守卫见 `tests/__init__.py`；`R20_TESTS_STRICT_READS=1` 下未声明的读会报错）。
+    （守卫见 `tests/__init__.py`；`ASTRA_TESTS_STRICT_READS=1` 下未声明的读会报错）。
     """
     global _READ_SCOPE
     from tests import allow_real_data_reads
@@ -58,15 +58,19 @@ class _PromptLibraryCase(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        self._tmp = Path(tempfile.mkdtemp(prefix="r20-promptlib-"))
+        self._tmp = Path(tempfile.mkdtemp(prefix="astra-promptlib-"))
         self.addCleanup(shutil.rmtree, self._tmp, True)
         target = self._tmp / "prompt_library.json"
         target.write_text(REAL_LIBRARY.read_text(encoding="utf-8"), encoding="utf-8")
-        patcher = mock.patch.object(pl, "LIBRARY_FILE", target)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        self.assertNotEqual(Path(pl.LIBRARY_FILE).resolve(), REAL_LIBRARY,
-                            "提示词方案库没有被沙箱化——测试会改写生产配置")
+        # 双文件模型（2026-09）：`target` 是**出厂基线**（读侧），写入侧另钉一个。
+        for _attr, _val in (("BASELINE_FILE", target),
+                            ("LOCAL_FILE", self._tmp / "prompt_library.local.json")):
+            patcher = mock.patch.object(pl, _attr, _val)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        for _attr in ("BASELINE_FILE", "LOCAL_FILE"):
+            self.assertNotEqual(Path(getattr(pl, _attr)).resolve(), REAL_LIBRARY,
+                                f"{_attr} 没有被沙箱化——测试会改写生产配置")
 
     def _profile(self, pid: str = "stable") -> dict:
         return pl.load_library()["profiles"][pid]

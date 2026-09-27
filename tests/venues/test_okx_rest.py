@@ -18,20 +18,21 @@ import json
 import unittest
 import urllib.parse
 from decimal import Decimal
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import scripts.okx_rest as okx_rest
 from scripts.okx_runtime import freeze_environment, unfreeze_environment
 
 DEMO_ENV = {
-    "R20_OKX_ENV": "demo",
+    "ASTRA_OKX_ENV": "demo",
     "OKX_DEMO_API_KEY": "DEMO_AK", "OKX_DEMO_SECRET_KEY": "DEMO_SK", "OKX_DEMO_PASSPHRASE": "DEMO_PP",
 }
 LIVE_ENV = {
-    "R20_OKX_ENV": "live",
+    "ASTRA_OKX_ENV": "live",
     "OKX_LIVE_API_KEY": "LIVE_AK", "OKX_LIVE_SECRET_KEY": "LIVE_SK", "OKX_LIVE_PASSPHRASE": "LIVE_PP",
 }
-UNCONFIGURED_ENV = {"R20_OKX_ENV": "demo"}  # 无任何键 → configured False
+UNCONFIGURED_ENV = {"ASTRA_OKX_ENV": "demo"}  # 无任何键 → configured False
 
 
 def _response(code="0", msg="", data=None):
@@ -363,3 +364,199 @@ class CurrentEnvironmentContractTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BrokerTagCoverageTest(unittest.TestCase):
+    """**每一个会产单的端点**都必须带经纪商 tag（2026-09 补）。
+
+    起因（实测）：`close_position` 此前不带 tag，而它是**每一个 OKX 市价全平**的
+    唯一出口（`scripts/trader/venue_query.py::close_position_confirmed`，日志实测
+    34 次整仓退出）—— 那些成交就不计经纪商归属。原先 tag 逻辑在两处各写一遍，
+    新端点天然漏掉；现收敛到 `_with_broker_tag` 单一出口，并由本门兜住。
+
+    为什么只盯这三个：`/trade/order`、`/trade/order-algo`、`/trade/close-position`
+    是**会产生成交**的端点；撤单/改单/设杠杆不产生新成交，OKX 也不接受它们的 tag。
+    """
+
+    #: 会产生成交的端点（新增此类端点时必须一并加进来）
+    ORDER_CREATING = ("/api/v5/trade/order", "/api/v5/trade/order-algo",
+                      "/api/v5/trade/close-position")
+
+    def test_tag_logic_has_a_single_exit(self):
+        """tag 的挂载只能有**一处**实现（两处各写一遍正是漏掉 close_position 的成因）。"""
+        import inspect
+        src = inspect.getsource(okx_rest)
+        self.assertEqual(src.count('params["tag"] = broker_tag'), 1,
+                         "tag 挂载出现多份 ⇒ 新增端点必然会漏掉其中一个")
+
+    def test_every_order_creating_endpoint_applies_the_tag(self):
+        """AST 判据：凡调用产单端点的函数，其函数体必须经过 `_with_broker_tag`。
+
+        行为用例只能覆盖**今天已知**的三个端点；这条从源码推导，将来有人新增
+        `POST /api/v5/trade/xxx` 却忘了挂 tag，本门直接红。
+        """
+        import ast
+        import inspect
+        tree = ast.parse(inspect.getsource(okx_rest))
+        checked = []
+        for fn in [n for n in tree.body if isinstance(n, ast.FunctionDef)]:
+            paths = []
+            for call in ast.walk(fn):
+                if not (isinstance(call, ast.Call) and getattr(call.func, "id", None) == "request"):
+                    continue
+                # 只认字面量端点，不 eval 任意表达式（也用不着 try/except —— 用例里
+                # 吞异常会被 `test_tests_cannot_pass_vacuously` 判为"静默通过"）。
+                if len(call.args) >= 2 and ast.literal_eval(call.args[0]) == "POST":
+                    paths.append(ast.literal_eval(call.args[1]))
+            hit = [p for p in paths if p in self.ORDER_CREATING]
+            if not hit:
+                continue
+            checked.append(fn.name)
+            self.assertIn("_with_broker_tag", ast.unparse(fn),
+                          f"{fn.name} 调用产单端点 {hit} 却没挂经纪商 tag")
+        self.assertEqual(sorted(checked), ["close_position", "place_algo_oco", "place_order"],
+                         "产单端点的实现函数变了 —— 新端点必须一并纳入本门")
+
+    def test_wire_params_carry_the_tag_on_all_three(self):
+        """行为判据：拦截实际请求体，三个端点都必须出现 tag。"""
+        captured = []
+
+        def _fake(method, path, params=None, *, env=None, **kw):
+            captured.append((path, dict(params or {})))
+            return []
+
+        with patch.object(okx_rest, "request", _fake):
+            okx_rest.place_order("BTC-USDT-SWAP", "buy", 1, ord_type="limit", px="79000")
+            okx_rest.place_algo_oco("BTC-USDT-SWAP", "buy", 1, pos_side="long",
+                                    tp_trigger_px="80000", sl_trigger_px="78000")
+            okx_rest.close_position("BTC-USDT-SWAP", "long")
+        self.assertEqual([p for p, _ in captured],
+                         ["/api/v5/trade/order", "/api/v5/trade/order-algo",
+                          "/api/v5/trade/close-position"])
+        for path, params in captured:
+            self.assertEqual(params.get("tag"), okx_rest.DEFAULT_OKX_BROKER_TAG,
+                             f"{path} 没有带上经纪商 tag")
+
+    def test_explicit_and_env_override_precedence(self):
+        """显式实参 > 环境变量 > 硬编码默认（与另外两个端点保持同一口径）。"""
+        captured = []
+
+        def _fake(method, path, params=None, *, env=None, **kw):
+            captured.append(dict(params or {}))
+            return []
+
+        with patch.object(okx_rest, "request", _fake):
+            okx_rest.close_position("BTC-USDT-SWAP", "long", tag="EXPLICIT")
+            self.assertEqual(captured[-1]["tag"], "EXPLICIT")
+            with patch.dict("os.environ", {"OKX_BROKER_TAG": "ENVCODE123456789"}):
+                okx_rest.close_position("BTC-USDT-SWAP", "long")
+            self.assertEqual(captured[-1]["tag"], "ENVCODE123456789")
+
+
+class NoOrderEndpointBypassTest(unittest.TestCase):
+    """除 `scripts/okx_rest.py` 外，**任何生产模块**都不得自己拼产单端点的请求体。
+
+    起因（实测漏网）：`astra_backend/okx_trade_service.py::fast_close_confirmed`
+    —— 后台「应急一键平仓」—— 自己拼了 `POST /api/v5/trade/close-position`，
+    绕过了 `_with_broker_tag` ⇒ 那批成交不计经纪商归属。
+
+    OKX 文档「经纪商指引/经纪商常用接口」把产单端点列得很明确：**下单 / 批量下单 /
+    市价全平 / 策略委托下单** —— 请求参数带 `tag` 的都"务必录入专属 Broker code"。
+    故这四个端点的字面量只允许出现在统一客户端里；旁路一出现本门就红。
+    """
+
+    #: 会产单的端点（带引号比较，避免 `/trade/order` 前缀命中 `/trade/order-algo`）
+    ORDER_ENDPOINT_LITERALS = ('"/api/v5/trade/order"', "'/api/v5/trade/order'",
+                               '"/api/v5/trade/batch-orders"', "'/api/v5/trade/batch-orders'",
+                               '"/api/v5/trade/close-position"', "'/api/v5/trade/close-position'",
+                               '"/api/v5/trade/order-algo"', "'/api/v5/trade/order-algo'")
+
+    ALLOWED = {"scripts/okx_rest.py"}
+
+    def test_only_the_shared_client_talks_to_order_endpoints(self):
+        root = Path(okx_rest.__file__).resolve().parents[1]
+        offenders = []
+        for base in ("scripts", "astra_backend", "astra_gateway"):
+            for path in (root / base).rglob("*.py"):
+                if "__pycache__" in path.parts:
+                    continue
+                rel = path.relative_to(root).as_posix()
+                if rel in self.ALLOWED:
+                    continue
+                text = path.read_text(encoding="utf-8")
+                for literal in self.ORDER_ENDPOINT_LITERALS:
+                    if literal in text:
+                        offenders.append(f"{rel} :: {literal.strip(chr(34))}")
+        self.assertEqual(offenders, [],
+                         "这些生产模块绕过了统一客户端自拼产单请求（会漏掉经纪商 tag）：\n  "
+                         + "\n  ".join(offenders))
+
+
+class BrokerTagCannotBeSilentlyLostTest(unittest.TestCase):
+    """**tag 不允许被配置错误静默弄丢**（2026-09，用户明确要求"所有用户都带上"）。
+
+    两个真实会咬人的形状：
+
+    1. `.env` 里写了 `OKX_BROKER_TAG=` 却没填值（空串）。`os.getenv` 照字面返回空串，
+       下游 `if broker_tag:` 就静默不挂 —— 程序照跑、订单照下，而这台机器
+       **一分返佣都赚不到，且没有任何报错**；
+    2. 形状非法（带 `-`/下划线、超 16 位）。OKX **会校验**该字段（实测非法值
+       HTTP 400），照发出去会让**每一笔订单都失败** —— 用户直接下不了单。
+
+    故取值口径是"只有填了**合法值**才算数，否则回落硬编码默认值"。
+    """
+
+    # 最后一项是"合法码后面拖后缀"——用合成值拼，不把真实 code 写进来
+    BROKEN_VALUES = ("", "   ", "my-broker-code", "x" * 40, "0123456789abABCD-extra")
+
+    def test_broken_env_values_all_fall_back_to_the_default(self):
+        for value in self.BROKEN_VALUES:
+            with self.subTest(value=value):
+                with patch.dict("os.environ", {"OKX_BROKER_TAG": value}):
+                    self.assertEqual(okx_rest.effective_broker_tag(),
+                                     okx_rest.DEFAULT_OKX_BROKER_TAG,
+                                     f"{value!r} 既没被当成合法值，也没回落默认 —— tag 会被弄丢")
+
+    def test_a_legal_custom_value_is_still_honoured(self):
+        """分发副本的人换成自己的 code 必须生效（否则这套机制就不可移植了）。"""
+        with patch.dict("os.environ", {"OKX_BROKER_TAG": "0123456789abcdef"}):
+            self.assertEqual(okx_rest.effective_broker_tag(), "0123456789abcdef")
+
+    def test_all_order_endpoints_still_carry_the_tag_under_an_empty_env(self):
+        """最容易漏的一条：空值环境下，**三个产单端点照样都要带 tag**。
+
+        单测 `effective_broker_tag` 只证明取值对；这条真跑端点，证明它确实落到了
+        请求体里 —— 中间任何一层（`if broker_tag:` 之类）都不会把它吞掉。
+        """
+        captured = []
+
+        def _fake(method, path, params=None, *, env=None, **kw):
+            captured.append((path, dict(params or {})))
+            return []
+
+        with patch.dict("os.environ", {"OKX_BROKER_TAG": ""}):
+            with patch.object(okx_rest, "request", _fake):
+                okx_rest.place_order("BTC-USDT-SWAP", "buy", 1, ord_type="limit", px="79000")
+                okx_rest.place_algo_oco("BTC-USDT-SWAP", "buy", 1, pos_side="long",
+                                        tp_trigger_px="80000", sl_trigger_px="78000")
+                okx_rest.close_position("BTC-USDT-SWAP", "long")
+        self.assertEqual(len(captured), 3)
+        for path, params in captured:
+            self.assertEqual(params.get("tag"), okx_rest.DEFAULT_OKX_BROKER_TAG,
+                             f"{path} 在空值环境下把 tag 弄丢了")
+
+    def test_explicit_empty_argument_still_opts_out(self):
+        """**显式传参**仍可关掉（那是代码里的有意为之，不是配置失手）。
+
+        与上面两条的区别很重要：环境变量是"配置面"，会被分发的用户改坏；
+        显式实参是"代码面"，只有写代码的人能决定。故只兜底前者。
+        """
+        captured = []
+
+        def _fake(method, path, params=None, *, env=None, **kw):
+            captured.append(dict(params or {}))
+            return []
+
+        with patch.object(okx_rest, "request", _fake):
+            okx_rest.close_position("BTC-USDT-SWAP", "long", tag="")
+        self.assertNotIn("tag", captured[-1])

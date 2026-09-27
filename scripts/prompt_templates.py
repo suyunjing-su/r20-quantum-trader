@@ -9,7 +9,7 @@
 | **模板编译** | 文本↔模块互转、模块标签继承、管线布局套用与视图（本模块） |
 | 配置库 CRUD | `load_library` / `save_library` / profile 增删改查 / 导入导出 / 校验 |
 
-实测（传递纯度扫描）：**CRUD 簇全部经 `LIBRARY_FILE` / `MAX_PROFILE_CHARS`
+实测（传递纯度扫描）：**CRUD 簇全部经 `BASELINE_FILE` / `LOCAL_FILE` / `MAX_PROFILE_CHARS`
 被"污染"，而模板编译簇是纯的**。故抽出本簇，
 门面 `prompt_library.py` **1035 → 973 行**。
 
@@ -65,7 +65,16 @@ def stable_base_module_id(title: str) -> str:
     「同 id/同标题继承来源」只能靠标题兜底，方案库里 base 模块 id 每存一次就翻新一遍
     （P1-2/批5 同族）。基座模块内容由代码决定，id 派生自标题即可稳定。
     """
-    digest = hashlib.sha1(f"r20-base-module::{title}".encode("utf-8")).hexdigest()[:10]
+    # ⚠️ 种子串随 2026-09-27「r20 → astra 全量改名」一起改了（`r20-base-module::` →
+    #    `astra-base-module::`）。**已核实这是安全的**，三条证据：
+    #      ① 出厂基线 `data/prompt_library.json` 里**没有任何** `module-base-*` id
+    #         （实测 0 条）—— 它不持久化这类 id，id 每次都由标题现算；
+    #      ② 模块合并是**按标题**匹配的（`prompt_library.py` 的 `base_by_title`），
+    #         且残留基座模块只在"标题未被匹配"时才追加 ⇒ 用户本地库里就算存着
+    #         旧种子算出的 id，也只是被重新派生一次，不会产生重复预设；
+    #      ③ 这个串是**哈希输入**，不对用户显示，也不参与任何对外契约。
+    #    换言之：改它只会让 id 换一批，而 id 与标题是 1:1 的确定性映射。
+    digest = hashlib.sha1(f"astra-base-module::{title}".encode("utf-8")).hexdigest()[:10]
     return f"module-base-{digest}"
 
 def _module(module: dict[str, Any], index: int = 0, *,

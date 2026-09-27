@@ -10,11 +10,13 @@ import scripts.prompt_library as library
 class PromptLibraryTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.original = library.LIBRARY_FILE
-        library.LIBRARY_FILE = Path(self.temp.name) / "prompt_library.json"
+        # 双文件模型（2026-09）：读侧（出厂基线）与写侧（用户改动）都要沙箱化
+        self.original = (library.BASELINE_FILE, library.LOCAL_FILE)
+        library.BASELINE_FILE = Path(self.temp.name) / "prompt_library.json"
+        library.LOCAL_FILE = Path(self.temp.name) / "prompt_library.local.json"
 
     def tearDown(self):
-        library.LIBRARY_FILE = self.original
+        library.BASELINE_FILE, library.LOCAL_FILE = self.original
         self.temp.cleanup()
 
     def test_default_is_stable_and_presets_have_four_templates(self):
@@ -91,7 +93,7 @@ class PromptLibraryTests(unittest.TestCase):
     def test_import_and_export_roundtrip(self):
         created = library.create_profile("导出测试方案", "导出测试说明", source_id="stable")
         exported = library.export_profile(created["id"])
-        self.assertEqual(exported["format"], "r20-prompt-profile")
+        self.assertEqual(exported["format"], "astra-prompt-profile")
         self.assertEqual(exported["version"], 4)
         self.assertIn("pipelines", exported["profile"])
         self.assertEqual(exported["profile_id"], created["id"])
@@ -107,7 +109,7 @@ class PromptLibraryTests(unittest.TestCase):
         lib_before = library.load_library()
         count_before = len(lib_before["profiles"])
         bad_payload = {
-            "format": "r20-prompt-profile",
+            "format": "astra-prompt-profile",
             "version": 3,
             "profile": {
                 "name": "恶意方案",

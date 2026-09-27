@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * TrajectoryPanel.vue · R20 量子交易系统 决策轨迹与执行日志面板
+ * TrajectoryPanel.vue · AstraQuant 决策轨迹与执行日志面板
  * 实时白盒化展示多模型委员会决策推演、动力学裁决与底层执行日志
  */
 import { ref, computed, onBeforeUnmount, watch } from 'vue';
@@ -393,7 +393,7 @@ function actionBadgeClass(action: string) {
             <ShieldCheck class="h-3.5 w-3.5 text-[var(--up)]" />
             <span>{{ t('dash.shell.panel.guardReady') }}</span>
           </div>
-          <span class="font-mono">R20 Core Engine</span>
+          <span class="font-mono">AstraQuant Core Engine</span>
         </footer>
       </aside>
     </Transition>

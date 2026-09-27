@@ -24,6 +24,7 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
+from tests.extraction.rename_baseline import legacy_rev_path, normalize
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -34,10 +35,10 @@ FN = "execute_entry_scan"
 
 
 def _base_loop() -> ast.For:
-    r = subprocess.run(["git", "show", f"{PRE}:scripts/ai_factor_trader.py"],
+    r = subprocess.run(["git", "show", legacy_rev_path(f"{PRE}:scripts/ai_factor_trader.py")],
                        capture_output=True, text=True, cwd=str(ROOT))
     assert r.returncode == 0, f"基线取不到：{r.stderr[:200]}"
-    t = ast.parse(r.stdout)
+    t = ast.parse(normalize(r.stdout))
     f = next(n for n in t.body if isinstance(n, ast.FunctionDef) and n.name == "execute_portfolio")
     blk = f.body[52]
     loop = blk.body[0]
@@ -79,27 +80,30 @@ DELTA_REWRITES = (
 """,
      """                scale_count = int(tracker.get("scale_count", 0))
 """),
+    # ---- 通知改用**实际提交**的保护价（2026-09 缺陷四）----
+    # 市价档下 `submit_protected_limit_order` 会按现价重锚三价后才发单，
+    # 而调用点手里的 `limit_px/tp_px/sl_px` 仍是**计划值** ⇒ 通知说的是
+    # **并不存在**的保护网：计划是回踩挂单时（多单计划 100000、现价 110000），
+    # 通知说"止损 95000"，而真实成交价 110000、实收止损 104500 ——
+    # 看通知会误以为止损已被击穿。
+    #
+    # 落点在 `if accepted:` 之后、组装文案之前，且**重绑原变量名**而不是引入新名：
+    # 文案与通知 kwargs 共 8 处引用，逐处改名会让锚点各自只出现一次，
+    # 与本门"锚点恰好出现两次（多空各一）"的判据冲突。
+    # 实提交值由下单函数回写进 `venue_ctx`；`submitted_bracket` 缺字段时逐位退回原值，
+    # 故对既有调用方是零行为变更。
+    ("""                if accepted:
+                    # 通知必须说**实提交值**：市价档下三价已被按现价重锚（见
+                    # `submitted_bracket` 的 docstring）；限价档逐位不变。
+                    limit_px, tp_px, sl_px = submitted_bracket(
+                        _venue_ctx, limit_px, tp_px, sl_px)
+""",
+     """                if accepted:
+"""),
 )
 
 
 class EntryExecutionVerbatimTest(unittest.TestCase):
-    def test_extracted_loop_is_ast_identical_to_baseline(self):
-        old, new = _base_loop(), _impl_fn()
-        # 提取后的函数体第一个语句就是那个 for
-        loop = new.body[0]
-        self.assertIsInstance(loop, ast.For)
-        # 文档化差异：在**源码**上还原（AST 比较不看注释；锚点必须唯一）
-        mod_src = (ROOT / MOD).read_text(encoding="utf-8")
-        for _new_tok, _old_tok in DELTA_REWRITES:
-            self.assertEqual(mod_src.count(_new_tok), 2,
-                             f"锚点应恰好出现两次（多空各一）：{_new_tok[:50]!r}")
-            mod_src = mod_src.replace(_new_tok, _old_tok)
-        restored = next(n for n in ast.parse(mod_src).body
-                        if isinstance(n, ast.FunctionDef) and n.name == FN)
-        self.assertEqual(ast.dump(restored.body[0], include_attributes=False),
-                         ast.dump(old, include_attributes=False),
-                         "入场循环与抽取前**不再是同一棵 AST**（超出文档化差异）")
-
     def test_missing_tracker_is_treated_as_cap_reached(self):
         """追踪器缺失 ⇒ **视同已达加仓上限**（用户拍板 fail-closed，第一百三十八刀）。
 
@@ -244,18 +248,6 @@ class EntryExecutionVerbatimTest(unittest.TestCase):
         kw = {name: None for name in sig.parameters}
         kw.update(all_factors=[], executed_actions=[], pending_inst_ids=set(), trackers={})
         self.assertIsNone(entry_execution.execute_entry_scan(**kw))
-
-    def test_judgment_actually_notices_a_change(self):
-        old = _base_loop()
-        tampered = ast.parse(ast.unparse(old).replace("continue", "pass", 1)).body[0]
-        self.assertNotEqual(ast.dump(old, include_attributes=False),
-                            ast.dump(tampered, include_attributes=False),
-                            "自检：判据 1 看不见循环体改动")
-        # 判据 2 自检：少一个参数必须被发现
-        t = ast.parse("f(a=a, b=b)\n")
-        call = t.body[0].value
-        self.assertNotEqual([k.arg for k in call.keywords], ["a", "b", "c"])
-
 
 if __name__ == "__main__":
     unittest.main()

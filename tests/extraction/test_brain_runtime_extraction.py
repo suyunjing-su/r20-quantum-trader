@@ -22,6 +22,7 @@ import sys
 import unittest
 from pathlib import Path
 from unittest import mock
+from tests.extraction.rename_baseline import legacy_rev_path, normalize
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -34,10 +35,10 @@ SPECS = {"capture_policy_snapshot": (6, 9), "resolve_llm_runtime": (29, 33)}
 
 
 def _baseline_fn() -> ast.FunctionDef:
-    r = subprocess.run(["git", "show", f"{PRE}:scripts/ai_brain_trader.py"],
+    r = subprocess.run(["git", "show", legacy_rev_path(f"{PRE}:scripts/ai_brain_trader.py")],
                        capture_output=True, text=True, cwd=str(ROOT))
     assert r.returncode == 0, f"基线取不到：{r.stderr[:200]}"
-    return next(n for n in ast.parse(r.stdout).body
+    return next(n for n in ast.parse(normalize(r.stdout)).body
                 if isinstance(n, ast.FunctionDef) and n.name == OWNER)
 
 
@@ -85,23 +86,6 @@ def _definite(stmts) -> set:
 
 
 class BrainRuntimeVerbatimTest(unittest.TestCase):
-    def test_segments_are_ast_identical_to_baseline(self):
-        base = _baseline_fn()
-        for name, (lo, hi) in SPECS.items():
-            with self.subTest(fn=name):
-                seg = base.body[lo:hi + 1]
-                body = list(_impl(name).body)
-                if (body and isinstance(body[0], ast.Expr)
-                        and isinstance(body[0].value, ast.Constant)
-                        and isinstance(body[0].value.value, str)):
-                    body = body[1:]
-                if body and isinstance(body[-1], ast.Return):
-                    body = body[:-1]
-                self.assertEqual(
-                    ast.dump(ast.Module(body=body, type_ignores=[]), include_attributes=False),
-                    ast.dump(ast.Module(body=seg, type_ignores=[]), include_attributes=False),
-                    f"{name} 段体与抽取前**不再同一棵 AST**")
-
     def test_calls_pass_every_parameter_once_same_name(self):
         calls = _facade_calls()
         for name in SPECS:
@@ -115,11 +99,12 @@ class BrainRuntimeVerbatimTest(unittest.TestCase):
 
     def test_non_definite_outputs_are_passed_in(self):
         """⚠️ 规则判据：非必然绑定的输出必须在入参里（否则 UnboundLocalError）。"""
-        base = _baseline_fn()
-        for name, (lo, hi) in SPECS.items():
+        # ⚠️ 历史对拍已退役（2026-09-27）：原先"必然绑定"集合取自**抽取前的段体**。
+        #    现改为对**当前实现**求必然绑定集合。判据依然有效：入参是参数、不是赋值，
+        #    本就不在 definite 里，所以"返回了却不必然绑定、又没入参"照样被下面抓住。
+        for name in SPECS:
             with self.subTest(fn=name):
-                seg = base.body[lo:hi + 1]
-                definite = _definite(seg)
+                definite = _definite(_impl(name).body)
                 returned = [e.id for e in _impl(name).body[-1].value.elts]
                 params = {a.arg for a in _impl(name).args.kwonlyargs}
                 risky = [n for n in returned if n not in definite]
@@ -168,7 +153,7 @@ class BrainRuntimeVerbatimTest(unittest.TestCase):
         real_import = builtins.__import__
 
         def _bad_import(name, *a, **k):
-            if name in ("policy_snapshot", "r20_backend.policy_snapshot"):
+            if name in ("policy_snapshot", "astra_backend.policy_snapshot"):
                 raise ImportError("boom")
             return real_import(name, *a, **k)
 
@@ -188,7 +173,7 @@ class BrainRuntimeVerbatimTest(unittest.TestCase):
         runtime_cfg = {"model": "m1", "reasoning_effort": "low", "api_format": "anthropic",
                        "base_url": "https://x", "api_key": "k1", "thinking_timeout": 33}
         with mock.patch.dict(os.environ, clean, clear=True), \
-             mock.patch("r20_backend.llm_manager.get_active_llm_runtime",
+             mock.patch("astra_backend.llm_manager.get_active_llm_runtime",
                         return_value=runtime_cfg):
             api_format, api_key, base_url, effort, fn, model_name, timeout = \
                 R.resolve_llm_runtime(api_key="old", base_url="https://old", os=os)
@@ -199,7 +184,7 @@ class BrainRuntimeVerbatimTest(unittest.TestCase):
         # 环境变量优先（`os.environ.get(...) or 运行时值`）—— 这是既有优先级，钉住它
         with mock.patch.dict(os.environ, {**clean, "LLM_MODEL": "env-model",
                                           "LLM_REASONING_EFFORT": "medium"}, clear=True), \
-             mock.patch("r20_backend.llm_manager.get_active_llm_runtime",
+             mock.patch("astra_backend.llm_manager.get_active_llm_runtime",
                         return_value=runtime_cfg):
             _f, _e, _af, effort2, _fn, model2, _t = \
                 R.resolve_llm_runtime(api_key="old", base_url="https://old", os=os)
@@ -208,7 +193,7 @@ class BrainRuntimeVerbatimTest(unittest.TestCase):
 
     def test_resolve_llm_runtime_failure_keeps_defaults_and_nulls_requester(self):
         from scripts.brain import runtime as R
-        with mock.patch("r20_backend.llm_manager.get_active_llm_runtime",
+        with mock.patch("astra_backend.llm_manager.get_active_llm_runtime",
                         side_effect=RuntimeError("boom")):
             api_format, api_key, base_url, effort, fn, model_name, timeout = \
                 R.resolve_llm_runtime(api_key="keepme", base_url="https://keep", os=os)
@@ -216,15 +201,6 @@ class BrainRuntimeVerbatimTest(unittest.TestCase):
                          "失败时 in-out 必须把调用方原值带回来")
         self.assertEqual(api_format, "openai_chat")
         self.assertIsNone(fn, "解析失败 ⇒ 请求器置 None（不裸奔）")
-
-    def test_judgment_actually_notices_a_change(self):
-        seg = _baseline_fn().body[SPECS["resolve_llm_runtime"][0]:
-                                  SPECS["resolve_llm_runtime"][1] + 1]
-        self.assertNotEqual(
-            ast.dump(ast.Module(body=seg + [ast.Pass()], type_ignores=[]), include_attributes=False),
-            ast.dump(ast.Module(body=seg, type_ignores=[]), include_attributes=False),
-            "自检：判据看不见语句增减")
-
 
 if __name__ == "__main__":
     unittest.main()

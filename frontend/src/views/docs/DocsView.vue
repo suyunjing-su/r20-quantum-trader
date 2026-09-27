@@ -163,7 +163,7 @@ onUnmounted(() => {
         </button>
 
         <a
-          href="https://github.com/555cute/r20-quantum-trader"
+          href="https://github.com/555cute/astra-quant-agent"
           target="_blank"
           rel="noopener noreferrer"
           class="btn btn-primary h-7 px-3 text-xs font-medium inline-flex items-center gap-1.5 rounded-full"
@@ -245,7 +245,7 @@ onUnmounted(() => {
           </div>
 
           <p class="text-xs sm:text-sm leading-body font-sans text-[var(--ink-2)]">
-            <strong>R20量子交易系统 (R20 Quantum Trading System)</strong> 是一套专为高波动加密货币（Crypto）打造的<strong>机构级全自动波段量化决策与执行系统</strong>。系统通过 OKX / Binance / Gate.io REST API 直签执行私有账户与交易请求。系统运行在严格的北京时间（UTC+8）自然日财务基准之上，聚焦 1H~4H 大级别顺势波段，以<strong>“胜率第一、宁缺毋滥、三位一体 Fail-Closed 物理硬防线”</strong>为最高风控宗旨。
+            <strong>AstraQuant</strong> 是一套专为高波动加密货币（Crypto）打造的<strong>机构级全自动波段量化决策与执行系统</strong>。系统通过 OKX / Binance / Gate.io REST API 直签执行私有账户与交易请求。系统运行在严格的北京时间（UTC+8）自然日财务基准之上，聚焦 1H~4H 大级别顺势波段，以<strong>“胜率第一、宁缺毋滥、三位一体 Fail-Closed 物理硬防线”</strong>为最高风控宗旨。
           </p>
 
           <!-- 4 Core Pillars Grid -->
@@ -300,7 +300,7 @@ onUnmounted(() => {
           </div>
 
           <p class="text-xs sm:text-sm leading-body font-sans text-[var(--ink-2)]">
-            前台终端采用 R20 机构级量化工作台架构，首屏直接铺满 K 线图表工位与活跃持仓挂单：
+            前台终端采用 AstraQuant 机构级量化工作台架构，首屏直接铺满 K 线图表工位与活跃持仓挂单：
           </p>
 
           <div class="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1 text-xs">

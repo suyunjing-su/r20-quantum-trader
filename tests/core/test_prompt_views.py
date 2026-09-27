@@ -25,7 +25,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
 
-from r20_backend import prompt_views as PV
+from astra_backend import prompt_views as PV
 
 
 class SplitSnapshotTests(unittest.TestCase):
@@ -169,7 +169,10 @@ class RenderedSnapshotsTests(unittest.TestCase):
 class TemplateTests(unittest.TestCase):
     def test_the_real_data_dir_is_under_the_repo_root(self):
         self.assertEqual(PV.DATA, PV.ROOT / "data")
-        self.assertTrue(str(PV.ROOT).endswith("r20"))
+        # ⚠️ 这里原来断言 `str(PV.ROOT).endswith("<检出目录名>")` —— 钉的是**检出目录的名字**，
+        #    跟"数据目录锚在仓库根"这个意图毫无关系；2026-09-27 全量改名把它一起改掉了，
+        #    于是它开始断言一个不存在的目录名。改判真正要钉的性质：ROOT 是 data/ 的父目录。
+        self.assertEqual(Path(PV.__file__).resolve().parent.parent, Path(PV.ROOT).resolve())
 
     def test_the_evolution_template_exposes_its_slots(self):
         for slot in ("timestamp_beijing", "existing_memory_markdown", "total",
@@ -184,7 +187,7 @@ class TemplateTests(unittest.TestCase):
 
     def test_the_trading_template_declares_its_sections(self):
         for section in ("当前决策时间戳与市场时效", "账户当前持仓与风险敞口全景",
-                        "在途未成交限价挂单", "R20 启发式实战认知与长期记忆",
+                        "在途未成交限价挂单", "AstraQuant 启发式实战认知与长期记忆",
                         "全标的池原生行情、技术指标与筹码矩阵"):
             with self.subTest(section=section):
                 self.assertIn(section, PV.TRADING_USER_TEMPLATE)

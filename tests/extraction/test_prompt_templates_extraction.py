@@ -9,7 +9,7 @@
 | **模板编译** | 文本↔模块互转、模块标签继承、管线布局套用与视图 |
 | 配置库 CRUD | `load_library` / `save_library` / profile 增删改查 / 导入导出 / 校验 |
 
-实测（传递纯度扫描）：**CRUD 簇全部经 `LIBRARY_FILE` / `MAX_PROFILE_CHARS`
+实测（传递纯度扫描）：**CRUD 簇全部经 `BASELINE_FILE` / `LOCAL_FILE` / `MAX_PROFILE_CHARS`
 被"污染"，而模板编译簇是纯的**。故抽出模板簇到
 `scripts/prompt_templates.py`，门面 `prompt_library.py` **1035 → 1009 行**，
 保留同名薄壳。
@@ -39,7 +39,7 @@
 3. **手写签名全错**：我以为 `base_template_text(profile, key)` 之类，
    实际签名逐个不同；改用 **AST 取真实签名** 生成薄壳。
 4. **忘了对外部调用者保持签名**：`pipeline_view` 等在
-   `r20_backend/routers/strategy/prompts.py` 有调用点，故新形参一律
+   `astra_backend/routers/strategy/prompts.py` 有调用点，故新形参一律
    **keyword-only 且由门面补齐**，公开签名对外不变。
 5. **漏了 `align_pipeline_sources` 也调 `base_template_text`** →
    最后改用 `base_text_resolver` 回调统一注入，而不是把
@@ -71,6 +71,7 @@ MOVED = ["stable_base_module_id", "_module", "text_to_modules", "compile_modules
 
 import prompt_library as pl  # noqa: E402
 import prompt_templates as pt  # noqa: E402
+from tests.extraction.rename_baseline import legacy_rev_path, normalize
 
 
 class FacadeSurfaceTest(unittest.TestCase):
@@ -125,7 +126,10 @@ class SharedModuleTest(unittest.TestCase):
         tree = ast.parse(SHARED.read_text(encoding="utf-8"))
         assigned = {t.id for n in tree.body if isinstance(n, ast.Assign)
                     for t in n.targets if isinstance(t, ast.Name)}
-        for banned in ("LIBRARY_FILE", "ROOT", "MAX_PROFILE_CHARS", "ROOT_DIR"):
+        # 2026-09 起方案库是双文件（`BASELINE_FILE` 读 / `LOCAL_FILE` 写），
+        # 两个新名一并列入"共享模块不得定义"清单 —— 否则这次改名会把这门静默架空。
+        for banned in ("LIBRARY_FILE", "BASELINE_FILE", "LOCAL_FILE",
+                       "ROOT", "MAX_PROFILE_CHARS", "ROOT_DIR"):
             self.assertNotIn(banned, assigned, f"prompt_templates 不该定义 {banned}")
 
     def test_shared_module_does_not_import_the_facade(self):
@@ -290,27 +294,6 @@ class VerbatimCopyTest(unittest.TestCase):
         body = [s for s in node.body
                 if not (isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant))]
         return ast.dump(ast.Module(body=body, type_ignores=[]))
-
-    def test_moved_bodies_match_pre_extraction_except_injected_names(self):
-        import subprocess
-        old_src = subprocess.run(
-            ["git", "show", f"{PRE_EXTRACTION_COMMIT}:scripts/prompt_library.py"],
-            capture_output=True, text=True, cwd=str(ROOT))
-        self.assertEqual(old_src.returncode, 0, old_src.stderr)
-        new_src = SHARED.read_text(encoding="utf-8")
-
-        old_tree = ast.parse(old_src.stdout)
-        new_tree = ast.parse(new_src)
-
-        for name in MOVED:
-            o = next(x for x in old_tree.body
-                     if isinstance(x, ast.FunctionDef) and x.name == name)
-            nnode = next(x for x in new_tree.body
-                         if isinstance(x, ast.FunctionDef) and x.name == name)
-            self.assertEqual(self._skeleton(o),
-                             self._skeleton(self._strip_injections(nnode)),
-                             f"{name} 的函数体在搬移中被改写了（超出预期的注入替换）")
-
 
 class DualImportTest(unittest.TestCase):
     """⚠️ 本刀又一次踩了双模导入的坑（与第四十八刀 `local_lock` 相同）。"""

@@ -81,8 +81,8 @@ router.onError((error) => {
       msg,
     )
   if (isChunkOrModuleError) {
-    const key = 'r20_chunk_reload_lock'
-    const attemptsKey = 'r20_chunk_reload_attempts'
+    const key = 'astra_chunk_reload_lock'
+    const attemptsKey = 'astra_chunk_reload_attempts'
     const lastReload = parseInt(sessionStorage.getItem(key) || '0', 10)
     const attempts = parseInt(sessionStorage.getItem(attemptsKey) || '0', 10)
     const now = Date.now()
@@ -116,36 +116,36 @@ router.beforeEach(async (to) => {
 
 /* SEO 标题：中文为主（与后端钉扎测试与 CF 缓存语义一致），后台 noindex */
 const PUBLIC_TITLES: Record<string, string> = {
-  '/': 'R20量子交易系统 | 机构级加密货币波段量化终端 & AI交易主脑',
-  '/trading': '实盘矩阵 | R20量子交易系统',
-  '/factors': 'AI 推演 · 决策审计 | R20量子交易系统',
-  '/news': '舆情情报 · 聪明钱 | R20量子交易系统',
-  '/lab': '自进化 · 认知中枢 | R20量子交易系统',
-  '/history': '交易台账 · 生命周期 | R20量子交易系统',
-  '/docs': '官方文档 | R20量子交易系统',
+  '/': 'AstraQuant | 机构级加密货币波段量化终端 & AI交易主脑',
+  '/trading': '实盘矩阵 | AstraQuant',
+  '/factors': 'AI 推演 · 决策审计 | AstraQuant',
+  '/news': '舆情情报 · 聪明钱 | AstraQuant',
+  '/lab': '自进化 · 认知中枢 | AstraQuant',
+  '/history': '交易台账 · 生命周期 | AstraQuant',
+  '/docs': '官方文档 | AstraQuant',
 }
 
 export function updateDocumentTitle(to = router.currentRoute.value) {
   const { t } = useI18n()
-  let title = 'R20 量子交易系统'
+  let title = 'AstraQuant'
   let isNoIndex = false
 
   if (to.name === 'not-found') {
     isNoIndex = true
     const notFoundText = t('common.notFound.title') || '页面不存在'
     title = to.path.startsWith('/admin')
-      ? `${notFoundText} · ${t('nav.actions.console')} · R20`
-      : `${notFoundText} · R20`
+      ? `${notFoundText} · ${t('nav.actions.console')} · AstraQuant`
+      : `${notFoundText} · AstraQuant`
   } else if (to.path === '/admin/login' || to.name === 'admin-login') {
     isNoIndex = true
-    title = `${t('admin.login.submit')} · ${t('nav.actions.console')} · R20`
+    title = `${t('admin.login.submit')} · ${t('nav.actions.console')} · AstraQuant`
   } else if (to.path.startsWith('/admin')) {
     isNoIndex = true
     const hit = allAdminItems.find((item) => item.path === to.path || item.key === to.name)
     const pageName = hit ? t(hit.labelKey) : ''
     title = pageName
-      ? `${pageName} · ${t('nav.actions.console')} · R20`
-      : `${t('nav.actions.console')} · R20`
+      ? `${pageName} · ${t('nav.actions.console')} · AstraQuant`
+      : `${t('nav.actions.console')} · AstraQuant`
   } else if (PUBLIC_TITLES[to.path]) {
     title = PUBLIC_TITLES[to.path]
   }
@@ -169,14 +169,14 @@ export function updateDocumentTitle(to = router.currentRoute.value) {
 router.afterEach((to) => {
   updateDocumentTitle(to)
   try {
-    sessionStorage.removeItem('r20_chunk_reload_attempts')
+    sessionStorage.removeItem('astra_chunk_reload_attempts')
   } catch {
     // ignore
   }
 })
 
 if (typeof window !== 'undefined') {
-  window.addEventListener('r20:locale-changed', () => updateDocumentTitle())
+  window.addEventListener('astra:locale-changed', () => updateDocumentTitle())
 }
 
 export default router

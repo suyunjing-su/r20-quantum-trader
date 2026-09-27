@@ -7,40 +7,40 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import r20_backend.notifications as notifications
-import r20_backend.okx_trade_service as trade_service
+import astra_backend.notifications as notifications
+import astra_backend.okx_trade_service as trade_service
 import scripts.okx_runtime as okx_runtime
 import scripts.prompt_library as prompts
 import scripts.backup_runtime as backup_runtime
-import r20_backend.backup_store as backup_store
-import r20_backend.net_security as net_security
-from r20_gateway.plugins import PLUGINS
+import astra_backend.backup_store as backup_store
+import astra_backend.net_security as net_security
+from astra_gateway.plugins import PLUGINS
 
 
 class OKXEnvironmentTests(unittest.TestCase):
     def test_separate_live_and_demo_credentials(self):
         values = {
-            "R20_OKX_ENV":"demo", "OKX_DEMO_API_KEY":"DEMO_AK", "OKX_DEMO_SECRET_KEY":"DEMO_SK", "OKX_DEMO_PASSPHRASE":"DEMO_PP",
+            "ASTRA_OKX_ENV":"demo", "OKX_DEMO_API_KEY":"DEMO_AK", "OKX_DEMO_SECRET_KEY":"DEMO_SK", "OKX_DEMO_PASSPHRASE":"DEMO_PP",
             "OKX_LIVE_API_KEY":"LIVE_AK", "OKX_LIVE_SECRET_KEY":"LIVE_SK", "OKX_LIVE_PASSPHRASE":"LIVE_PP",
         }
         demo = okx_runtime.selected_environment(values)
         self.assertEqual((demo.mode, demo.api_key), ("demo", "DEMO_AK"))
-        live = okx_runtime.selected_environment({**values, "R20_OKX_ENV":"live"})
+        live = okx_runtime.selected_environment({**values, "ASTRA_OKX_ENV":"live"})
         self.assertEqual((live.mode, live.api_key), ("live", "LIVE_AK"))
         self.assertNotEqual(demo.identity, live.identity)
 
     def test_missing_key_fingerprint_is_explicit(self):
         for mode in ("demo", "live"):
             with self.subTest(mode=mode):
-                env = okx_runtime.selected_environment({"R20_OKX_ENV": mode})
+                env = okx_runtime.selected_environment({"ASTRA_OKX_ENV": mode})
                 self.assertFalse(env.configured)
                 self.assertEqual(env.fingerprint, f"{mode}-not-configured")
                 self.assertEqual(env.identity, f"okx:{mode}:{mode}-not-configured")
 
     def test_environment_is_frozen_for_cycle(self):
-        first = {"R20_OKX_ENV": "demo", "OKX_DEMO_API_KEY": "D",
+        first = {"ASTRA_OKX_ENV": "demo", "OKX_DEMO_API_KEY": "D",
                  "OKX_DEMO_SECRET_KEY": "S", "OKX_DEMO_PASSPHRASE": "P"}
-        second = {"R20_OKX_ENV": "live", "OKX_LIVE_API_KEY": "L",
+        second = {"ASTRA_OKX_ENV": "live", "OKX_LIVE_API_KEY": "L",
                   "OKX_LIVE_SECRET_KEY": "S", "OKX_LIVE_PASSPHRASE": "P"}
         try:
             frozen = okx_runtime.freeze_environment(first)
@@ -85,7 +85,16 @@ class OKXEnvironmentTests(unittest.TestCase):
             [{"instId":"SOL-USDT-SWAP","posSide":"long","ordId":"11","reduceOnly":"true","side":"sell"}],
             [], [], [],
         ]
-        with patch.object(trade_service,"current_environment",return_value=env), patch.object(trade_service,"_request",side_effect=responses) as request, patch.object(trade_service.time,"sleep"), \
+        # 2026-09：平仓改走 okx_rest.close_position（统一挂经纪商 tag 的出口），
+        # 不再经 `_request` ⇒ 必须单独替掉它，否则本用例会**真的发出网络请求**
+        # （实测过：漏替会打到 OKX 并吃 401）。
+        close_calls=[]
+        def _close(inst_id, pos_side="net", **kw):
+            close_calls.append((inst_id, pos_side))
+            return [{"sCode":"0"}]
+        with patch.object(trade_service,"current_environment",return_value=env), patch.object(trade_service,"_request",side_effect=responses) as request, \
+             patch.object(trade_service.okx_rest, "close_position", side_effect=_close), \
+             patch.object(trade_service.time,"sleep"), \
              patch.object(trade_service, "pending_algo_orders", return_value=[{"algoId":"777","posSide":"long","instId":"SOL-USDT-SWAP"}]) as algo_scan, \
              patch.object(trade_service, "cancel_algo_orders", return_value=[]) as algo_cancel:
             result=trade_service.fast_close_confirmed(token,confirmation)
@@ -95,25 +104,28 @@ class OKXEnvironmentTests(unittest.TestCase):
         algo_cancel.assert_called_once_with(["777"], inst_id="SOL-USDT-SWAP", env=env)
         calls=[(c.args[0],c.args[1],c.args[2]) for c in request.call_args_list]
         self.assertIn(("POST","/api/v5/trade/cancel-order",{"instId":"SOL-USDT-SWAP","ordId":"11"}),calls)
-        self.assertTrue(any(path=="/api/v5/trade/close-position" for _,path,_ in calls))
+        self.assertNotIn("/api/v5/trade/close-position", [p for _,p,_ in calls],
+                         "平仓不再自拼请求体（统一出口才带得上经纪商 tag）")
+        self.assertEqual(close_calls, [("SOL-USDT-SWAP","long")],
+                         "平仓必须经 okx_rest.close_position（唯一带 tag 的出口）")
 
 
 class NotificationChannelRemovalTests(unittest.TestCase):
     def test_retired_personal_wechat_channel_is_not_supported(self):
         retired_channel = "wechat" + "_ilink"
-        env={"R20_NOTIFY_" + retired_channel.upper() + "_ENABLED":"1"}
+        env={"ASTRA_NOTIFY_" + retired_channel.upper() + "_ENABLED":"1"}
         self.assertNotIn(retired_channel, notifications.enabled_channels(env))
         self.assertEqual(notifications.diagnose_channel(retired_channel, env)["status"], "failed")
         ok, detail=notifications.send_channel(retired_channel, "hello", env)
         self.assertFalse(ok)
         self.assertIn("未知通知通道", detail)
-        self.assertNotIn("r20.channel." + "wechat" + "-ilink", {plugin.plugin_id for plugin in PLUGINS})
+        self.assertNotIn("astra.channel." + "wechat" + "-ilink", {plugin.plugin_id for plugin in PLUGINS})
 
     def test_dotenv_still_overrides_stale_process_environment(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root=Path(tmp); (root/".env").write_text("R20_NOTIFY_QQ_ENABLED=1\n")
-            with patch.object(notifications, "ROOT", root), patch.dict(os.environ, {"R20_NOTIFY_QQ_ENABLED":"0"}, clear=True):
-                self.assertEqual(notifications._env()["R20_NOTIFY_QQ_ENABLED"], "1")
+            root=Path(tmp); (root/".env").write_text("ASTRA_NOTIFY_QQ_ENABLED=1\n")
+            with patch.object(notifications, "ROOT", root), patch.dict(os.environ, {"ASTRA_NOTIFY_QQ_ENABLED":"0"}, clear=True):
+                self.assertEqual(notifications._env()["ASTRA_NOTIFY_QQ_ENABLED"], "1")
 
 
 class PromptSimpleModeTests(unittest.TestCase):

@@ -113,7 +113,7 @@ def _legacy(real_pos_dict, trackers, timestamp_full, executed_actions, *,
             old_sl = 0.0
             if pos_venue != "okx":
                 try:
-                    from r20_backend.close_intent import adapter_environment as _sl_env
+                    from astra_backend.close_intent import adapter_environment as _sl_env
                     ad = venue_registry.get_adapter(
                         pos_venue, environment=_sl_env(pos_venue, str(current_environment().mode)))
                     _c3_ok, _c3_note = amend_venue_stop_loss(
@@ -351,7 +351,7 @@ class ParityTest(unittest.TestCase):
         """真机形状：`real_pos_dict` 只有 OKX 仓，AI 却对 binance 仓发 CLOSE_MARKET。"""
         h = _Harness({"instructions": [
             {"instId": "UNI-USDT-SWAP", "action": "CLOSE_MARKET", "confidence": 99, "reason": "x"}],
-        }, {})          # OKX 字典为空 = 与真机"持仓 OKX 0/9｜跨所 1 笔"同形
+        }, {})          # OKX 字典为空 = 与真机"OKX 无仓、外所 1 笔"同形
         got_raw = h.run(position_mgmt.execute_ai_position_management)
         self.addCleanup(h.cleanup)
         self.assertEqual(len(got_raw), 1, "必须留痕，不得静默")
@@ -463,7 +463,7 @@ class ParityTest(unittest.TestCase):
                                         "atr_1h": 2.0, "venue": "binance"}})
         self.addCleanup(h.cleanup)
         actions = []
-        with patch("r20_backend.close_intent.adapter_environment", lambda v, m: "demo"):
+        with patch("astra_backend.close_intent.adapter_environment", lambda v, m: "demo"):
             h.positions["BTC-USDT-SWAP"]["venue"] = "binance"
             position_mgmt.execute_ai_position_management(
                 h.positions, h.trackers, "T", actions,

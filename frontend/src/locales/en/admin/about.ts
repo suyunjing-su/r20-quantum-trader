@@ -24,11 +24,11 @@ export const enAdminAbout = {
   runUpdate: "Run safe update",
   gitOutput: "Git output:",
   safetyNote: "Safety mechanism: updates only allow fast-forward merges; if the working tree has conflicts in uncommitted tracked files, the remote is unreachable, or a fast-forward is impossible, the backend rejects the update to protect system stability.",
-  confirmTitle: "Confirm R20 system update",
-  confirmSubtitle: "About R20: pull the latest main-branch code with fast-forward",
+  confirmTitle: "Confirm AstraQuant system update",
+  confirmSubtitle: "About AstraQuant: pull the latest main-branch code with fast-forward",
   confirmPrefix: "To prevent mistakes, type the confirmation phrase below",
   confirmSuffix: ":",
-  phrasePlaceholder: "Enter UPDATE R20",
+  phrasePlaceholder: "Enter UPDATE ASTRA",
   cancel: "Cancel",
   updating: "Updating...",
   confirmNow: "Confirm and update now",
@@ -44,4 +44,11 @@ export const enAdminAbout = {
   bandRuntime: 'Runtime',
   bandSyncGap: 'Sync gap',  // ── batch 41: localize the update-check failure message ──
   updateCheckFailed: 'Update check failed: {msg} (cannot tell whether this build is behind; security patches may silently fall out of sync)',
+
+  // ── exchange sign-up channels (2026-09) ──
+  channelsTitle: 'Sign-up channels',
+  channelsSub: 'Account opening & fee binding',
+  channelsLead: 'Registering through the entries below binds that exchange\'s fee rate and rebate; returning users qualify when the exchange\'s win-back conditions are met.',
+  channelOpen: 'Sign-up link',
+  channelUnset: 'Not configured (overridable via env var)',
 };

@@ -56,20 +56,20 @@ class ImportFallbackTests(unittest.TestCase):
 
     def test_standalone_settings_is_none_when_config_import_fails(self):
         node = _find_node(lambda n: isinstance(n, ast.Try) and n.lineno == 57)
-        with patch.dict(sys.modules, {"r20_backend.config": None}):
+        with patch.dict(sys.modules, {"astra_backend.config": None}):
             ns = _exec_node(node)
         self.assertIn("standalone_settings", ns)
         self.assertIsNone(ns["standalone_settings"])
 
     def test_version_falls_back_when_version_import_raises(self):
         node = _find_node(lambda n: isinstance(n, ast.Try) and n.lineno == 62)
-        with patch.dict(sys.modules, {"r20_backend.version": None}):
+        with patch.dict(sys.modules, {"astra_backend.version": None}):
             ns = _exec_node(node)
         self.assertEqual(ns["__version__"], "7.6.0")
 
     def test_canonical_base_fallback_chain_strips_usdt_markers(self):
         node = _find_node(lambda n: isinstance(n, ast.Try) and n.lineno == 186)
-        with patch.dict(sys.modules, {"r20_backend.exchanges.base": None}):
+        with patch.dict(sys.modules, {"astra_backend.exchanges.base": None}):
             ns = _exec_node(node)
         fn = ns["_canonical_base_name"]
         # 每个 marker 都要能被剥掉（含 break 早退），且分隔符被清掉
@@ -171,7 +171,7 @@ class PromptOverrideTests(unittest.TestCase):
                 self.assertEqual(abt.read_prompt_override(), "只做多")
 
     def test_missing_file_returns_empty(self):
-        with patch.object(abt, "PROMPT_OVERRIDE_FILE", "/nonexistent/r20-override.txt"):
+        with patch.object(abt, "PROMPT_OVERRIDE_FILE", "/nonexistent/astra-override.txt"):
             self.assertEqual(abt.read_prompt_override(), "")
 
     def test_oserror_path_returns_empty(self):
@@ -494,12 +494,25 @@ class LatestAiDecisionTests(unittest.TestCase):
         self.assertIsNone(abt.get_latest_ai_decision("BTC-USDT-SWAP"))
 
     def test_stale_entry_is_rejected(self):
+        # ⚠️ 必须冻结时钟（2026-09-27 实测抓到的一次随机翻红）：
+        #    本用例会取两次 `time.time()` —— 外层算 `now`，内层 `get_latest_ai_decision`
+        #    自己再取一次。判据是 `int(time.time()) - timestamp > max_age`（严格大于），
+        #    而用例正好骑在 `max_age` 这个**边界值**上：两步之间只要发生一次秒进位，
+        #    `now - 300` 就被读成 301 秒前 ⇒ 断言翻红，且与代码正确性无关。
+        #    冻结内层时钟后，边界语义（"正好等于 max_age 仍算新鲜"）才真正被钉住。
         now = int(__import__("time").time())
-        self._write({"BTC-USDT-SWAP": {"timestamp": now - 10_000, "decision": {}}})
-        self.assertIsNone(abt.get_latest_ai_decision("BTC-USDT-SWAP"))
-        # 边界：正好等于 max_age 仍算新鲜（比较是严格大于）
-        self._write({"BTC-USDT-SWAP": {"timestamp": now - 300, "decision": {}}})
-        self.assertEqual(abt.get_latest_ai_decision("BTC-USDT-SWAP")["timestamp"], now - 300)
+
+        class _FrozenClock:                      # 只替换 `abt` 命名空间里的 time 模块
+            @staticmethod
+            def time():
+                return float(now)
+
+        with patch.object(abt, "time", _FrozenClock):
+            self._write({"BTC-USDT-SWAP": {"timestamp": now - 10_000, "decision": {}}})
+            self.assertIsNone(abt.get_latest_ai_decision("BTC-USDT-SWAP"))
+            # 边界：正好等于 max_age 仍算新鲜（比较是严格大于）
+            self._write({"BTC-USDT-SWAP": {"timestamp": now - 300, "decision": {}}})
+            self.assertEqual(abt.get_latest_ai_decision("BTC-USDT-SWAP")["timestamp"], now - 300)
 
     def test_corrupt_json_returns_none(self):
         Path(self.cache).write_text("{ not json", encoding="utf-8")

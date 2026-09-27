@@ -85,13 +85,13 @@ class Rig:
         #    本发现的旁证是它真的会拦）；
         # ② 真 `validate_quote_geometry_and_rr` 的返回元数与本文件的桩不同。
         # 本文件要测的是**其后**的价格锚定 / 多所路由 / 直下闸门，故此处按 ok 隔离。
-        _listing = (patch("r20_backend.exchanges.listing.ensure_contract_listed",
+        _listing = (patch("astra_backend.exchanges.listing.ensure_contract_listed",
                           side_effect=self.listing_raises) if self.listing_raises
-                    else patch("r20_backend.exchanges.listing.ensure_contract_listed",
+                    else patch("astra_backend.exchanges.listing.ensure_contract_listed",
                                return_value=SimpleNamespace(ok=self.listing_ok,
                                                             reason=self.listing_reason)))
         with _listing, \
-             patch("r20_backend.exchanges.registry.execution_open", return_value=execution_open), \
+             patch("astra_backend.exchanges.registry.execution_open", return_value=execution_open), \
              patch("scripts.order_risk.validate_quote_geometry_and_rr",
                    side_effect=lambda *a, **k: (self.geometry_calls.append(a),
                                                 self.geometry)[1]):
@@ -151,7 +151,11 @@ class PriceAnchorGateTest(unittest.TestCase):
     def _run_with(self, *, price, pos_side="long"):
         rig = Rig(price=price, ticker="100000")
         ctx = {"notional_usdt": 1, "margin_usdt": 1}
-        with patch("r20_backend.exchanges.listing.ensure_contract_listed",
+        # 本类验的是**限价单**的穿价闸（"BUY 挂在现价上方即拒"）。市价单不按计划价
+        # 成交、路径上会先把三价重锚到现价，穿价闸对它本就不适用 ⇒ 必须钉死限价模式，
+        # 否则运维一切到 market，本类用例会因为"市价单不判穿价"而红（设计如此）。
+        with patch.dict(os.environ, {"ASTRA_ORDER_MODE": "limit"}), \
+             patch("astra_backend.exchanges.listing.ensure_contract_listed",
                    return_value=SimpleNamespace(ok=True, reason="")), \
              patch("scripts.order_risk.validate_quote_geometry_and_rr",
                    return_value=(True, "", 1.0)):
@@ -195,13 +199,13 @@ class PriceAnchorGateTest(unittest.TestCase):
 class MultiVenueRouteTest(unittest.TestCase):
     def _run(self, router, venue="binance"):
         rig = Rig(venue=venue, routing={"ok": True, "reservation": "res-9", "venue": venue})
-        # ⚠️ 必须 patch **真模块的属性**：代码写的是 `from r20_backend import execution_router`
+        # ⚠️ 必须 patch **真模块的属性**：代码写的是 `from astra_backend import execution_router`
         # ⇒ 一旦该模块被别处导入过，`from … import …` 走的是**包属性**，
         # `patch.dict(sys.modules, {...})` 塞的假模块**不会被用到**（单跑本文件时恰好没导入过，
         # 于是"单跑绿、全量红"）。这正是隔离类缺陷的典型形态。
-        import r20_backend.execution_router as real_router
+        import astra_backend.execution_router as real_router
         with patch.object(real_router, "open_protected_position", side_effect=router), \
-             patch("r20_backend.exchanges.listing.ensure_contract_listed",
+             patch("astra_backend.exchanges.listing.ensure_contract_listed",
                    return_value=SimpleNamespace(ok=True, reason="")), \
              patch("scripts.order_risk.validate_quote_geometry_and_rr",
                    return_value=(True, "", 1.0)):
@@ -280,6 +284,89 @@ class OkxDirectTest(unittest.TestCase):
         self.assertIn("交易所 500", why)
         self.assertEqual(rig.released, [("res-1", "下单异常")])
 
+    def test_order_mode_market_submits_market_order_with_none_px(self):
+        okx = _Okx()
+        rig = Rig(okx=okx)
+        with patch.dict(os.environ, {"ASTRA_ORDER_MODE": "market"}):
+            with patch("scripts.order_risk.validate_quote_geometry_and_rr",
+                       return_value=(True, "", 1.0)):
+                ok, _ = rig.run(venue_ctx={"notional_usdt": 1, "margin_usdt": 1})
+        self.assertTrue(ok)
+        self.assertEqual(len(okx.orders), 1)
+        _, _, _, kw = okx.orders[0]
+        self.assertEqual(kw["ord_type"], "market", "市价单模式下必须发送 ord_type='market'")
+        self.assertIsNone(kw["px"], "市价单模式下 px 必须为 None")
+        self.assertIsNotNone(kw["attach_tp"], "市价单模式下止盈腿必须继续绑定")
+        self.assertIsNotNone(kw["attach_sl"], "市价单模式下止损腿必须继续绑定")
+
+    def test_market_order_reanchors_brackets_to_the_live_price(self):
+        """市价单的保护价必须锚在**现价**，而不是"计划限价"。
+
+        反例（本用例防的形态）：计划是回踩挂单（100000，现价 110000）。市价单在
+        110000 成交，若止盈仍留在计划推导出的 105000，则**止盈价低于成交价** ——
+        做多的「止盈」成了亏损价，成交瞬间触发（开-秒平放血）。
+        """
+        okx = _Okx()
+        rig = Rig(okx=okx, price=100000.0, tp=105000.0, sl=95000.0, ticker="110000")
+        ctx = {"notional_usdt": 1, "margin_usdt": 1}
+        with patch.dict(os.environ, {"ASTRA_ORDER_MODE": "market"}):
+            with patch("scripts.order_risk.validate_quote_geometry_and_rr",
+                       return_value=(True, "", 1.0)):
+                ok, why = rig.run(venue_ctx=ctx)
+        self.assertTrue(ok, why)
+        _, _, _, kw = okx.orders[0]
+        fill = 110000.0
+        self.assertGreater(kw["attach_tp"], fill,
+                           f"做多止盈 {kw['attach_tp']} 必须高于真实成交价 {fill}")
+        self.assertLess(kw["attach_sl"], fill,
+                        f"做多止损 {kw['attach_sl']} 必须低于真实成交价 {fill}")
+        # 盈亏比 1:2（t=+5%/s=-5%）必须原样保持
+        self.assertAlmostEqual((kw["attach_tp"] - fill) / (fill - kw["attach_sl"]), 1.0,
+                               places=6, msg="市价单不得改动盈亏比")
+        # 实际提交值必须回写进 `venue_ctx` —— 上游通知靠它说真话（2026-09 缺陷四）。
+        self.assertEqual(ctx["submitted_px"], kw["px"] if kw["px"] is not None else 110000.0)
+        self.assertEqual(ctx["submitted_tp"], kw["attach_tp"],
+                         "回写值必须与实际发给交易所的一致（通知不能再说计划值）")
+        self.assertEqual(ctx["submitted_sl"], kw["attach_sl"])
+        self.assertNotEqual(ctx["submitted_tp"], 105000.0, "回写的仍是计划值 = 缺陷未修")
+        self.assertNotEqual(ctx["submitted_sl"], 95000.0, "回写的仍是计划值 = 缺陷未修")
+
+    def test_market_order_without_live_price_is_refused(self):
+        """现价读不到 ⇒ 拒单（fail-closed）。退回计划价下单正是要消除的反挂形态。"""
+        okx = _Okx()
+        rig = Rig(okx=okx, price=100000.0, tp=105000.0, sl=95000.0, ticker="")
+        with patch.dict(os.environ, {"ASTRA_ORDER_MODE": "market"}):
+            with patch("scripts.order_risk.validate_quote_geometry_and_rr",
+                       return_value=(True, "", 1.0)):
+                ok, why = rig.run(venue_ctx={"notional_usdt": 1, "margin_usdt": 1})
+        self.assertFalse(ok, "缺现价时市价单必须被拒")
+        self.assertIn("市价锚定", why)
+        self.assertEqual(okx.orders, [], "拒单时一单都不许发")
+        self.assertTrue(rig.released, "拒单必须释放信号预留")
+
+    def test_limit_mode_keeps_the_planned_prices_untouched(self):
+        """对照：限价模式**不动**三价（重锚只在市价路径生效）。
+
+        用一个**不穿价**的限价（现价 110000、计划 100000 —— 做多的回踩远挂单，
+        合法策略），断言挂出的 `px/tp/sl` 就是计划原值。
+        """
+        okx = _Okx()
+        rig = Rig(okx=okx, price=100000.0, tp=105000.0, sl=95000.0, ticker="110000")
+        ctx = {"notional_usdt": 1, "margin_usdt": 1}
+        with patch.dict(os.environ, {"ASTRA_ORDER_MODE": "limit"}):
+            with patch("scripts.order_risk.validate_quote_geometry_and_rr",
+                       return_value=(True, "", 1.0)):
+                ok, why = rig.run(venue_ctx=ctx)
+        self.assertTrue(ok, why)
+        _, _, _, kw = okx.orders[0]
+        self.assertEqual(kw["ord_type"], "limit")
+        self.assertEqual(kw["px"], 100000.0, "限价单必须按计划价挂，不得被市价重锚改动")
+        self.assertEqual(kw["attach_tp"], 105000.0)
+        self.assertEqual(kw["attach_sl"], 95000.0)
+        # 限价档也回写，但值与计划逐位相同 ⇒ 通知的既有行为零变更
+        self.assertEqual((ctx["submitted_px"], ctx["submitted_tp"], ctx["submitted_sl"]),
+                         (100000.0, 105000.0, 95000.0))
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -294,8 +381,9 @@ class DemoRescaleTest(unittest.TestCase):
     def _run(self, *, price, tp, sl, ticker, pos_side="long"):
         rig = Rig(price=price, tp=tp, sl=sl, ticker=ticker, simulated=True)
         rig.geometry = (True, "", 1.0)
-        return rig, rig.run(venue_ctx={"notional_usdt": 1, "margin_usdt": 1},
-                            pos_side=pos_side)
+        with patch.dict(os.environ, {"ASTRA_ORDER_MODE": "limit"}):
+            return rig, rig.run(venue_ctx={"notional_usdt": 1, "margin_usdt": 1},
+                                pos_side=pos_side)
 
     def test_long_prices_are_rescaled_to_the_demo_market(self):
         rig, (ok, _) = self._run(price=100000.0, tp=105000.0, sl=95000.0, ticker="95000")
@@ -369,8 +457,9 @@ class RescaleFailureTraceTest(unittest.TestCase):
         from contextlib import redirect_stdout
         rig = Rig(price=100000.0, tp="不是数字", sl=95000.0, ticker="95000", simulated=True)
         buf = io.StringIO()
-        with redirect_stdout(buf):
-            ok, _ = rig.run(venue_ctx={"notional_usdt": 1, "margin_usdt": 1})
+        with patch.dict(os.environ, {"ASTRA_ORDER_MODE": "limit"}):
+            with redirect_stdout(buf):
+                ok, _ = rig.run(venue_ctx={"notional_usdt": 1, "margin_usdt": 1})
         self.assertTrue(ok, "重算失败不该阻断下单")
         self.assertIn("沙盒报价重算失败", buf.getvalue(),
                       "失败必须留痕：原来静默 pass 会让「重算出 bug」毫无痕迹地过去")
@@ -384,7 +473,8 @@ class LongStopPushBackTest(unittest.TestCase):
     def test_long_stop_above_entry_after_rescale_is_pushed_below(self):
         """重算把 SL 推到入场上方 ⇒ 必须按比例压回下方（否则多头的止损方向反了）。"""
         rig = Rig(price=100000.0, tp=105000.0, sl=101000.0, ticker="95000", simulated=True)
-        ok, _ = rig.run(venue_ctx={"notional_usdt": 1, "margin_usdt": 1})
+        with patch.dict(os.environ, {"ASTRA_ORDER_MODE": "limit"}):
+            ok, _ = rig.run(venue_ctx={"notional_usdt": 1, "margin_usdt": 1})
         self.assertTrue(ok)
         _, _, _, kw = rig.okx.orders[0]
         self.assertLess(kw["attach_sl"], kw["px"], f"SL 要被压回入场下方：{kw}")

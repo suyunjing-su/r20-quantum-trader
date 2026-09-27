@@ -12,9 +12,9 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-import r20_backend.app as app_module
+import astra_backend.app as app_module
 import scripts.prompt_library as library
-from r20_backend.admin_auth import AdminAuthStore
+from astra_backend.admin_auth import AdminAuthStore
 
 SLOT_KEYS = ("{{decision_timestamp}}", "{{market_matrix}}", "{{closed_trades_json}}")
 
@@ -22,18 +22,19 @@ SLOT_KEYS = ("{{decision_timestamp}}", "{{market_matrix}}", "{{closed_trades_jso
 class PromptImportExportTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.original = library.LIBRARY_FILE
-        library.LIBRARY_FILE = Path(self.temp.name) / "prompt_library.json"
+        self.original = (library.BASELINE_FILE, library.LOCAL_FILE)
+        library.BASELINE_FILE = Path(self.temp.name) / "prompt_library.json"
+        library.LOCAL_FILE = Path(self.temp.name) / "prompt_library.local.json"
 
     def tearDown(self):
-        library.LIBRARY_FILE = self.original
+        library.BASELINE_FILE, library.LOCAL_FILE = self.original
         self.temp.cleanup()
 
     # ------------------------------------------------------------------ export
     def test_export_is_self_describing_v4(self):
         created = library.create_profile("自描述导出", "说明", source_id="stable")
         exported = library.export_profile(created["id"])
-        self.assertEqual(exported["format"], "r20-prompt-profile")
+        self.assertEqual(exported["format"], "astra-prompt-profile")
         self.assertEqual(exported["version"], 4)
         self.assertEqual(exported["profile_id"], created["id"])
         self.assertIn("exported_at", exported)
@@ -139,7 +140,7 @@ class PromptImportExportTests(unittest.TestCase):
     def test_import_accepts_legacy_v1_and_v2_wrappers(self):
         for legacy_version in (1, 2, 3):
             payload = {
-                "format": "r20-prompt-profile",
+                "format": "astra-prompt-profile",
                 "version": legacy_version,
                 "profile": {
                     "name": f"历史版本{legacy_version}",
@@ -155,19 +156,19 @@ class PromptImportExportTests(unittest.TestCase):
             self.assertIn("{{news_intelligence}}", imported["pipelines"]["trading_system"][0]["content"])
 
     def test_import_rejects_unknown_shape_with_actionable_message(self):
-        for bad in ({}, {"foo": "bar"}, "not-a-dict", {"format": "r20-prompt-profile"}):
+        for bad in ({}, {"foo": "bar"}, "not-a-dict", {"format": "astra-prompt-profile"}):
             with self.subTest(payload=bad):
                 with self.assertRaises(ValueError) as ctx:
                     library.import_profile(bad)
                 message = str(ctx.exception)
                 self.assertIn("无法识别的提示词文件", message)
-                for hint in ("r20-prompt-profile", "active_profile_id", "pipelines"):
+                for hint in ("astra-prompt-profile", "active_profile_id", "pipelines"):
                     self.assertIn(hint, message)
 
     # ------------------------------------------------------- unknown variable
     def test_unknown_variable_import_lists_names(self):
         payload = {
-            "format": "r20-prompt-profile",
+            "format": "astra-prompt-profile",
             "version": 4,
             "profile": {
                 "name": "含未知变量方案",
@@ -199,20 +200,21 @@ class PromptImportExportApiTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.original_auth = app_module.admin_auth
-        self.original_library = library.LIBRARY_FILE
+        self.original_library = (library.BASELINE_FILE, library.LOCAL_FILE)
         root = Path(self.temp.name)
         app_module.admin_auth = AdminAuthStore(root / "admin.db")
         app_module.admin_auth.initialize_from_legacy("InitialAdmin123456")
-        library.LIBRARY_FILE = root / "prompt_library.json"
+        library.BASELINE_FILE = root / "prompt_library.json"
+        library.LOCAL_FILE = root / "prompt_library.local.json"
         self.client = TestClient(app_module.app)
         login = self.client.post(
             "/api/v1/admin/auth/login", json={"username": "admin", "password": "InitialAdmin123456"}
         )
-        self.headers = {"X-R20-Session": login.json()["session_token"]}
+        self.headers = {"X-Astra-Session": login.json()["session_token"]}
 
     def tearDown(self):
         app_module.admin_auth = self.original_auth
-        library.LIBRARY_FILE = self.original_library
+        library.BASELINE_FILE, library.LOCAL_FILE = self.original_library
         self.temp.cleanup()
 
     def test_export_endpoint_returns_self_describing_payload(self):
@@ -241,7 +243,7 @@ class PromptImportExportApiTests(unittest.TestCase):
 
     def test_import_endpoint_returns_400_listing_unknown_variables(self):
         payload = {
-            "format": "r20-prompt-profile",
+            "format": "astra-prompt-profile",
             "version": 4,
             "profile": {
                 "name": "坏变量",

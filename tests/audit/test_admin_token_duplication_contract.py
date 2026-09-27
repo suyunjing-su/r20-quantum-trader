@@ -56,8 +56,8 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-APP = ROOT / "r20_backend" / "app.py"
-DEPS = ROOT / "r20_backend" / "dependencies.py"
+APP = ROOT / "astra_backend" / "app.py"
+DEPS = ROOT / "astra_backend" / "dependencies.py"
 
 
 def _fn(path: Path, name: str):
@@ -138,16 +138,9 @@ class LoadBearingDuplicationTest(unittest.TestCase):
 
 
 class IsolationContractStillGreenTest(unittest.TestCase):
-    def test_memory_routes_isolated_passes(self):
-        """直接跑那道因我删重复而翻红的测试模块（23 例）。"""
-        # 第七十八刀：以 spawn 为被测行为，离线守护下如实 skip（守卫在 spawn 前）。
-        from tests.config_sandbox import skip_if_offline_suite
-        skip_if_offline_suite(self)
-        r = subprocess.run([sys.executable, "-m", "unittest",
-                            "tests.test_memory_routes_isolated"],
-                           cwd=str(ROOT), capture_output=True, text=True)
-        self.assertEqual(r.returncode, 0,
-                         (r.stdout[-2500:] + r.stderr[-2500:]))
+    # 「该模块单独跑也绿」这条判据**已合并**到
+    # `tests/audit/test_standalone_modules_stay_green.py`（一次子进程跑完所有这类模块，
+    # 原先每个模块各起一次解释器）。原用例名：test_memory_routes_isolated_passes。
 
     def test_ast_extraction_finds_the_name(self):
         """复现该测试的抽取方式，确认 `require_admin_token` 在节点集合里。"""

@@ -2,13 +2,13 @@
 set -e
 
 # ==============================================================================
-# R20 Quantum Trader - Docker One-click Launcher
+# AstraQuant - Docker One-click Launcher
 # ==============================================================================
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-echo "🐳 [R20 Docker Launcher] Pre-flight checks..."
+echo "🐳 [ASTRA Docker Launcher] Pre-flight checks..."
 
 # 1. 确保运行时挂载目录存在
 mkdir -p "$ROOT_DIR/data" "$ROOT_DIR/logs" "$ROOT_DIR/backups"
@@ -34,11 +34,11 @@ else
 fi
 
 # 2.5 双容器部署硬前提：.env 是配置唯一事实源（SSOT），其值会覆盖 compose 注入的
-# R20_STANDALONE_GATEWAY。若该键留空，backend 容器会在 lifespan 里重复拉起网关
+# ASTRA_STANDALONE_GATEWAY。若该键留空，backend 容器会在 lifespan 里重复拉起网关
 # worker，抢走共享卷上的 flock → gateway 容器抢锁失败秒退，陷入 exit 0 重启循环。
-if grep -qE '^[[:space:]]*R20_STANDALONE_GATEWAY[[:space:]]*=[[:space:]]*$' "$ROOT_DIR/.env"; then
-    echo "🔧 Enforcing R20_STANDALONE_GATEWAY=true for compose dual-container deployment..."
-    sed -i 's/^[[:space:]]*R20_STANDALONE_GATEWAY[[:space:]]*=.*/R20_STANDALONE_GATEWAY=true/' "$ROOT_DIR/.env"
+if grep -qE '^[[:space:]]*ASTRA_STANDALONE_GATEWAY[[:space:]]*=[[:space:]]*$' "$ROOT_DIR/.env"; then
+    echo "🔧 Enforcing ASTRA_STANDALONE_GATEWAY=true for compose dual-container deployment..."
+    sed -i 's/^[[:space:]]*ASTRA_STANDALONE_GATEWAY[[:space:]]*=.*/ASTRA_STANDALONE_GATEWAY=true/' "$ROOT_DIR/.env"
 fi
 
 # 3. 检查 Docker 与 Docker Compose 命令
@@ -52,10 +52,10 @@ else
     exit 1
 fi
 
-echo "🚀 Building and starting R20 Quantum Trader stack..."
+echo "🚀 Building and starting AstraQuant stack..."
 $COMPOSE_CMD up -d --build
 
-echo "✅ R20 Docker Stack successfully launched!"
+echo "✅ ASTRA Docker Stack successfully launched!"
 echo "--------------------------------------------------------"
 echo "🖥️  Web Dashboard:  http://localhost:8080"
 echo "⚙️  Admin Console:  http://localhost:8080/admin/login"

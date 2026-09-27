@@ -206,8 +206,10 @@ function refreshAll(): void {
         </div>
       </div>
 
-      <!-- 三所卡片网格 -->
-      <div id="venue-accounts-grid" :class="['gap-2.5 md:grid md:grid-cols-3', isMobileExpanded ? 'grid grid-cols-1' : 'hidden md:grid']">
+      <!-- 三所卡片网格：间距走 --ds-space-6(12px)，与工作台其余卡片栅格同拍。
+           原为 gap-2.5(10px)：三张卡之间两道竖缝比上下卡片缝窄 2px，
+           在视线扫过整列卡片时能看出错位。 -->
+      <div id="venue-accounts-grid" :class="['gap-3 md:grid md:grid-cols-3', isMobileExpanded ? 'grid grid-cols-1' : 'hidden md:grid']">
         <VenueAccountCard
           v-for="v in VENUES"
           :key="`${store.environment}-${v}`"
@@ -241,22 +243,22 @@ function refreshAll(): void {
           </span>
         </div>
 
-        <div v-if="portfolio" class="mt-2 grid grid-cols-3 gap-2 text-center">
-          <div class="min-w-0">
+        <div v-if="portfolio" class="mt-3 grid grid-cols-3 text-left">
+          <div class="min-w-0 pe-4">
             <p class="truncate text-3xs text-[var(--ink-3)]">{{ t('dash.venueAccounts.portfolio.total') }}</p>
-            <p class="num font-mono text-xs font-bold text-[var(--ink-strong)]" data-test="portfolio-total">{{ pMoney(pTotal) }}</p>
-            <p v-if="pUncapped" class="text-3xs leading-tight text-[var(--ink-3)]" data-test="portfolio-uncapped">
+            <p class="num font-mono text-md font-bold text-[var(--ink-strong)]" data-test="portfolio-total">{{ pMoney(pTotal) }}</p>
+            <p v-if="pUncapped" class="text-3xs leading-snug text-[var(--ink-3)]" data-test="portfolio-uncapped">
               {{ t('dash.venueAccounts.portfolio.uncapped') }}
               <span v-if="pReferenceCap !== null" class="num">· {{ t('dash.venueAccounts.portfolio.uncappedRef', undefined, { cap: fmtNum(pReferenceCap, 0) }) }}</span>
             </p>
           </div>
-          <div class="min-w-0">
+          <div class="min-w-0 border-s border-[var(--line-2)] px-4">
             <p class="truncate text-3xs text-[var(--ink-3)]">{{ t('dash.venueAccounts.portfolio.reserved') }}</p>
-            <p class="num font-mono text-xs font-semibold text-[var(--ink-1)]" data-test="portfolio-reserved">{{ pMoney(pReserved) }}</p>
+            <p class="num font-mono text-md font-bold text-[var(--ink-strong)]" data-test="portfolio-reserved">{{ pMoney(pReserved) }}</p>
           </div>
-          <div class="min-w-0">
+          <div class="min-w-0 border-s border-[var(--line-2)] ps-4">
             <p class="truncate text-3xs text-[var(--ink-3)]">{{ t('dash.venueAccounts.portfolio.available') }}</p>
-            <p class="num font-mono text-xs font-semibold text-[var(--ink-1)]" data-test="portfolio-available">{{ pMoney(pAvailable) }}</p>
+            <p class="num font-mono text-md font-bold text-[var(--ink-strong)]" data-test="portfolio-available">{{ pMoney(pAvailable) }}</p>
           </div>
         </div>
 

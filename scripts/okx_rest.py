@@ -12,7 +12,7 @@ Design contract (mission/okx-cli-removal, US-001):
   the removed ``okx`` command line and never touches child processes.
 - Fail-closed: any private call with an unconfigured credential group raises
   ``OKXNotConfigured`` *before* a network request is made.
-- Signature口径 identical to ``r20_backend.okx_trade_service._request``:
+- Signature口径 identical to ``astra_backend.okx_trade_service._request``:
   prehash = timestamp + method + request_path + body, HMAC-SHA256 keyed with the
   secret then base64; demo mode adds ``x-simulated-trading: 1``.
 - Returns the payload ``data`` list (``[]`` when empty). Envelope ``code`` or row
@@ -26,6 +26,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import urllib.parse
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -46,6 +47,48 @@ __all__ = [
 ]
 
 DEFAULT_OKX_BROKER_TAG = "6e2191f027c6SUDE"
+
+
+#: OKX 对 `tag` 的取值规范（官方接口文档）：字母（区分大小写）与数字的组合，不超过 16 位。
+#: 实测印证：40 位 → HTTP 400；含 `!@#` → HTTP 400；本仓在用的 16 位码 → 正常受理。
+_TAG_SHAPE = re.compile(r"^[0-9A-Za-z]{1,16}$")
+
+
+def effective_broker_tag() -> str:
+    """当前**生效**的经纪商 tag（与真正发单时用的是同一个取值口径）。
+
+    ⚠️ 环境变量 `OKX_BROKER_TAG` **只有填了合法值才算数**，否则一律回落默认值。
+    两个都在实盘上真实会咬人的形状：
+
+    1. **空/空白**（`.env` 里写了 `OKX_BROKER_TAG=` 却没填值）—— 若照 `getenv`
+       的字面语义返回空串，下游 `if broker_tag:` 就会**静默不挂 tag**：程序照跑、
+       订单照下，而这台机器**一分返佣都赚不到，且没有任何报错**；
+    2. **形状非法**（带 `-`/下划线、超 16 位等）—— OKX **会校验**这个字段
+       （实测非法值直接 HTTP 400）。照发出去会让**每一笔订单都失败**：
+       拿不到返佣事小，用户下不了单事大。
+
+    展示侧（后台「关于」/凭证页）也必须调本函数而非自己读环境变量 ——
+    否则显示值与实发值会漂移，而"我以为带着 tag"正是少赚返佣的成因。
+    """
+    raw = str(os.getenv("OKX_BROKER_TAG", "") or "").strip()
+    return raw if _TAG_SHAPE.match(raw) else DEFAULT_OKX_BROKER_TAG
+
+
+def _with_broker_tag(params: dict[str, Any], tag: str | None) -> dict[str, Any]:
+    """给**会产单**的请求体挂上经纪商 tag（OKX 用它把订单归属到经纪商）。
+
+    ⚠️ 2026-09 起抽成单一出口：原先这段在两处各写一遍，于是新增的
+    `close_position` 漏了 —— 而每一笔 OKX 市价全平都走它（实测 34 次整仓退出），
+    那些成交就没带标记。抽成一处后由 `tests` 的"每个产单端点都必须带 tag"兜住。
+
+    取值优先级：显式实参 > 环境变量 `OKX_BROKER_TAG` > 硬编码默认值
+    （`scripts/okx_rest.py` 就是权威来源；`astra_backend/config.py` 里那个同名字段
+    只是**上报用**，改它不会生效）。
+    """
+    broker_tag = tag if tag is not None else effective_broker_tag()
+    if broker_tag:
+        params["tag"] = broker_tag
+    return params
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -280,9 +323,7 @@ def place_order(
         "ordType": ord_type,
         "sz": size,
     }
-    broker_tag = tag if tag is not None else os.getenv("OKX_BROKER_TAG", DEFAULT_OKX_BROKER_TAG)
-    if broker_tag:
-        params["tag"] = broker_tag
+    _with_broker_tag(params, tag)
     if pos_side:
         params["posSide"] = pos_side
     if px is not None:
@@ -368,12 +409,19 @@ def close_position(
     td_mode: str = "cross",
     auto_cxl: bool = True,
     cl_ord_id: str | None = None,
+    tag: str | None = None,
     env: OKXEnvironment | None = None,
 ) -> list[dict[str, Any]]:
-    """Market close of the whole position (old ``okx swap close --autoCxl``)."""
-    return request("POST", "/api/v5/trade/close-position", {
+    """Market close of the whole position (old ``okx swap close --autoCxl``).
+
+    ⚠️ 2026-09 补经纪商 tag：本端点是**每个 OKX 市价全平**的唯一出口
+    （实测 34 次整仓退出），此前不带 tag ⇒ 那些成交不计经纪商归属。
+    实测确认它**校验** tag（非法值 → HTTP 400；合法值 → 与不带时错误码一致），
+    故补上不会让平仓失败 —— 详见 `_with_broker_tag`。
+    """
+    return request("POST", "/api/v5/trade/close-position", _with_broker_tag({
         "instId": inst_id, "mgnMode": td_mode, "posSide": pos_side, "autoCxl": auto_cxl, "clOrdId": cl_ord_id,
-    }, env=env)
+    }, tag), env=env)
 
 
 # ---------------------------------------------------------------------------
@@ -496,9 +544,7 @@ def place_algo_oco(
         "slTriggerPxType": trigger_px_type,
         "reduceOnly": reduce_only, "cxlOnClosePos": cxl_on_close_pos,
     }
-    broker_tag = tag if tag is not None else os.getenv("OKX_BROKER_TAG", DEFAULT_OKX_BROKER_TAG)
-    if broker_tag:
-        params["tag"] = broker_tag
+    _with_broker_tag(params, tag)
     if extra:
         params.update(extra)
     _required(params.get("instId"), "instId")

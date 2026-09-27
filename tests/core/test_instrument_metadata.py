@@ -2,7 +2,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from r20_backend.instrument_metadata import (
+from astra_backend.instrument_metadata import (
     add_native_specs,
     canonical_pool_metadata,
     fetch_selected_specs,
@@ -35,9 +35,9 @@ class NativeMetadataTests(unittest.TestCase):
                                                   "marginAsset": "USDT"})),
             "gate": _Adapter(self._spec("gate", raw={"status": "trading"})),
         }
-        with patch("r20_backend.instrument_metadata.get_adapter",
+        with patch("astra_backend.instrument_metadata.get_adapter",
                    side_effect=lambda venue, environment=None: adapters[venue]), \
-             patch("r20_backend.instrument_metadata.legacy_environment_for",
+             patch("astra_backend.instrument_metadata.legacy_environment_for",
                    side_effect=lambda venue: "live"):
             specs = fetch_selected_specs("BTC-USDT-SWAP", ["gate", "binance"])
         self.assertEqual(specs["binance"]["quantity_unit"], "base_asset")
@@ -47,8 +47,8 @@ class NativeMetadataTests(unittest.TestCase):
 
     def test_rejects_non_trading_native_spec(self):
         adapter = _Adapter(self._spec("gate", status="delisting"))
-        with patch("r20_backend.instrument_metadata.get_adapter", return_value=adapter), \
-             patch("r20_backend.instrument_metadata.legacy_environment_for", return_value="live"):
+        with patch("astra_backend.instrument_metadata.get_adapter", return_value=adapter), \
+             patch("astra_backend.instrument_metadata.legacy_environment_for", return_value="live"):
             with self.assertRaisesRegex(ValueError, "GATE 合约状态不可交易"):
                 fetch_selected_specs("BTC-USDT-SWAP", ["gate"])
 

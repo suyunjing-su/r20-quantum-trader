@@ -5,10 +5,10 @@ import unittest
 from pathlib import Path
 
 from fastapi.testclient import TestClient
-import r20_backend.app as app_module
-import r20_backend.backup_store as backup_store
+import astra_backend.app as app_module
+import astra_backend.backup_store as backup_store
 import scripts.prompt_library as prompt_store
-from r20_backend.admin_auth import AdminAuthStore
+from astra_backend.admin_auth import AdminAuthStore
 
 
 class CustomSystemApiTests(unittest.TestCase):
@@ -16,11 +16,12 @@ class CustomSystemApiTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         root = Path(self.temp.name)
         self.original_auth = app_module.admin_auth
-        self.original_prompt = prompt_store.LIBRARY_FILE
+        self.original_prompt = (prompt_store.BASELINE_FILE, prompt_store.LOCAL_FILE)
         self.original_backup = backup_store.CONFIG_FILE
         app_module.admin_auth = AdminAuthStore(root / "admin.db")
         app_module.admin_auth.initialize_from_legacy("InitialAdmin123456")
-        prompt_store.LIBRARY_FILE = root / "prompt_library.json"
+        prompt_store.BASELINE_FILE = root / "prompt_library.json"
+        prompt_store.LOCAL_FILE = root / "prompt_library.local.json"
         backup_store.CONFIG_FILE = root / "backup_jobs.json"
         self.client = TestClient(app_module.app)
         self.root = self.login("admin", "InitialAdmin123456")
@@ -29,14 +30,14 @@ class CustomSystemApiTests(unittest.TestCase):
 
     def tearDown(self):
         app_module.admin_auth = self.original_auth
-        prompt_store.LIBRARY_FILE = self.original_prompt
+        prompt_store.BASELINE_FILE, prompt_store.LOCAL_FILE = self.original_prompt
         backup_store.CONFIG_FILE = self.original_backup
         self.temp.cleanup()
 
     def login(self, username: str, password: str) -> dict[str, str]:
         response = self.client.post("/api/v1/admin/auth/login", json={"username": username, "password": password})
         self.assertEqual(response.status_code, 200, response.text)
-        return {"X-R20-Session": response.json()["session_token"]}
+        return {"X-Astra-Session": response.json()["session_token"]}
 
     def test_prompt_profile_lifecycle_and_rbac(self):
         self.assertEqual(self.client.post("/api/v1/admin/prompt-profiles", headers=self.operator, json={"name": "denied", "source_id": "stable"}).status_code, 403)
@@ -64,7 +65,7 @@ class CustomSystemApiTests(unittest.TestCase):
         created = self.client.post("/api/v1/admin/backup-jobs", headers=self.root, json={"name": "午间灾备", "source_id": "nightly-default"})
         self.assertEqual(created.status_code, 200, created.text)
         job = created.json()["job"]
-        job.update({"enabled": True, "schedule_times": ["12:30"], "encryption": {"enabled": True, "key_env": "R20_CUSTOM_BACKUP_KEY"}})
+        job.update({"enabled": True, "schedule_times": ["12:30"], "encryption": {"enabled": True, "key_env": "ASTRA_CUSTOM_BACKUP_KEY"}})
         local = next(x for x in job["targets"] if x["type"] == "local")
         local.update({"enabled": True, "path": "backups/custom", "retention": 5})
         saved = self.client.put(f"/api/v1/admin/backup-jobs/{job['id']}", headers=self.root, json={"job": job})
@@ -72,9 +73,9 @@ class CustomSystemApiTests(unittest.TestCase):
         listed = self.client.get("/api/v1/admin/backup-jobs", headers=self.operator)
         self.assertEqual(listed.status_code, 200)
         item = next(x for x in listed.json()["jobs"] if x["id"] == job["id"])
-        self.assertEqual(item["encryption"]["key_env"], "R20_CUSTOM_BACKUP_KEY")
+        self.assertEqual(item["encryption"]["key_env"], "ASTRA_CUSTOM_BACKUP_KEY")
         self.assertNotIn("secret", str(item).lower())
-        bad_confirmation = self.client.post(f"/api/v1/admin/backup-jobs/{job['id']}/run", headers=self.root, json={"confirmation": "BACKUP R20"})
+        bad_confirmation = self.client.post(f"/api/v1/admin/backup-jobs/{job['id']}/run", headers=self.root, json={"confirmation": "BACKUP ASTRA"})
         self.assertEqual(bad_confirmation.status_code, 400)
         self.assertEqual(self.client.put(f"/api/v1/admin/backup-jobs/{job['id']}", headers=self.operator, json={"job": job}).status_code, 403)
         exported = self.client.get(f"/api/v1/admin/backup-jobs/{job['id']}/export", headers=self.operator)

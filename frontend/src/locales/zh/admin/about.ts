@@ -24,11 +24,11 @@ export const zhAdminAbout = {
   runUpdate: "执行安全更新",
   gitOutput: "Git 执行输出：",
   safetyNote: "安全保护机制：执行更新时仅允许 Fast-Forward 快进合并；如果工作区有未提交的追踪代码冲突、远端不可达或无法快进，后台将自动拒绝更新以保护系统稳定性。",
-  confirmTitle: "确认更新 R20 系统",
-  confirmSubtitle: "关于 R20：执行 fast-forward 拉取最新主分支代码",
+  confirmTitle: "确认更新 AstraQuant 系统",
+  confirmSubtitle: "关于 AstraQuant：执行 fast-forward 拉取最新主分支代码",
   confirmPrefix: "为防止误操作，请在下方输入确认短语",
   confirmSuffix: "：",
-  phrasePlaceholder: "请输入 UPDATE R20",
+  phrasePlaceholder: "请输入 UPDATE ASTRA",
   cancel: "取消",
   updating: "正在更新中...",
   confirmNow: "立即确认更新",
@@ -44,4 +44,14 @@ export const zhAdminAbout = {
   bandRuntime: '运行环境',
   bandSyncGap: '待同步差额',  // ── 批 41：本地化写死文案（更新检查失败）──
   updateCheckFailed: '更新检查失败：{msg}（无法确认是否落后，安全补丁可能静默脱班）',
+
+  // ── 注册/返佣通道（2026-09）──
+  // 三条地址来自后端 `/api/v1/admin/about` 的 `channels`（可被 OKX_INVITE_URL /
+  // GATE_INVITE_URL / BINANCE_INVITE_URL 覆盖）；OKX 经纪商 code 与**实发订单上的
+  // tag 同源**。此处只放界面 chrome，链接与 code 一律来自接口，不在前端硬编码。
+  channelsTitle: '注册通道',
+  channelsSub: '开户与费率绑定入口',
+  channelsLead: '经下列入口注册可绑定对应交易所的费率与返佣；老用户满足交易所的召回条件时同样可绑定。',
+  channelOpen: '注册入口',
+  channelUnset: '未配置（可用环境变量覆盖）',
 };

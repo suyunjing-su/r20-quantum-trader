@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * AdminLayout.vue · R20 开发者工作台外壳
+ * AdminLayout.vue · ASTRA 开发者工作台外壳
  * ---------------------------------------------------------------------------
  * 视觉语言：DeepSeek Harness 侧边导航工作台
  *   · 画布与侧栏同底（#0a0a0a），靠 6% 发丝描边分区，不用独立侧栏底色
@@ -42,7 +42,7 @@ const auth = useAuthStore();
 const { t } = useI18n();
 const { theme, toggleTheme } = useTheme();
 
-const collapsed = useLocalStorage('r20_admin_sidebar', false);
+const collapsed = useLocalStorage('astra_admin_sidebar', false);
 const drawerOpen = ref(false);
 
 const currentKey = computed(() => (route.name as string) || 'admin-overview');
@@ -347,11 +347,11 @@ watch(() => route.path, () => (drawerOpen.value = false));
 .wb-item {
   display: flex;
   align-items: center;
-  gap:10px;
+  gap: 10px;
   width: 100%;
-  height: 30px;
+  height: 32px;
   padding: 0 var(--ds-space-2);
-  border: 0;
+  border: 1px solid transparent;
   border-radius: var(--r-ctl);
   background-color: transparent;
   color: var(--ds-color-text-description);
@@ -361,18 +361,19 @@ watch(() => route.path, () => (drawerOpen.value = false));
   text-align: left;
   cursor: pointer;
   transition: background-color var(--dur-fast) var(--ease-out),
-    color var(--dur-fast) var(--ease-out);
+    color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out);
 }
 .wb-item:hover {
   background-color: var(--ds-color-bg-hover);
   color: var(--ds-color-text-primary);
 }
 .wb-item.is-active {
-  background-color: var(--ds-color-bg-hover);
+  background: linear-gradient(90deg, rgba(59, 130, 246, 0.12) 0%, rgba(59, 130, 246, 0.02) 100%);
   color: var(--ds-color-text-primary);
   font-weight: 600;
-  border: 1px solid var(--ds-color-border-hover);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+  border: 1px solid var(--accent-line);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
 }
 .wb-item-icon {
   flex-shrink: 0;

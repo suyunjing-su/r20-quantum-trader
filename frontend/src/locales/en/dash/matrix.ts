@@ -7,6 +7,7 @@ export const enMatrix = {
     venuesConnected: '{n} venues',
     comboEquity: 'Portfolio Equity (U)',
     comboEquityTip: 'Aggregated equity across venues',
+    comboEquityEmpty: 'No readable account in this environment; other tiers are excluded',
     todayPnl: 'Realized today',
     floatPnl: 'Floating PnL',
     ls: 'Long / short',
@@ -50,7 +51,7 @@ export const enMatrix = {
     triggerIndex: 'index-price trigger',
     triggerUnknown: 'trigger type not reported',
     triggerMarkPrice: 'mark-price trigger',
-    triggerContractPrice: 'contract-price trigger (≈ last)',
+    triggerContractPrice: 'last-price trigger',
     triggerRawCodeHint: 'Raw code reported by the venue; this repo has not verified its official mapping, so it is shown verbatim',
     triggerMarkHint: 'This protective leg triggers on mark price (wick-resistant)',
     triggerLastHint: 'This leg triggers on last traded price: a single wick can knock it out early',
@@ -153,7 +154,7 @@ export const enMatrix = {
       copy: 'Copy risk params',
       /* batch 77: the clipboard summary used to be hard-coded Chinese, so an
          English-mode user copied a mixed zh/en string. */
-      copySummary: '[R20 risk calc] {sym} entry:{entry} SL:{sl} TP:{tp} R:R={rr}:1',
+      copySummary: '[AstraQuant risk calc] {sym} entry:{entry} SL:{sl} TP:{tp} R:R={rr}:1',
     },
   },
   matrix: {

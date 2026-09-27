@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run one or more configured R20 custom backup jobs."""
+"""Run one or more configured ASTRA custom backup jobs."""
 from __future__ import annotations
 import argparse
 import json
@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path: sys.path.insert(0, str(ROOT))
 if str(ROOT / "scripts") not in sys.path: sys.path.insert(0, str(ROOT / "scripts"))
 
-from r20_backend.backup_store import get_job, list_jobs
+from astra_backend.backup_store import get_job, list_jobs
 from backup_runtime import clean_stale_staging, run_backup_job
 
 
@@ -19,7 +19,7 @@ def notify(result: dict) -> None:
         from qq_notifier import send_qq_message
         icon = "✅" if result.get("status") == "success" else "⚠️" if result.get("status") == "partial" else "❌"
         lines = [
-            f"{icon} 【R20 自定义灾备】{result.get('job_name', '未知任务')}",
+            f"{icon} 【AstraQuant 自定义灾备】{result.get('job_name', '未知任务')}",
             f"状态：{result.get('status', 'unknown')}",
             f"时间：{result.get('started_at', '')} - {result.get('finished_at', '')}"
         ]

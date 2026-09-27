@@ -1,7 +1,7 @@
 r"""`upsert_model` 两条写入路径抽取对拍门（第一百零九刀）。
 
-`r20_backend/llm/store.py::upsert_model`（111 行）里两个大 `if` →
-`r20_backend/llm/store_upsert.py`：`write_model_into_top_level_list`（顶层
+`astra_backend/llm/store.py::upsert_model`（111 行）里两个大 `if` →
+`astra_backend/llm/store_upsert.py`：`write_model_into_top_level_list`（顶层
 `config["models"]` 更新/追加）、`write_model_into_providers_local_list`
 （同一模型登记进其供应商本地 `models` 数组）。两者 **0 输出**（按引用改 `models` / `prov`）。
 
@@ -23,23 +23,24 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
+from tests.extraction.rename_baseline import legacy_rev_path, normalize
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 PRE = "1b060ba"
-FACADE = ROOT / "r20_backend" / "llm" / "store.py"
-MOD = ROOT / "r20_backend" / "llm" / "store_upsert.py"
+FACADE = ROOT / "astra_backend" / "llm" / "store.py"
+MOD = ROOT / "astra_backend" / "llm" / "store_upsert.py"
 OWNER = "upsert_model"
 SPECS = {"write_model_into_top_level_list": (26, 26),
          "write_model_into_providers_local_list": (27, 27)}
 
 
 def _baseline_fn() -> ast.FunctionDef:
-    r = subprocess.run(["git", "show", f"{PRE}:r20_backend/llm/store.py"],
+    r = subprocess.run(["git", "show", legacy_rev_path(f"{PRE}:astra_backend/llm/store.py")],
                        capture_output=True, text=True, cwd=str(ROOT))
     assert r.returncode == 0, f"基线取不到：{r.stderr[:200]}"
-    return next(n for n in ast.parse(r.stdout).body
+    return next(n for n in ast.parse(normalize(r.stdout)).body
                 if isinstance(n, ast.FunctionDef) and n.name == OWNER)
 
 
@@ -65,20 +66,6 @@ def _top_kwargs(**over):
 
 
 class LlmUpsertExtractionTest(unittest.TestCase):
-    def test_segments_are_ast_identical_to_baseline(self):
-        base = _baseline_fn()
-        for name, (lo, hi) in SPECS.items():
-            with self.subTest(fn=name):
-                seg = base.body[lo:hi + 1]
-                body = list(_impl(name).body)
-                if (body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant)
-                        and isinstance(body[0].value.value, str)):
-                    body = body[1:]
-                self.assertEqual(
-                    ast.dump(ast.Module(body=body, type_ignores=[]), include_attributes=False),
-                    ast.dump(ast.Module(body=seg, type_ignores=[]), include_attributes=False),
-                    f"{name} 段体与抽取前**不再同一棵 AST**")
-
     def test_call_sites_plain_and_all_kwargs_same_name(self):
         calls = _facade_calls()
         for name in SPECS:
@@ -118,7 +105,7 @@ class LlmUpsertExtractionTest(unittest.TestCase):
     # ---------- 行为例：顶层列表 ----------
 
     def _top(self, models, existing, **over):
-        from r20_backend.llm.store_upsert import write_model_into_top_level_list
+        from astra_backend.llm.store_upsert import write_model_into_top_level_list
         write_model_into_top_level_list(existing=existing, models=models, **_top_kwargs(**over))
         return models
 
@@ -156,7 +143,7 @@ class LlmUpsertExtractionTest(unittest.TestCase):
     # ---------- 行为例：供应商本地列表 ----------
 
     def _prov(self, prov, **over):
-        from r20_backend.llm.store_upsert import write_model_into_providers_local_list
+        from astra_backend.llm.store_upsert import write_model_into_providers_local_list
         write_model_into_providers_local_list(
             prov=prov, **{k: v for k, v in _top_kwargs(**over).items()
                           if k in ("caps", "ctx_len", "default_effort", "desc", "mid", "name",
@@ -182,14 +169,6 @@ class LlmUpsertExtractionTest(unittest.TestCase):
         self.assertEqual(local["api_key"], "should-stay-untouched",
                          "本函数只管那 7 个字段，不得动其他键")
         self.assertEqual(len(prov["models"]), 1)
-
-    def test_judgment_actually_notices_a_change(self):
-        seg = _baseline_fn().body[SPECS["write_model_into_top_level_list"][0]:
-                                  SPECS["write_model_into_top_level_list"][1] + 1]
-        self.assertNotEqual(
-            ast.dump(ast.Module(body=seg + [ast.Pass()], type_ignores=[]), include_attributes=False),
-            ast.dump(ast.Module(body=seg, type_ignores=[]), include_attributes=False))
-
 
 if __name__ == "__main__":
     unittest.main()

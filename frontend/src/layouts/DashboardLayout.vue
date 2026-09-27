@@ -13,9 +13,9 @@ import { useUi } from '../composables/useUi';
 import { useHotkeys } from '../composables/useHotkeys';
 import { useLocalStorage } from '../composables/useLocalStorage';
 import { publicTabs } from '../config/nav';
+import FirstRunGuide from '../components/dashboard/FirstRunGuide.vue';
 import {
   BookOpen,
-  Shield,
   ChevronLeft,
   ChevronRight,
   X,
@@ -41,7 +41,7 @@ const store = useDashboardStore();
 const { t } = useI18n();
 const { aboutOpen, trajectoryOpen } = useUi();
 
-const sidebarCollapsed = useLocalStorage('r20_sidebar_collapsed', false);
+const sidebarCollapsed = useLocalStorage('astra_sidebar_collapsed', false);
 
 /* ── 窄屏导航（2026-09-16 用户反馈修复）────────────────────────────────────
  * 症状：窗口宽度 < 768px（Tailwind md 断点）时左侧栏被 `hidden md:flex` 整体隐藏，
@@ -96,15 +96,6 @@ function go(path: string) {
   mobileNavOpen.value = false;
   if (route.path !== path) router.push(path);
 }
-
-const venueHealth = computed(() => {
-  const vh = (store.data as any)?.venue_health || {};
-  return [
-    { name: 'OKX', status: vh.okx?.connected ? 'active' : 'idle', ping: vh.okx?.latency_ms ?? '<50ms' },
-    { name: 'BN', status: vh.binance?.connected ? 'active' : 'idle', ping: vh.binance?.latency_ms ?? '392ms' },
-    { name: 'Gate', status: vh.gate?.connected ? 'active' : 'idle', ping: vh.gate?.latency_ms ?? '311ms' },
-  ];
-});
 </script>
 
 <template>
@@ -114,7 +105,7 @@ const venueHealth = computed(() => {
   >
     <!-- 键盘用户的第一个 Tab 落点：跳过侧边导航与顶栏动作组直达正文（批 45） -->
     <SkipLink />
-    <!-- 左侧：R20 终端侧边导航栏
+    <!-- 左侧：ASTRA 终端侧边导航栏
          桌面（md+）= 常驻侧栏（可折叠 236/56）；窄屏 = off-canvas 抽屉（同一元素）
          层级：遮罩 z-30 < 抽屉 z-50 < 顶栏 z-[60] —— 顶栏必须压在抽屉之上，
          否则抽屉展开后会把顶栏那颗「展开/收起导航」按钮自己盖住，点不回去。 -->
@@ -188,21 +179,29 @@ const venueHealth = computed(() => {
           v-for="tab in publicTabs"
           :key="tab.key"
           type="button"
-          class="w-full flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-xs font-medium cursor-pointer transition-all"
+          class="w-full flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-xs font-medium cursor-pointer transition-all relative overflow-hidden group"
           :class="
             activeTab === tab.key
-              ? 'bg-[var(--surface-3)] text-[var(--ink-strong)] font-semibold border border-[var(--line-2)] shadow-xs'
+              ? 'bg-gradient-to-r from-[var(--brand-bg)] to-transparent text-[var(--ink-strong)] font-semibold border border-[var(--line-2)] shadow-xs'
               : 'text-[var(--ink-2)] hover:bg-[var(--surface-2)] hover:text-[var(--ink-1)] border border-transparent'
           "
           :title="navCompact ? t(tab.labelKey) : undefined"
           :aria-current="activeTab === tab.key ? 'page' : undefined"
           @click="go(tab.path)"
         >
-          <component :is="tab.icon" class="h-4 w-4 shrink-0" />
+          <span
+            v-if="activeTab === tab.key"
+            class="absolute left-0 top-1.5 bottom-1.5 w-1 rounded-r-full bg-[var(--brand)] shadow-[0_0_8px_var(--brand)]"
+          />
+          <component
+            :is="tab.icon"
+            class="h-4 w-4 shrink-0 transition-all duration-200"
+            :class="activeTab === tab.key ? 'text-[var(--brand)] scale-105' : 'opacity-70 group-hover:opacity-100'"
+          />
           <span v-if="!navCompact" class="truncate">{{ t(tab.labelKey) }}</span>
           <span
             v-if="!navCompact && activeTab === tab.key"
-            class="ms-auto h-1.5 w-1.5 rounded-full bg-[var(--accent)]"
+            class="ms-auto h-1.5 w-1.5 rounded-full bg-[var(--brand)] shadow-[0_0_6px_var(--brand)]"
           />
         </button>
 
@@ -226,62 +225,31 @@ const venueHealth = computed(() => {
         </button>
       </div>
 
-      <!-- 侧边栏底栏：三所状态与折叠控制器 -->
+      <!-- 侧边栏底栏：折叠控制器与关于入口 -->
       <div
-        class="border-t p-2 space-y-2"
+        class="border-t p-2 flex items-center justify-between"
         style="border-color: var(--line-1); background-color: var(--surface-sidebar)"
       >
-        <!-- 三所健康度微缩指示灯（展开时显示） -->
-        <div
-          v-if="!navCompact"
-          class="rounded p-2 text-3xs"
-          style="background-color: var(--surface-2); border: 1px solid var(--line-1)"
+        <button type="button"
+          class="btn btn-quiet btn-icon h-7 w-7 cursor-pointer"
+          :title="isNarrow ? t('dash.shell.nav.closeMobile') : (navCompact ? t('dash.shell.nav.expand') : t('dash.shell.nav.collapse'))"
+          :aria-label="isNarrow ? t('dash.shell.nav.closeMobile') : (navCompact ? t('dash.shell.nav.expand') : t('dash.shell.nav.collapse'))"
+          :aria-expanded="navExpanded"
+          :aria-controls="'dashboard-sidebar'"
+          @click="toggleNav"
         >
-          <div class="flex items-center justify-between mb-1.5 text-[var(--ink-3)]">
-            <span class="flex items-center gap-1 font-semibold uppercase tracking-wider">
-              <Shield class="h-3 w-3 text-[var(--up)]" /> {{ t('dash.shell.nav.venues') }}
-            </span>
-            <span class="font-mono">Fail-Closed</span>
-          </div>
-          <div class="grid grid-cols-3 gap-1 text-center font-mono">
-            <div
-              v-for="v in venueHealth"
-              :key="v.name"
-              class="rounded py-0.5 px-1 border"
-              style="background-color: var(--surface-1); border-color: var(--line-1)"
-            >
-              <div class="flex items-center justify-center gap-1">
-                <span class="h-1.5 w-1.5 rounded-full" :class="v.status === 'active' ? 'bg-[var(--up)]' : 'bg-[var(--ink-3)]'" />
-                <span class="font-semibold">{{ v.name }}</span>
-              </div>
-              <div class="text-3xs text-[var(--ink-3)]">{{ v.ping }}</div>
-            </div>
-          </div>
-        </div>
+          <X v-if="isNarrow" class="h-3.5 w-3.5" />
+          <ChevronRight v-else-if="navCompact" class="h-3.5 w-3.5" />
+          <ChevronLeft v-else class="h-3.5 w-3.5" />
+        </button>
 
-        <!-- 底栏操作区 -->
-        <div class="flex items-center justify-between">
-          <button type="button"
-            class="btn btn-quiet btn-icon h-7 w-7 cursor-pointer"
-            :title="isNarrow ? t('dash.shell.nav.closeMobile') : (navCompact ? t('dash.shell.nav.expand') : t('dash.shell.nav.collapse'))"
-            :aria-label="isNarrow ? t('dash.shell.nav.closeMobile') : (navCompact ? t('dash.shell.nav.expand') : t('dash.shell.nav.collapse'))"
-            :aria-expanded="navExpanded"
-            :aria-controls="'dashboard-sidebar'"
-            @click="toggleNav"
-          >
-            <X v-if="isNarrow" class="h-3.5 w-3.5" />
-            <ChevronRight v-else-if="navCompact" class="h-3.5 w-3.5" />
-            <ChevronLeft v-else class="h-3.5 w-3.5" />
-          </button>
-
-          <button type="button"
-            v-if="!navCompact"
-            class="btn btn-quiet h-7 px-2 text-3xs font-medium cursor-pointer"
-            @click="aboutOpen = true"
-          >
-            {{ t('dash.shell.nav.about') }}
-          </button>
-        </div>
+        <button type="button"
+          v-if="!navCompact"
+          class="btn btn-quiet h-7 px-2 text-3xs font-medium cursor-pointer"
+          @click="aboutOpen = true"
+        >
+          {{ t('dash.shell.nav.about') }}
+        </button>
       </div>
     </aside>
 
@@ -308,6 +276,8 @@ const venueHealth = computed(() => {
         class="flex-1 overflow-y-auto overflow-x-hidden min-w-0 p-3 sm:p-4 pb-20 md:pb-6 outline-none"
       >
         <div class="mx-auto w-full max-w-[2048px]">
+          <!-- 陌生人的第一公里：只在读不到账户数据时出现，就绪即消失 -->
+          <FirstRunGuide />
           <KeepAlive :max="5">
             <MatrixView v-if="activeTab === 'trading'" key="trading" />
             <RadarView v-else-if="activeTab === 'factors'" key="factors" />

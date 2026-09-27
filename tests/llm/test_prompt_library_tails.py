@@ -38,9 +38,12 @@ class _Sandbox(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         self.library = self.root / "prompt_library.json"
-        p = patch.object(pl, "LIBRARY_FILE", self.library)
-        p.start()
-        self.addCleanup(p.stop)
+        # `self.library` 是**出厂基线**（读侧）；写入侧另钉一个本地文件（双文件模型 2026-09）
+        for _attr, _val in (("BASELINE_FILE", self.library),
+                            ("LOCAL_FILE", self.root / "prompt_library.local.json")):
+            p = patch.object(pl, _attr, _val)
+            p.start()
+            self.addCleanup(p.stop)
 
     def _write(self, payload):
         self.library.write_text(json.dumps(payload), encoding="utf-8")
@@ -161,19 +164,19 @@ class LoadLibraryTests(_Sandbox, unittest.TestCase):
 # ───────────────────── 锁 ─────────────────────
 class LibraryLockTests(_Sandbox, unittest.TestCase):
     def test_the_backend_lock_is_preferred(self):
-        import r20_backend.file_locks as fl
+        import astra_backend.file_locks as fl
         sentinel = object()
         with patch.object(fl, "file_lock", lambda p: sentinel):
             self.assertIs(pl._library_lock(), sentinel)
 
     def test_an_unavailable_backend_lock_falls_back_locally(self):
         # ★ 第 614/615 行 —— 绝不在"锁不可用"时静默放行
-        with patch.dict(sys.modules, {"r20_backend.file_locks": None}):
+        with patch.dict(sys.modules, {"astra_backend.file_locks": None}):
             self.assertIsNotNone(pl._library_lock())
 
     def test_the_fallback_lock_is_reentrant(self):
         # 不可重入会让 `create_profile`（持锁）→ `save_library`（再取锁）同线程自锁挂死
-        with patch.dict(sys.modules, {"r20_backend.file_locks": None}):
+        with patch.dict(sys.modules, {"astra_backend.file_locks": None}):
             with pl._library_lock():
                 with pl._library_lock():
                     reentered = True

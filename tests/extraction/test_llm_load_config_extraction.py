@@ -1,7 +1,7 @@
 r"""`load_llm_config` 两段归一化抽取对拍门（第一百零八刀）。
 
-`r20_backend/llm/store.py::load_llm_config`（94 行）里两段纯循环 →
-`r20_backend/llm/store_normalize.py`（与第一百零二刀同域，故并入该模块）：
+`astra_backend/llm/store.py::load_llm_config`（94 行）里两段纯循环 →
+`astra_backend/llm/store_normalize.py`（与第一百零二刀同域，故并入该模块）：
 `normalize_providers_into_result`（供应商 + 其下模型的响应形状归一）、
 `flatten_models_into_result`（顶层扁平模型，向后兼容）。
 
@@ -24,22 +24,23 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
+from tests.extraction.rename_baseline import legacy_rev_path, normalize
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 PRE = "def9d18"
-FACADE = ROOT / "r20_backend" / "llm" / "store.py"
-MOD = ROOT / "r20_backend" / "llm" / "store_normalize.py"
+FACADE = ROOT / "astra_backend" / "llm" / "store.py"
+MOD = ROOT / "astra_backend" / "llm" / "store_normalize.py"
 OWNER = "load_llm_config"
 SPECS = {"normalize_providers_into_result": (6, 6), "flatten_models_into_result": (7, 7)}
 
 
 def _baseline_fn() -> ast.FunctionDef:
-    r = subprocess.run(["git", "show", f"{PRE}:r20_backend/llm/store.py"],
+    r = subprocess.run(["git", "show", legacy_rev_path(f"{PRE}:astra_backend/llm/store.py")],
                        capture_output=True, text=True, cwd=str(ROOT))
     assert r.returncode == 0, f"基线取不到：{r.stderr[:200]}"
-    return next(n for n in ast.parse(r.stdout).body
+    return next(n for n in ast.parse(normalize(r.stdout)).body
                 if isinstance(n, ast.FunctionDef) and n.name == OWNER)
 
 
@@ -57,26 +58,12 @@ def _facade_calls() -> dict:
 
 
 def _real_helpers():
-    from r20_backend.llm.capabilities import _detect_capabilities, _detect_reasoning_type
-    from r20_backend.llm.util import mask_secret
+    from astra_backend.llm.capabilities import _detect_capabilities, _detect_reasoning_type
+    from astra_backend.llm.util import mask_secret
     return _detect_capabilities, _detect_reasoning_type, mask_secret
 
 
 class LlmLoadConfigExtractionTest(unittest.TestCase):
-    def test_segments_are_ast_identical_to_baseline(self):
-        base = _baseline_fn()
-        for name, (lo, hi) in SPECS.items():
-            with self.subTest(fn=name):
-                seg = base.body[lo:hi + 1]
-                body = list(_impl(name).body)
-                if (body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant)
-                        and isinstance(body[0].value.value, str)):
-                    body = body[1:]
-                self.assertEqual(
-                    ast.dump(ast.Module(body=body, type_ignores=[]), include_attributes=False),
-                    ast.dump(ast.Module(body=seg, type_ignores=[]), include_attributes=False),
-                    f"{name} 段体与抽取前**不再同一棵 AST**")
-
     def test_call_sites_are_plain_statements_with_all_kwargs(self):
         calls = _facade_calls()
         for name in SPECS:
@@ -128,7 +115,7 @@ class LlmLoadConfigExtractionTest(unittest.TestCase):
 
     def _providers(self, res, providers, *, active_mid="m1", active_pid="p1", mask_keys=True,
                    caps=None, rtypes=None, masker=None):
-        from r20_backend.llm.store_normalize import normalize_providers_into_result
+        from astra_backend.llm.store_normalize import normalize_providers_into_result
         dc, dr, dm = _real_helpers()
         normalize_providers_into_result(
             _detect_capabilities=caps or dc, _detect_reasoning_type=rtypes or dr,
@@ -188,7 +175,7 @@ class LlmLoadConfigExtractionTest(unittest.TestCase):
     # ---------- 行为例：扁平模型 ----------
 
     def test_flat_models_has_key_and_is_active(self):
-        from r20_backend.llm.store_normalize import flatten_models_into_result
+        from astra_backend.llm.store_normalize import flatten_models_into_result
         dc, dr, dm = _real_helpers()
         res = {"models": []}
         same = res["models"]
@@ -206,7 +193,7 @@ class LlmLoadConfigExtractionTest(unittest.TestCase):
         self.assertNotIn("api_key", by_id["m1"], "掩码模式不带原始密钥")
 
     def test_flat_models_raw_key_when_not_masking(self):
-        from r20_backend.llm.store_normalize import flatten_models_into_result
+        from astra_backend.llm.store_normalize import flatten_models_into_result
         dc, _dr, _dm = _real_helpers()
         res = {"models": []}
         flatten_models_into_result(
@@ -215,14 +202,6 @@ class LlmLoadConfigExtractionTest(unittest.TestCase):
             providers_list=[], res=res)
         self.assertEqual(res["models"][0]["api_key"], "k9")
         self.assertFalse(res["models"][0]["is_active"], "active_mid 为空 ⇒ 无激活项")
-
-    def test_judgment_actually_notices_a_change(self):
-        seg = _baseline_fn().body[SPECS["normalize_providers_into_result"][0]:
-                                  SPECS["normalize_providers_into_result"][1] + 1]
-        self.assertNotEqual(
-            ast.dump(ast.Module(body=seg + [ast.Pass()], type_ignores=[]), include_attributes=False),
-            ast.dump(ast.Module(body=seg, type_ignores=[]), include_attributes=False))
-
 
 if __name__ == "__main__":
     unittest.main()

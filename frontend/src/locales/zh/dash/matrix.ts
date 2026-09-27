@@ -9,6 +9,8 @@ export const zhMatrix = {
     venuesConnected: '{n} 所接入',
     comboEquity: '组合总权益 (U)',
     comboEquityTip: '多所聚合权益',
+    // 所选档位一所都读不到时（例：切到实盘但只配了模拟盘 key）不显示别档的钱
+    comboEquityEmpty: '当前档位没有可读账户，不计入任何其他档位的余额',
     todayPnl: '今日已实现',
     floatPnl: '持仓浮动盈亏',
     ls: '多空持仓比',
@@ -53,7 +55,7 @@ export const zhMatrix = {
     triggerIndex: '指数价触发',
     triggerUnknown: '触发价类型未上报',
     triggerMarkPrice: '标记价触发',
-    triggerContractPrice: '合约价触发（≈最新成交价）',
+    triggerContractPrice: '最新价触发',
     triggerRawCodeHint: '交易所上报的原始码；本仓未核实其官方映射，故不解释含义（点开交易所核对）',
     triggerMarkHint: '该保护腿按标记价触发（抗插针）',
     triggerLastHint: '该保护腿按最新成交价触发：一根插针即可提前打掉保护',
@@ -154,9 +156,9 @@ export const zhMatrix = {
       sl: '最大风险',
       reset: '复位',
       copy: '复制风控参数',
-      /* 批 77：剪贴板文案此前硬编码中文（`【R20 风控测算】` / `入场:` / `SL:` / `TP:`），
+      /* 批 77：剪贴板文案此前硬编码中文（`【ASTRA 风控测算】` / `入场:` / `SL:` / `TP:`），
          英文界面下用户复制出来是一段中英混排。 */
-      copySummary: '【R20 风控测算】{sym} 入场:{entry} SL:{sl} TP:{tp} R:R={rr}:1',
+      copySummary: '【AstraQuant 风控测算】{sym} 入场:{entry} SL:{sl} TP:{tp} R:R={rr}:1',
     },
   },
 

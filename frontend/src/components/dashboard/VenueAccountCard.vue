@@ -24,10 +24,18 @@ const venueName = computed(() => t(`dash.venueAccounts.venueNames.${props.venue}
 
 const statusMeta = computed(() => {
   const s = props.account?.status;
+  const reason = props.account?.reason || '';
   if (!s) return { icon: Info, statusDot: 'warn', label: t('dash.venueAccounts.status.unknown') };
   switch (s) {
     case 'ready': return { icon: CheckCircle2, statusDot: 'active', label: t('dash.venueAccounts.status.ready') };
-    case 'unavailable': return { icon: PlugZap, statusDot: 'error', label: t('dash.venueAccounts.status.unavailable') };
+    case 'unavailable':
+      if (reason.includes('跨档') || reason.includes('不符')) {
+        return { icon: PlugZap, statusDot: 'warn', label: t('dash.venueAccounts.status.mismatch') };
+      }
+      if (reason.includes('凭证无效') || reason.includes('无效') || reason.includes('过期')) {
+        return { icon: PlugZap, statusDot: 'error', label: t('dash.venueAccounts.status.invalidKey') };
+      }
+      return { icon: PlugZap, statusDot: 'error', label: t('dash.venueAccounts.status.unavailable') };
     case 'degraded': return { icon: AlertTriangle, statusDot: 'warn', label: t('dash.venueAccounts.status.degraded') };
     default: return { icon: Info, statusDot: 'warn', label: t('dash.venueAccounts.status.not_implemented') };
   }
@@ -82,28 +90,28 @@ const listingTitle = computed(() => {
 
     <!-- 资产与仓位数据格 -->
     <dl class="grid grid-cols-2 gap-2 text-2xs">
-      <div class="min-w-0 rounded-lg p-2 transition-colors hover:bg-[var(--surface-2)]" style="background-color: var(--surface-1); border: 1px solid var(--line-1)">
+      <div class="min-w-0 rounded-lg p-2" style="background-color: var(--surface-1); border: 1px solid var(--line-1)">
         <dt class="truncate text-3xs text-[var(--ink-3)]">{{ t('dash.venueAccounts.fields.equity') }}</dt>
         <dd class="num truncate font-mono text-xs font-bold text-[var(--ink-strong)]" data-test="cell-equity">
           {{ money(account?.equity) }}
         </dd>
       </div>
 
-      <div class="min-w-0 rounded-lg p-2 transition-colors hover:bg-[var(--surface-2)]" style="background-color: var(--surface-1); border: 1px solid var(--line-1)">
+      <div class="min-w-0 rounded-lg p-2" style="background-color: var(--surface-1); border: 1px solid var(--line-1)">
         <dt class="truncate text-3xs text-[var(--ink-3)]">{{ t('dash.venueAccounts.fields.available') }}</dt>
         <dd class="num truncate font-mono text-xs font-semibold text-[var(--ink-1)]" data-test="cell-available">
           {{ money(account?.available) }}
         </dd>
       </div>
 
-      <div class="min-w-0 rounded-lg p-2 transition-colors hover:bg-[var(--surface-2)]" style="background-color: var(--surface-1); border: 1px solid var(--line-1)">
+      <div class="min-w-0 rounded-lg p-2" style="background-color: var(--surface-1); border: 1px solid var(--line-1)">
         <dt class="truncate text-3xs text-[var(--ink-3)]">{{ t('dash.venueAccounts.fields.positions') }}</dt>
         <dd class="num truncate font-mono text-xs font-semibold text-[var(--ink-1)]" data-test="cell-positions">
           {{ count(account?.positions_count) }}
         </dd>
       </div>
 
-      <div class="min-w-0 rounded-lg p-2 transition-colors hover:bg-[var(--surface-2)]" style="background-color: var(--surface-1); border: 1px solid var(--line-1)">
+      <div class="min-w-0 rounded-lg p-2" style="background-color: var(--surface-1); border: 1px solid var(--line-1)">
         <dt class="truncate text-3xs text-[var(--ink-3)]">{{ t('dash.venueAccounts.fields.openOrders') }}</dt>
         <dd class="num truncate font-mono text-xs font-semibold text-[var(--ink-1)]" data-test="cell-orders">
           {{ count(account?.open_orders_count) }}

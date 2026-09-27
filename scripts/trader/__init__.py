@@ -13,14 +13,14 @@
 | `protection.py` | 止损信号、棘轮移损、AI 收紧判定、平仓载荷/手续费 | `safe_float` 等，全部调用期注入 |
 | `gates.py` | `order_margin_gate` / `equity_margin_cap` / `is_tradfi_market_liquid` | `MAX_SINGLE_ASSET_MARGIN` / `MAX_MARGIN_EQUITY_RATIO` |
 | `position_mgmt.py` | `execute_ai_position_management` 主脑持仓指令执行器（95 行） | 文件路径 / `ai_tightens_stop` / `close_position_confirmed` / `okx_rest` / 多所三项，全部调用期 |
-| `brackets.py` | `normalize_bracket_prices` 限价单三价顺序钳制（长/空各一份内联合并为一处） | 无（纯函数，数值全部入参） |
+| `brackets.py` | `normalize_bracket_prices` 限价单三价顺序钳制（长/空各一份内联合并为一处）+ `reanchor_brackets_to_market` 市价单保护价按现价等比重锚（现价读不到即拒单） | 无（纯函数，数值全部入参） |
 | `pyramiding.py` | `pyramiding_gate` 顺势浮盈加仓五条门禁（长/空各一份内联合并为一处） | 4 个风控常量 + 全部中间量，均调用期 |
 | `order_intent.py` | `resolve_entry_prices` 三价定价 + `build_order_intent` 下单载荷装配（长/空各一份内联合并为一处） | 全部入参；保证金闸门/权益顶刻意留在门面（计数锚点载体） |
-| `notifications.py` | `entry_action_message` / `entry_failure_message` / `trade_open_kwargs` 方向文案与通知参数（12 个方向常量收成单一来源） | 全部入参；`leverage` 与全部状态变更刻意留在门面 |
+| `notifications.py` | `entry_action_message` / `entry_failure_message` / `trade_open_kwargs` 方向文案与通知参数（12 个方向常量收成单一来源） | 方向相关全部入参；**单型字**（限价/市价）经 `_order_word()` 调用期读 `ASTRA_ORDER_MODE`（本模块唯一不纯之处，理由见其 docstring）；`leverage` 与全部状态变更刻意留在门面 |
 | `cycle_snapshot.py` | `collect_pending_inst_ids` 外所挂单枚举与去重计数 + `build_state_payload` 面板状态快照 | venue_registry/load_instruments/信号求值函数，均调用期 |
 | `signal_snapshot.py` | `build_signal_snapshot` 开仓时刻因果/数理/舆情观测组装（自进化复盘数据源；B3 第八十二刀，零交易动作） | 唯一外部依赖 `DATA_DIR`（因子库快照路径根），门面壳调用期注入；专测 patch 面保真 |
 | `cycle_stages.py` | `execute_portfolio` 的四个相位段：`fetch_positions_and_reconcile`（相位 1：取真实持仓+合约对账+跨所汇总+挂单盲区守卫+预留对账，B3 第九十二刀）+ `preflight_reconcile_and_housekeeping`（0/0a 就绪闸+对账+回收+舆情）/ `fetch_universe_and_manage_positions`（2-3 并发取因子+逐仓退出）/ `persist_state_and_sync_ledger`（5-6 面板持久化+台账同步）（B3 第九十一刀） | 全同名 kw-only 入参；段体 **AST 逐字**；段内 `return None` = 本周期中止（调用点判 None 后 `return None`）|
-| `entry_execution.py` | `execute_entry_scan` —— `execute_portfolio` **相位 4 入场循环**（300 行：逐标的信号评估→置信度/流动性/加仓闸→定价与载荷→受保护下单→通知与追踪器）（B3 第九十刀） | 41 项同名入参（12 外围局部量 + 29 门面全局）；**AST 逐字**、无返回值（0 return/0 break；3 个计数器循环后不再被读） |
+| `entry_execution.py` | `execute_entry_scan` —— `execute_portfolio` **相位 4 入场循环**（300 行：逐标的信号评估→置信度/流动性/加仓闸→定价与载荷→受保护下单→通知与追踪器）+ `submitted_bracket` 取**实提交**三价供通知使用（B3 第九十刀；2026-09 缺陷四） | 41 项同名入参（12 外围局部量 + 29 门面全局）；**AST 逐字**、无返回值（0 return/0 break；3 个计数器循环后不再被读）；`submitted_bracket` 为模块内自由名（不占入参） |
 | `position_exit.py` | `manage_position_tp_and_trailing` 持仓**机械退出**主流程（硬止损 / 三档追踪棘轮 / 时间止损 / 云端保护同步 / 平仓确认 / 台账；与 `position_mgmt.py` 的"主脑指令执行"是两个关注点）（B3 第八十九刀） | 同名注入 18 项；`time` 子包自 import |
 | `order_submit.py` | `submit_protected_limit_order` 受保护限价单提交（决策面前置闸→合约对账→价格锚定→**入场价穿价幻觉闸**→demo rescale→多所平权分发）（B3 第八十八刀，唯一落单函数） | 同名注入 11 项；审计④ 价格理智锚点的三段文本随实现迁入本模块（锚点已工具化） |
 | `routing_policy.py` | 路由与预算政策域：`load_routing_mode`/`load_preferred_venue`（路由档读取）+ `portfolio_risk_budget_usdt`/`estimate_margin_usdt`（预算与保证金估算）+ `_decision_payload`/`_rejection_focus_reason`（决策载荷取值）+ `portfolio_budget_guard`（跨所合算总闸纯函数）+ `route_and_reserve_signal`（路由+预留主流程，146 行）（B3 第八十七刀） | 同名注入 14 项（最宽）；壳签名=基线逐字；模块对象（routing_policy/risk_reservation/venue_router）按对象注入 |

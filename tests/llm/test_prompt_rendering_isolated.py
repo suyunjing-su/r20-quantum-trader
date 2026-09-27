@@ -48,7 +48,7 @@ _EXTRA_NODES = {
     for name in ("_sl_atr_mult_for", "_xvenue_prompt_line")
 }
 
-APP_TREE = ast.parse((PROJECT / "r20_backend/app.py").read_text())
+APP_TREE = ast.parse((PROJECT / "astra_backend/app.py").read_text())
 OLD_TREE = ast.parse((PROJECT / "tests/ops/test_control_plane_v2.py").read_text())
 
 
@@ -60,7 +60,8 @@ class Sandbox(unittest.TestCase):
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
         self.stack.enter_context(patch.object(prompts, "ROOT", self.root))
-        self.stack.enter_context(patch.object(prompts, "LIBRARY_FILE", self.root / "library.json"))
+        self.stack.enter_context(patch.object(prompts, "BASELINE_FILE", self.root / "library.json"))
+        self.stack.enter_context(patch.object(prompts, "LOCAL_FILE", self.root / "library.local.json"))
         original_open, original_io_open, original_os_open = builtins.open, io.open, os.open
 
         def check(path):
@@ -179,7 +180,7 @@ class RenderingTests(Sandbox):
     def test_storage_roundtrip_retains_slots(self):
         profile = prompts._clean_profile(self.profile, "custom-test")
         prompts.save_library({"version": 2, "profiles": {"custom-test": profile}, "active_profile_id": "custom-test", "revisions": []})
-        disk = json.loads(prompts.LIBRARY_FILE.read_text())
+        disk = json.loads(prompts.LOCAL_FILE.read_text())   # 写侧已改为本地文件（2026-09）
         for value in (disk["profiles"]["custom-test"]["trading_user"], prompts.active_profile()["trading_user"]):
             self.assertIn("{{account_balance}}", value)
             self.assertIn("{{account_positions}}", value)
@@ -219,7 +220,7 @@ class RenderingTests(Sandbox):
     def test_committee_original_expression_preserves_base_modules(self):
         assignment = next(n for n in ast.walk(APP_TREE) if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "test_sys" for t in n.targets) and isinstance(n.value, ast.IfExp))
         mods = [{"source": "base", "title": "规则", "content": "规则 {{market_matrix}} {{account_balance}}"}]
-        result = eval(compile(ast.Expression(body=assignment.value), "r20_backend/app.py", "eval"), {
+        result = eval(compile(ast.Expression(body=assignment.value), "astra_backend/app.py", "eval"), {
             "sys_mods": mods, "prof": {"name": "测试"}, "test_market": "隔离行情",
             "compile_modules": prompts.compile_modules, "apply_module_layout": prompts.apply_module_layout,
         })

@@ -55,6 +55,25 @@ const auth = useAuthStore()
 const { t } = useI18n()
 const config = ref<any>(null)
 const runtime = ref<any>(null)
+/**
+ * 注册/返佣通道：**由后端出值**（`/api/v1/admin/referral-channels`，管理员版）。
+ * 本页此前把经纪商 code 与两条链接**硬编码在模板里** —— 那是继 `okx_rest.py`、
+ * `config.py`、`AboutModal.vue` 之后的第三份副本：分发副本的人用环境变量换掉
+ * 自己的通道后，这一页照旧显示原作者的链接与 code，用户就会注册到别人名下。
+ */
+const channels = ref<any[]>([])
+const channelOf = (key: string) => channels.value.find((c) => c.key === key) || null
+// 注：**不**显示经纪商 code（2026-09 仓库所有者拍板）—— 它是随订单发出去的归属标识，
+// 摆到界面上等于邀请别人照着改。本页只用通道链接（公开接口，无需管理员权限）。
+async function loadChannels() {
+  try {
+    const res = await api<any>('/api/v1/referral-channels')
+    channels.value = Array.isArray(res?.channels) ? res.channels : []
+  } catch {
+    // 取不到就整块不渲染注册入口（**不回落到写死的旧链接** —— 那正是本次要消灭的东西）
+    channels.value = []
+  }
+}
 const loading = ref(true)
 /** 批 24：首屏加载失败的原因（留在页面上，配重试按钮；不再只靠一闪而过的 toast） */
 const loadError = ref('')
@@ -136,6 +155,8 @@ const binanceExecPhrase = ref('')
 const okxExec = ref(false)
 const okxExecPhrase = ref('')
 const okxCredViewLive = ref(false)
+const orderMode = ref<'limit' | 'market'>('limit')
+const savingOrderMode = ref(false)
 const venueLatencies = ref<Record<string, number>>({})
 const savingMx = ref(false)
 const savingOkx = ref(false)
@@ -152,6 +173,12 @@ async function loadAll() {
     ])
     config.value = cfg
     applyRuntime(rt)
+    if (cfg?.editable?.okx_environment) {
+      okxCredViewLive.value = (cfg.editable.okx_environment === 'live')
+    }
+    if (cfg?.editable?.order_mode) {
+      orderMode.value = (cfg.editable.order_mode === 'market' ? 'market' : 'limit')
+    }
     newCapital.value = String(cfg.editable?.initial_capital ?? '')
     manualClose.value = !!cfg.editable?.manual_close_enabled
     const inst = await api('/api/v1/admin/instruments')
@@ -231,6 +258,22 @@ async function saveManualClose() {
   }
 }
 
+async function saveOrderMode() {
+  savingOrderMode.value = true
+  try {
+    await api('/api/v1/admin/config', {
+      method: 'PUT',
+      body: JSON.stringify({ order_mode: orderMode.value })
+    })
+    toast.ok(t('admin.security.toastOrderModeSaved'))
+    await loadAll()
+  } catch (e: any) {
+    toast.err(t('admin.security.errSaveFailed', undefined, { msg: e.message }))
+  } finally {
+    savingOrderMode.value = false
+  }
+}
+
 async function saveCapital() {
   if (!auth.isSuperadmin) { toast.err(t('admin.security.errSuperadminOnly')); return }
   if (capitalConfirm.value.trim().toUpperCase() !== 'UPDATE CAPITAL') { toast.err(t('admin.security.errPhraseCapital')); return }
@@ -248,7 +291,10 @@ async function saveCapital() {
 }
 
 async function addInstrument() {
-  const instId = newInstId.value.trim().toUpperCase()
+  let instId = newInstId.value.trim().toUpperCase()
+  if (/^[A-Z0-9]{2,15}$/.test(instId)) {
+    instId = `${instId}-USDT-SWAP`
+  }
   if (!/^[A-Z0-9]{2,15}-USDT-SWAP$/.test(instId)) { toast.err(t('admin.security.errInstFormat')); return }
   try {
     const res = await api('/api/v1/admin/instruments', { method: 'POST', body: JSON.stringify({ inst_id: instId, venues: newInstVenues.value }) })
@@ -475,8 +521,8 @@ async function saveVenue(venue: 'binance' | 'gate') {
     }
     await api('/api/v1/admin/multi-exchange', { method: 'PUT', body: JSON.stringify(body) })
     toast.ok(t('admin.security.toastVenueSaved', undefined, { venue: venue === 'binance' ? 'Binance' : 'Gate' }))
-    if (venue === 'binance') { mxForm.value.binance_api_key = ''; mxForm.value.binance_secret_key = ''; binanceExecPhrase.value = '' }
-    else { mxForm.value.gate_api_key = ''; mxForm.value.gate_secret_key = ''; gateExecPhrase.value = '' }
+    if (venue === 'binance') { mxForm.value.binance_api_key = ''; mxForm.value.binance_secret_key = ''; }
+    else { mxForm.value.gate_api_key = ''; mxForm.value.gate_secret_key = ''; }
     await loadMx()
   } catch (e: any) {
     toast.err(t('admin.security.errSaveFailed', undefined, { msg: e.message }))
@@ -536,31 +582,11 @@ const okxEnvText = computed(() => okxEnvTextOf(config.value?.editable?.okx_envir
 const binanceEnvText = computed(() => envTextOf('binance', t('admin.security.envDemoBinance'), mx.value, mxTestnet.value, t))
 const gateEnvText = computed(() => envTextOf('gate', t('admin.security.envDemoGate'), mx.value, mxTestnet.value, t))
 
-const okxTestnetSwitch = computed({
-  get: () => config.value?.editable?.okx_environment !== 'live',
-  set: async (val: boolean) => {
-    if (!config.value?.editable) return
-    if (!val) {
-      const _ok = await ask({
-        title: t('admin.security.confirmLiveTitle'),
-        desc: t('admin.security.confirmLiveDesc'),
-        detail: t('admin.security.confirmLiveDetail'),
-        danger: true,
-        confirmPhrase: 'LIVE',
-        okText: t('common.switchLive'),
-      })
-      if (!_ok) {
-        toast.warn(t('admin.security.warnNotConfirmed'))
-        return
-      }
-      config.value.editable.okx_environment = 'live'
-      okxCredViewLive.value = true
-    } else {
-      config.value.editable.okx_environment = 'demo'
-      okxCredViewLive.value = false
-    }
-  }
-})
+function setOkxMode(mode: 'demo' | 'live') {
+  if (!config.value?.editable) return
+  config.value.editable.okx_environment = mode
+  okxCredViewLive.value = (mode === 'live')
+}
 
 const TABS = computed<Array<{ key: TabKey; label: string; icon: any }>>(() => [
   { key: 'venues', label: t('admin.security.tabVenues'), icon: Route },
@@ -626,7 +652,7 @@ const healthAllOk = computed(() => {
   return chips.length > 0 && chips.every((h: any) => h.ok === h.total)
 })
 
-onMounted(() => { loadAll(); loadMx() })
+onMounted(() => { loadAll(); loadMx(); loadChannels() })
 </script>
 
 <template>
@@ -753,6 +779,42 @@ onMounted(() => { loadAll(); loadMx() })
           </p>
         </SettingsSection>
 
+        <!-- 委托订单模式 -->
+        <SettingsSection :title="t('admin.security.orderModeTitle')" :description="t('admin.security.orderModeDesc')" :icon="Zap">
+          <template #actions>
+            <button type="button" class="btn btn-primary btn-sm" :disabled="savingOrderMode" @click="saveOrderMode">
+              <Loader2 v-if="savingOrderMode" :size="13" class="animate-spin shrink-0" />
+              <Save v-else :size="13" />
+              <span>{{ savingOrderMode ? t('admin.security.saving') : t('admin.security.saveOrderMode') }}</span>
+            </button>
+          </template>
+
+          <div class="sc-group">
+            <span class="form-label">{{ t('admin.security.orderModeTitle') }}</span>
+            <div class="seg seg-compact" role="group" :aria-label="t('admin.security.orderModeTitle')">
+              <button
+                type="button"
+                :aria-pressed="orderMode === 'limit'"
+                :class="{ 'seg-on': orderMode === 'limit' }"
+                @click="orderMode = 'limit'"
+              >
+                <span>{{ t('admin.security.optLimit') }}</span>
+              </button>
+              <button
+                type="button"
+                :aria-pressed="orderMode === 'market'"
+                :class="{ 'seg-on': orderMode === 'market' }"
+                @click="orderMode = 'market'"
+              >
+                <span>{{ t('admin.security.optMarket') }}</span>
+              </button>
+            </div>
+            <p class="sc-hint">
+              {{ orderMode === 'market' ? t('admin.security.orderModeMarketHint') : t('admin.security.orderModeLimitHint') }}
+            </p>
+          </div>
+        </SettingsSection>
+
         <!-- 三所凭证 -->
         <SettingsSection :title="t('admin.security.credsTitle')" :description="t('admin.security.credsDesc')" :icon="KeyRound">
           <div class="sc-venues">
@@ -766,26 +828,31 @@ onMounted(() => { loadAll(); loadMx() })
               <template #env>
                 <div class="field-stack">
                   <span class="form-label">{{ t('admin.security.endpointTier') }}</span>
-                  <label class="sc-check">
-                    <BaseSwitch v-model="okxTestnetSwitch" :label="t('admin.security.okxDemoDomain')" />
-                    <span>{{ t('admin.security.okxDemoDomain') }}</span>
-                  </label>
+                  <div class="seg seg-compact" role="group" :aria-label="t('admin.security.endpointTier')">
+                    <button
+                      type="button"
+                      :aria-pressed="!okxCredViewLive"
+                      :class="{ 'seg-on': !okxCredViewLive }"
+                      @click="setOkxMode('demo')"
+                    >
+                      <span>{{ t('admin.security.okxDemoDomain') }}</span>
+                    </button>
+                    <button
+                      type="button"
+                      :aria-pressed="okxCredViewLive"
+                      :class="{ 'seg-on': okxCredViewLive }"
+                      @click="setOkxMode('live')"
+                    >
+                      <span>{{ t('admin.security.okxLiveDomain') }}</span>
+                    </button>
+                  </div>
                 </div>
               </template>
 
               <div class="sc-creds">
-                <div class="sc-creds-bar">
-                  <span class="form-label">
-                    {{ (okxCredViewLive ? t('admin.security.liveTrio') : t('admin.security.demoTrio')) }}
-                  </span>
-                  <button
-                    type="button"
-                    class="btn btn-quiet btn-sm"
-                    @click="okxCredViewLive = !okxCredViewLive"
-                  >
-                    {{ okxCredViewLive ? t('admin.security.viewDemoCred') : t('admin.security.viewLiveCred') }}
-                  </button>
-                </div>
+                <span class="form-label">
+                  {{ (okxCredViewLive ? t('admin.security.liveTrio') : t('admin.security.demoTrio')) }}
+                </span>
 
                 <div v-show="!okxCredViewLive" class="sc-creds-group">
                   <input v-model="keys.demo_key" type="password" :placeholder="t('admin.security.apiKeyKeep')" class="field" :aria-label="t('admin.security.demoKeyAria')" />
@@ -816,15 +883,12 @@ onMounted(() => { loadAll(); loadMx() })
                     class="field mono"
                   />
                 </div>
-                <div class="sc-channel-box">
-                  <div class="sc-channel-row">
-                    <span class="sc-channel-label">{{ t('admin.security.okxBrokerTagLabel') }}</span>
-                    <span class="sc-channel-tag mono">6e2191f027c6SUDE</span>
-                  </div>
+                <div v-if="channelOf('okx')" class="sc-channel-box">
                   <button
+                    v-if="channelOf('okx')?.invite_url"
                     type="button"
                     class="sc-channel-btn"
-                    @click="openExternal('https://www.mitxcqvwnhj.com/join/48039151')"
+                    @click="openExternal(channelOf('okx')!.invite_url)"
                   >
                     <span>{{ t('admin.security.okxRegisterDiscount') }}</span>
                   </button>
@@ -861,10 +925,24 @@ onMounted(() => { loadAll(); loadMx() })
               <template #env>
                 <div class="field-stack">
                   <span class="form-label">{{ t('admin.security.endpointTier') }}</span>
-                  <label class="sc-check">
-                    <BaseSwitch v-model="mxTestnet.binance" :label="t('admin.security.binanceDemoDomain')" />
-                    <span>{{ t('admin.security.binanceDemoDomain') }}</span>
-                  </label>
+                  <div class="seg seg-compact" role="group" :aria-label="t('admin.security.endpointTier')">
+                    <button
+                      type="button"
+                      :aria-pressed="mxTestnet.binance"
+                      :class="{ 'seg-on': mxTestnet.binance }"
+                      @click="mxTestnet.binance = true"
+                    >
+                      <span>{{ t('admin.security.binanceDemoDomain') }}</span>
+                    </button>
+                    <button
+                      type="button"
+                      :aria-pressed="!mxTestnet.binance"
+                      :class="{ 'seg-on': !mxTestnet.binance }"
+                      @click="mxTestnet.binance = false"
+                    >
+                      <span>{{ t('admin.security.binanceLiveDomain') }}</span>
+                    </button>
+                  </div>
                 </div>
               </template>
 
@@ -874,6 +952,7 @@ onMounted(() => { loadAll(); loadMx() })
                 <input v-model="mxForm.binance_secret_key" type="password" :aria-label="t('admin.security.binanceSecretAria')" :placeholder="t('admin.security.phApiSecret')" class="field" />
               </div>
 
+              <!-- 2026-09：与本页另两个所对齐——注册入口同样由后端出值（此前只有 OKX/Gate 有） -->
               <template #extra>
                 <div class="sc-gate">
                   <label class="sc-check" :class="{ 'is-danger': binanceExec }">
@@ -891,8 +970,17 @@ onMounted(() => { loadAll(); loadMx() })
                     class="field mono"
                   />
                 </div>
-                <p class="sc-hint">{{ t('admin.security.binanceExtra') }}</p>
+                <div v-if="channelOf('binance')?.invite_url" class="sc-channel-box">
+                  <button
+                    type="button"
+                    class="sc-channel-btn"
+                    @click="openExternal(channelOf('binance')!.invite_url)"
+                  >
+                    <span>{{ t('admin.security.binanceRegisterDiscount') }}</span>
+                  </button>
+                </div>
               </template>
+
               <template #footer-left>
                 <span v-if="venueLatencies.binance" class="sc-latency mono num">
                   <Radar :size="12" />
@@ -923,10 +1011,24 @@ onMounted(() => { loadAll(); loadMx() })
               <template #env>
                 <div class="field-stack">
                   <span class="form-label">{{ t('admin.security.endpointTier') }}</span>
-                  <label class="sc-check">
-                    <BaseSwitch v-model="mxTestnet.gate" :label="t('admin.security.gateSandboxDomain')" />
-                    <span>{{ t('admin.security.gateSandboxDomain') }}</span>
-                  </label>
+                  <div class="seg seg-compact" role="group" :aria-label="t('admin.security.endpointTier')">
+                    <button
+                      type="button"
+                      :aria-pressed="mxTestnet.gate"
+                      :class="{ 'seg-on': mxTestnet.gate }"
+                      @click="mxTestnet.gate = true"
+                    >
+                      <span>{{ t('admin.security.gateSandboxDomain') }}</span>
+                    </button>
+                    <button
+                      type="button"
+                      :aria-pressed="!mxTestnet.gate"
+                      :class="{ 'seg-on': !mxTestnet.gate }"
+                      @click="mxTestnet.gate = false"
+                    >
+                      <span>{{ t('admin.security.gateLiveDomain') }}</span>
+                    </button>
+                  </div>
                 </div>
               </template>
 
@@ -953,16 +1055,15 @@ onMounted(() => { loadAll(); loadMx() })
                     class="field mono"
                   />
                 </div>
-                <div class="sc-channel-box">
+                <div v-if="channelOf('gate')?.invite_url" class="sc-channel-box">
                   <button
                     type="button"
                     class="sc-channel-btn"
-                    @click="openExternal('https://www.gatesites.net/share/MCHDBKYF')"
+                    @click="openExternal(channelOf('gate')!.invite_url)"
                   >
                     <span>{{ t('admin.security.gateRegisterDiscount') }}</span>
                   </button>
                 </div>
-                <p class="sc-hint">{{ t('admin.security.gateExtra') }}</p>
               </template>
               <template #footer-left>
                 <span v-if="venueLatencies.gate" class="sc-latency mono num">
@@ -1162,7 +1263,7 @@ onMounted(() => { loadAll(); loadMx() })
             </button>
           </template>
 
-          <div class="sc-switch-row" :class="{ 'is-danger': manualClose }">
+          <div class="sc-check sc-switch-row" :class="{ 'is-danger': manualClose }">
             <BaseSwitch v-model="manualClose" :label="t('admin.security.manualTitle')" />
             <span class="sc-switch-text">
               {{ manualClose ? t('admin.security.manualOn') : t('admin.security.manualOff') }}
@@ -1419,7 +1520,7 @@ onMounted(() => { loadAll(); loadMx() })
 }
 .sc-radio.is-on {
   border-left-color: var(--ds-color-brand);
-  background-color: var(--r20-brand-bg);
+  background-color: var(--astra-brand-bg);
 }
 .sc-radio input {
   margin-top: 2px;
@@ -1460,12 +1561,6 @@ onMounted(() => { loadAll(); loadMx() })
   flex-direction: column;
   gap:6px;
 }
-.sc-creds-bar {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 8px;
-}
 .sc-creds-group {
   display: flex;
   flex-direction: column;
@@ -1500,14 +1595,6 @@ onMounted(() => { loadAll(); loadMx() })
 }
 .sc-check.is-danger span {
   color: var(--down);
-}
-.sc-gate {
-  display: flex;
-  flex-direction: column;
-  gap:8px;
-}
-.sc-gate .field {
-  margin-top: 2px;
 }
 
 /* ══ 健康 ══ */
@@ -1795,28 +1882,14 @@ onMounted(() => { loadAll(); loadMx() })
   font-weight: 600;
 }
 .sc-channel-box {
-  margin-top: var(--ds-space-2);
-  padding: var(--ds-space-2);
+  margin-top: 4px;
+  padding: 6px var(--ds-space-2);
   border: 1px dashed var(--ds-color-border-subtle, rgba(255, 255, 255, 0.1));
   border-radius: var(--r-xs);
   background-color: var(--ds-color-bg-surface-inset);
   display: flex;
   flex-direction: column;
   gap: 4px;
-}
-.sc-channel-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  font-size: var(--text-3xs);
-}
-.sc-channel-label {
-  color: var(--ds-color-text-description);
-}
-.sc-channel-tag {
-  color: var(--accent);
-  font-size: var(--text-3xs);
-  font-weight: 600;
 }
 .sc-channel-btn {
   background: none;
@@ -1831,5 +1904,13 @@ onMounted(() => { loadAll(); loadMx() })
 }
 .sc-channel-btn:hover {
   text-decoration: underline;
+}
+.seg-compact {
+  width: fit-content;
+  max-width: 100%;
+}
+.seg-compact button {
+  padding-left: var(--sp-4);
+  padding-right: var(--sp-4);
 }
 </style>
