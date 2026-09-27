@@ -100,6 +100,7 @@ const instLimits = ref<any>({ minimum: 1, maximum: 20 })
 const newInstId = ref('')
 const newInstVenues = ref<string[]>(['okx'])
 const editingInstVenues = ref<string>('')
+const venueValidationError = ref('')
 
 // ---- positions & close ----
 const snapshot = ref<any>(null)
@@ -255,6 +256,7 @@ async function addInstrument() {
     newInstId.value = ''
     await loadAll()
   } catch (e: any) {
+    venueValidationError.value = e.message || t('admin.security.errAddFailed', undefined, { msg: '' })
     toast.err(t('admin.security.errAddFailed', undefined, { msg: e.message }))
   }
 }
@@ -497,6 +499,7 @@ async function updateInstrumentVenues(item: any) {
     item.venues = res.venues || venues
     toast.ok(res.message || t('admin.security.toastVenuesSaved'))
   } catch (e: any) {
+    venueValidationError.value = e.message || t('admin.security.errVenueValidation', undefined, { msg: '' })
     toast.err(t('admin.security.errVenueValidation', undefined, { msg: e.message }))
     await loadAll()
   } finally {
@@ -1242,6 +1245,22 @@ onMounted(() => { loadAll(); loadMx() })
         </SettingsSection>
       </template>
     </template>
+
+    <!-- ══════════ 合约目录校验错误 ══════════ -->
+    <BaseDialog
+      :open="!!venueValidationError"
+      :title="t('admin.security.venueValidationTitle')"
+      tone="danger"
+      size="md"
+      @close="venueValidationError = ''"
+    >
+      <p class="sc-close-desc sc-validation-error">{{ venueValidationError }}</p>
+      <template #footer>
+        <button type="button" class="btn btn-danger btn-sm" @click="venueValidationError = ''">
+          {{ t('admin.security.closeValidationError') }}
+        </button>
+      </template>
+    </BaseDialog>
 
     <!-- ══════════ 平仓双确认 ══════════ -->
     <BaseDialog

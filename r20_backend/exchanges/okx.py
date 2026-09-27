@@ -150,7 +150,9 @@ class OKXPublicAdapter(BaseExchangeAdapter):
             ct_val=float(raw.get("ctVal") or 1),
             min_size=float(raw.get("minSz") or 1),
             max_leverage=0.0,
-            status="trading" if str(raw.get("state", "trading")) == "trading" else "closed",
+            status="trading" if str(raw.get("state", "trading")) in {"live", "trading"} else "closed",
+            quantity_unit="contracts",
+            decimal_amount=False,
             raw=raw,
         )
 

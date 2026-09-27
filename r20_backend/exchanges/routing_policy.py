@@ -149,6 +149,7 @@ def load_venue_pool(venue: str) -> Dict[str, Any]:
         "max_open": defaults["max_open"],
         "min_confidence": defaults["min_confidence"],
         "dry_run": False if vkey != "gate" else True,
+        "pool_trustworthy": False,
     }
     try:
         if ROUTING_FILE.exists():
@@ -174,8 +175,16 @@ def load_venue_pool(venue: str) -> Dict[str, Any]:
     # 旧 venue_routing.json 仍可读取；只要主池出现 venues 字段，就按主池派生，
     # 防止「标的池已取消某所」但旧路由文件仍继续放行。
     try:
-        from scripts.instrument_pool import load_instruments
+        from scripts.instrument_pool import load_instruments, pool_is_trustworthy
         active_pool = load_instruments()
+        if not pool_is_trustworthy():
+            # load_instruments 返回默认池仅供展示；缺失/损坏/空池绝不能
+            # 通过旧 venue_routing.json 继续放行真实新仓。
+            base_pool["instruments"] = []
+            base_pool["assets"] = []
+            active_pool = []
+        else:
+            base_pool["pool_trustworthy"] = True
         assigned = [item for item in active_pool
                     if isinstance(item, dict) and "venues" in item]
         if assigned:
@@ -195,6 +204,7 @@ def load_venue_pool(venue: str) -> Dict[str, Any]:
             base_pool["instruments"] = sorted(derived)
     except Exception as exc:
         # 主池不可读时保留旧路由配置；交易侧的主池可信闸会阻止新开仓。
+        base_pool["pool_trustworthy"] = False
         print(f"[routing_policy] warn 无法从交易标的池派生 {vkey} 准入清单: {exc!r}")
     assets = [str(a).upper() for a in (base_pool.get("assets") or []) if str(a).strip()]
     base_pool["assets"] = sorted(set(assets))
@@ -216,6 +226,8 @@ def load_venue_pool(venue: str) -> Dict[str, Any]:
 def venue_pool_instruments(venue: str) -> List[str]:
     """返回某所池的完整合约视图；老 assets 配置也转换成 OKX-style 合约 ID。"""
     pool = load_venue_pool(venue)
+    if pool.get("pool_trustworthy") is False:
+        return []
     if pool.get("instruments") is not None:
         return list(pool.get("instruments") or [])
     return [f"{str(asset).upper()}-USDT-SWAP" for asset in (pool.get("assets") or [])]
@@ -224,6 +236,8 @@ def venue_pool_instruments(venue: str) -> List[str]:
 def venue_pool_allows(venue: str, inst_id: str) -> bool:
     """按完整合约池判断准入；老 assets 配置继续按裸币名判断。"""
     pool = load_venue_pool(venue)
+    if pool.get("pool_trustworthy") is False:
+        return False
     if pool.get("instruments") is not None:
         return _pool_instrument_for_venue(inst_id, venue) in set(pool.get("instruments") or [])
     assets = set(pool.get("assets") or [])

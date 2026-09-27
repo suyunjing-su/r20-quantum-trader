@@ -528,7 +528,8 @@ if not _ALLOW_REAL_WRITES:
             return
         target = args[0] if args else ""
         try:
-            text = os.path.abspath(os.fspath(target))
+            raw_target = os.fsdecode(target) if isinstance(target, (bytes, bytearray)) else os.fspath(target)
+            text = os.path.abspath(raw_target)
         except (TypeError, ValueError):
             return
         if not text.startswith(_PROD_DB_DIR):

@@ -118,6 +118,8 @@ export const zhAdminSecurity = {
   venueRequired: '至少选择一个交易所',
   toastVenuesSaved: '合约可交易所已更新',
   errVenueValidation: '交易所合约校验失败：{msg}',
+  venueValidationTitle: '交易所合约不可用',
+  closeValidationError: '知道了',
   instPlaceholder: '例如: XRP-USDT-SWAP',
   addInstrument: '添加标的',
   colInstId: '合约代码',

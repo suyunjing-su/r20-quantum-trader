@@ -183,6 +183,15 @@ def _venue_accounts_binance(environment: str = "demo") -> dict[str, Any]:
         return _venue_account_unknown("degraded", f"Binance 返回解析失败: {type(exc).__name__}: {exc}")
 
 
+def _execution_open_for_status(venue: str, environment: str) -> bool:
+    """Read the execution flag while tolerating legacy one-argument test shims."""
+    from r20_backend.exchanges import execution_open
+    try:
+        return bool(execution_open(venue, environment))
+    except TypeError:
+        return bool(execution_open(venue))
+
+
 @router.get("/api/v1/admin/multi-exchange")
 def admin_multi_exchange_status(x_r20_admin_token: str | None = Header(default=None)) -> dict[str, Any]:
     require_admin_header(x_r20_admin_token)
@@ -269,7 +278,7 @@ def admin_multi_exchange_status(x_r20_admin_token: str | None = Header(default=N
             "routing_mode": routing_policy.load_routing_mode(),
             "accounts_status": accounts_status,
             # OKX 仍不进入旧版通用 venues/账户字段，但暴露统一执行总闸状态。
-            "okx_execution_open": execution_open("okx", okx_env.mode),
+            "okx_execution_open": _execution_open_for_status("okx", okx_env.mode),
             # 三所各自的完整 USDT 永续合约池；同一合约可同时存在于多个池。
             "pools": {venue: routing_policy.venue_pool_instruments(venue)
                       for venue in ("okx", "binance", "gate")}}
@@ -340,10 +349,12 @@ def admin_multi_exchange_update(payload: MultiExchangeUpdate,
             raise HTTPException(
                 status_code=400,
                 detail=f"非法 routing_mode，允许 {list(routing_policy.VALID_ROUTING_MODES)}")
+    # getattr keeps direct unit-test callers and older internal payload shims
+    # compatible with the expanded Pydantic request model.
     pool_updates = {
-        "okx": payload.okx_instruments,
-        "binance": payload.binance_instruments,
-        "gate": payload.gate_instruments,
+        "okx": getattr(payload, "okx_instruments", None),
+        "binance": getattr(payload, "binance_instruments", None),
+        "gate": getattr(payload, "gate_instruments", None),
     }
     if any(items is not None for items in pool_updates.values()):
         # 三所池现由交易标的池（instrument_pool.json 的 venues 字段）派生；

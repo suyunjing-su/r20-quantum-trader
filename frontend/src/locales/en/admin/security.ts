@@ -117,6 +117,8 @@ export const enAdminSecurity = {
   venueRequired: 'Select at least one venue',
   toastVenuesSaved: 'Instrument venues updated',
   errVenueValidation: 'Venue contract validation failed: {msg}',
+  venueValidationTitle: 'Venue contract unavailable',
+  closeValidationError: 'Got it',
   instPlaceholder: 'e.g. XRP-USDT-SWAP',
   addInstrument: 'Add symbol',
   colInstId: 'Contract',

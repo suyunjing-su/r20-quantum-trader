@@ -232,17 +232,23 @@ class BinanceAdapter(BinanceAlgoRequestsMixin, BaseExchangeAdapter):
         raw = next((s for s in symbols if s.get("symbol") == inst_id), None)
         if not raw:
             return None
-        tick, step, min_qty = 0.1, 0.001, 0.001
+        tick = step = min_qty = 0.0
         for f in raw.get("filters", []):
             if f.get("filterType") == "PRICE_FILTER":
-                tick = float(f.get("tickSize") or tick)
-            elif f.get("filterType") == "LOT_SIZE":
-                step = float(f.get("stepSize") or step)
-                min_qty = float(f.get("minQty") or min_qty)
+                tick = float(f.get("tickSize") or 0.0)
+            elif f.get("filterType") in {"LOT_SIZE", "MARKET_LOT_SIZE"}:
+                # LOT_SIZE is the authoritative quantity increment for limit
+                # orders; MARKET_LOT_SIZE is retained in raw for market paths.
+                if f.get("filterType") == "LOT_SIZE":
+                    step = float(f.get("stepSize") or 0.0)
+                    min_qty = float(f.get("minQty") or 0.0)
+        if tick <= 0 or step <= 0 or min_qty <= 0:
+            return None
         return InstrumentSpec(
             venue="binance", inst_id=inst_id, base=self.canonical(inst_id),
             tick_size=tick, step_size=step, ct_val=1.0, min_size=min_qty,
-            max_leverage=0.0, status=str(raw.get("status", "TRADING")).lower(), raw=raw,
+            max_leverage=0.0, status=str(raw.get("status", "")).lower(),
+            quantity_unit="base_asset", decimal_amount=False, raw=raw,
         )
 
     # ==================================================================
