@@ -106,6 +106,8 @@ class InstrumentSpec:
     min_size: float           # 原生单位最小下单量（张 或 币）
     max_leverage: float = 0.0
     status: str = "trading"
+    quantity_unit: str = "contracts"  # contracts (OKX/Gate) | base_asset (Binance)
+    decimal_amount: bool = False
     raw: Dict[str, Any] = field(default_factory=dict, repr=False)
 
 

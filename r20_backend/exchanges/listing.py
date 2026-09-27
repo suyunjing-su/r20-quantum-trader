@@ -93,14 +93,25 @@ def _fetch_directory(venue: str, environment: str) -> Dict[str, Dict[str, str]]:
     directory: Dict[str, Dict[str, str]] = {}
     if venue == "okx":
         for inst in payload.get("data", []):
-            directory[_norm(inst.get("instId", ""))] = {"state": str(inst.get("state", ""))}
+            row = {"state": str(inst.get("state", ""))}
+            for key in ("instType", "settleCcy", "ctType"):
+                if key in inst:
+                    row[key] = str(inst.get(key, ""))
+            directory[_norm(inst.get("instId", ""))] = row
     elif venue == "binance":
         for sym in payload.get("symbols", []):
-            directory[_norm(sym.get("symbol", ""))] = {"status": str(sym.get("status", ""))}
+            row = {"status": str(sym.get("status", ""))}
+            for key in ("contractType", "quoteAsset", "marginAsset"):
+                if key in sym:
+                    row[key] = str(sym.get(key, ""))
+            directory[_norm(sym.get("symbol", ""))] = row
     elif venue == "gate":
         for c in payload:
-            directory[_norm(c.get("name", ""))] = {
-                "in_delisting": str(bool(c.get("in_delisting"))).lower()}
+            row = {"in_delisting": str(bool(c.get("in_delisting"))).lower()}
+            for key in ("type", "settle", "status"):
+                if key in c:
+                    row[key] = str(c.get(key, ""))
+            directory[_norm(c.get("name", ""))] = row
     return directory
 
 
@@ -153,14 +164,38 @@ def ensure_contract_listed(venue: str, environment: str,
         if state != "live":
             return ListingCheck(ok=False, reason=f"合约已下架：OKX state={state}",
                                 checked_at=checked_at, source=source)
+        if (info.get("instType") and info.get("instType") != "SWAP"):
+            return ListingCheck(ok=False, reason="不是 OKX USDT 线性永续合约",
+                                checked_at=checked_at, source=source)
+        if (info.get("settleCcy") and info.get("settleCcy") != "USDT"):
+            return ListingCheck(ok=False, reason="不是 OKX USDT 线性永续合约",
+                                checked_at=checked_at, source=source)
+        if (info.get("ctType") and info.get("ctType") != "linear"):
+            return ListingCheck(ok=False, reason="不是 OKX USDT 线性永续合约",
+                                checked_at=checked_at, source=source)
     elif vkey == "binance":
         status = info.get("status", "")
         if status != "TRADING":
             return ListingCheck(ok=False, reason=f"合约已下架：Binance status={status}",
                                 checked_at=checked_at, source=source)
+        if (info.get("contractType") and info.get("contractType") != "PERPETUAL"):
+            return ListingCheck(ok=False, reason="不是 Binance USDT-M 永续合约",
+                                checked_at=checked_at, source=source)
+        if (info.get("quoteAsset") and info.get("quoteAsset") != "USDT"):
+            return ListingCheck(ok=False, reason="不是 Binance USDT-M 永续合约",
+                                checked_at=checked_at, source=source)
+        if (info.get("marginAsset") and info.get("marginAsset") != "USDT"):
+            return ListingCheck(ok=False, reason="不是 Binance USDT-M 永续合约",
+                                checked_at=checked_at, source=source)
     elif vkey == "gate":
         if info.get("in_delisting") == "true":
             return ListingCheck(ok=False, reason="合约已下架：Gate in_delisting=true",
+                                checked_at=checked_at, source=source)
+        if info.get("status") and info.get("status") != "trading":
+            return ListingCheck(ok=False, reason=f"合约状态不可交易：Gate status={info.get('status')}",
+                                checked_at=checked_at, source=source)
+        if info.get("settle") and info.get("settle").lower() != "usdt":
+            return ListingCheck(ok=False, reason="不是 Gate USDT 结算永续合约",
                                 checked_at=checked_at, source=source)
 
     return ListingCheck(ok=True, reason=None, checked_at=checked_at, source=source)

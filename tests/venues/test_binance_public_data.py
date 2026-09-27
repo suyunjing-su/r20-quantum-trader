@@ -61,13 +61,11 @@ class LoadSpecTest(_Base):
         self.assertEqual(spec.ct_val, 1.0, "USDT-M 线性合约 ctVal=1（张=币）")
         self.assertEqual(spec.status, "trading")
 
-    def test_missing_filters_keep_conservative_defaults(self):
-        """过滤项缺失 ⇒ 退回**保守默认**（tick=0.1/step=0.001/minQty=0.001），不抛。"""
+    def test_missing_filters_fail_closed_without_fabricating_precision(self):
+        """过滤项缺失 ⇒ 返回 None；不能用默认值伪造下单步长。"""
         self._public({"/fapi/v1/exchangeInfo": {"symbols": [{"symbol": "BTCUSDT",
                                                              "filters": []}]}})
-        spec = self.ad._load_spec("BTCUSDT")
-        self.assertEqual((spec.tick_size, spec.step_size, spec.min_size),
-                         (0.1, 0.001, 0.001))
+        self.assertIsNone(self.ad._load_spec("BTCUSDT"))
 
     def test_unknown_symbol_returns_none(self):
         self._public({"/fapi/v1/exchangeInfo": {"symbols": [{"symbol": "ETHUSDT"}]}})

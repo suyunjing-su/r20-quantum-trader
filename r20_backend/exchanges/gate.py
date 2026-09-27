@@ -273,16 +273,22 @@ class GateAdapter(BaseExchangeAdapter):
         raw = next((x for x in rows if x.get("name") == inst_id), None)
         if not raw:
             return None
-        mult = float(raw.get("quanto_multiplier") or 0.0001)   # 每张面值（币本位）
-        # 价格档位：order_price_round 为 Gate 合约权威 tick 字段
-        tick = float(raw.get("order_price_round") or 0.1) or mult
+        try:
+            mult = float(raw.get("quanto_multiplier") or 0.0)
+            tick = float(raw.get("order_price_round") or 0.0)
+            min_size = float(raw.get("order_size_min") or 0.0)
+        except (TypeError, ValueError):
+            return None
+        if mult <= 0 or tick <= 0 or min_size <= 0:
+            return None
         return InstrumentSpec(
             venue="gate", inst_id=inst_id, base=self.canonical(inst_id),
-            tick_size=tick, step_size=mult, ct_val=mult,
-            min_size=float(raw.get("order_size_min") or 1),
+            tick_size=tick, step_size=(min_size if raw.get("enable_decimal") else 1.0),
+            ct_val=mult, min_size=min_size,
             max_leverage=float(raw.get("lever", {}).get("max", 0) or 0)
             if isinstance(raw.get("lever"), dict) else 0.0,
             status="trading" if raw.get("in_delisting") is not True else "delisting",
+            quantity_unit="contracts", decimal_amount=bool(raw.get("enable_decimal")),
             raw=raw,
         )
 

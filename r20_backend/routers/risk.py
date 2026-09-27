@@ -296,36 +296,48 @@ def add_admin_instrument(payload: InstrumentAddRequest, x_r20_admin_token: str |
                 detail=_venue_validation_text(inst_id, venue_validation)
                 + f"；已选择但不可交易：{', '.join(v.upper() for v in rejected)}，请取消勾选后重试")
 
-    # OKX 原始规格仍作为最佳元数据来源；当合约仅存在于 Binance/Gate 时，
-    # 允许用统一保守规格入池，真实下单前仍会读取目标所原生规格并再次校验。
+    # OKX 专用接口仍作为 OKX 规格目录的额外一致性校验；不再作为外所规格来源。
     try:
         matches = okx.instruments("SWAP", inst_id)
     except Exception as exc:
-        if not explicit_venues:
-            raise HTTPException(status_code=502, detail=f"OKX 合约校验失败：{exc}") from exc
         matches = []
+        if "okx" in requested_venues:
+            raise HTTPException(status_code=502, detail=f"OKX 合约校验失败：{exc}") from exc
     raw = matches[0] if matches else {}
-    okx_live = raw.get("instId") == inst_id and raw.get("settleCcy") == "USDT" and raw.get("state") == "live"
-    if not okx_live:
-        if explicit_venues:
-            # 当前交易核心用 OKX ctVal/tickSz/minSz 构造统一下单数量与报价精度。
-            # 不可用虚构占位规格把 Binance/Gate-only 合约写入主池；必须先接入
-            # 目标所原生规格映射，否则数量/最小步长可能错误。
-            validation_text = _venue_validation_text(inst_id, venue_validation)
-            raise HTTPException(
-                status_code=400,
-                detail=validation_text
-                + "；当前交易池规格模型要求 OKX 在线合约规格，暂不能安全添加仅由 Binance/Gate 支持的合约")
-        raise HTTPException(status_code=400, detail="仅允许添加 OKX 在线可交易的 USDT 永续合约")
+    okx_live = (raw.get("instId") == inst_id
+                and raw.get("settleCcy") == "USDT"
+                and raw.get("state") == "live")
 
-    item = from_okx_instrument(raw)
+    try:
+        from r20_backend.instrument_metadata import add_native_specs, fetch_selected_specs
+        native_specs = fetch_selected_specs(inst_id, requested_venues)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"无法读取所选交易所原生合约规格：{exc}") from exc
+
+    if "okx" in requested_venues and not okx_live:
+        venue_validation.setdefault("okx", {})["available"] = False
+        venue_validation["okx"]["reason"] = "OKX 合约规格接口未返回在线 USDT 永续"
+        raise HTTPException(status_code=400, detail=_venue_validation_text(inst_id, venue_validation))
+
+    if okx_live:
+        item = from_okx_instrument(raw)
+    else:
+        base = inst_id.split("-", 1)[0]
+        item = {
+            "instId": inst_id, "name": base, "type": "crypto", "ccy": base,
+            "tier": "tier_1_bluechip" if base in {"BTC", "ETH"} else "tier_2_momentum",
+            "max_leverage": 5 if base in {"BTC", "ETH"} else 3,
+            "sl_atr_mult": 1.8 if base in {"BTC", "ETH"} else 2.2,
+            "risk_per_trade_usd": 15.0,
+        }
+    item = add_native_specs(item, native_specs)
     item["venues"] = requested_venues
 
     # 审计 P2-6：load→校验→改→save 整段持锁（旧实现无锁 → 两个并发保存丢标的）；
     # 去重与容量不变量放进锁内，避免"检查通过后另一个请求插进来"。
     def _append(pool: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if any(row["instId"] == inst_id for row in pool):
-            raise HTTPException(status_code=409, detail="该合约已在交易标的池中")
+            raise HTTPException(status_code=409, detail="该币种已在交易池中")
         if len(pool) >= MAX_POOL_SIZE:
             raise HTTPException(status_code=409, detail=f"交易池最多允许 {MAX_POOL_SIZE} 个币种；请先删除一个无持仓币种，或调整环境变量 R20_MAX_POOL_SIZE")
         return [*pool, item]
@@ -420,17 +432,24 @@ def update_admin_instrument_venues(
             status_code=409,
             detail=f"{target} 在 {', '.join(v.upper() for v in removed_held)} 仍有持仓，不能从该所移除；请先平仓并确认归零")
 
+    # 所池变更同时刷新所选合约原生规格；新增交易所不能继续沿用旧 OKX 快照。
+    try:
+        from r20_backend.instrument_metadata import add_native_specs, fetch_selected_specs
+        native_specs = fetch_selected_specs(target, requested)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"无法读取所选交易所原生合约规格：{exc}") from exc
+
     found = {"n": 0}
 
     def _update(pool: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        for item in pool:
+        for index, item in enumerate(pool):
             if str(item.get("instId") or "").upper() == target:
+                enriched = add_native_specs(item, native_specs)
+                enriched["venues"] = requested
+                pool[index] = enriched
                 found["n"] += 1
         if not found["n"]:
             raise HTTPException(status_code=404, detail="该合约不在交易标的池中")
-        for item in pool:
-            if str(item.get("instId") or "").upper() == target:
-                item["venues"] = requested
         return pool
 
     updated = mutate_instruments(_update)
