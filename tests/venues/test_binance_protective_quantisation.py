@@ -64,6 +64,8 @@ class QuantityQuantisationTest(_Base):
         self.assertEqual([c["type_"] for c in self.sent],
                          ["TAKE_PROFIT_MARKET", "STOP_MARKET"])
         self.assertEqual([c["trigger_price"] for c in self.sent], [110.0, 90.0])
+        self.assertRegex(self.sent[0]["client_algo_id"], r"^t-astratp[0-9a-f]{16}$")
+        self.assertRegex(self.sent[1]["client_algo_id"], r"^t-astrasl[0-9a-f]{16}$")
 
 
 class MergedProtectionViewTest(_Base):

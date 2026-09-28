@@ -58,7 +58,14 @@ def global_risk_defaults() -> Dict[str, Any]:
             MIN_ENTRY_CONFIDENCE,
         )
         return {
-            "margin_per_trade_usdt": float(MAX_SINGLE_ASSET_MARGIN or 50.0),
+            # ⚠️ **不得**写成 `MAX_SINGLE_ASSET_MARGIN or 50.0`：`.env` 里
+            # `ASTRA_MAX_SINGLE_ASSET_MARGIN_USDT=0.0` 的语义是"不限单标的封顶"，
+            # 而 `0.0` 是 falsy ⇒ 会被这里悄悄兜底成 **50**，再经
+            # `load_venue_pool` 变成每所池预算，最后被 `clamp_margin` 当上限执行
+            # （50 > 0 参与求最小）——「不限」被反转成「每笔硬夹 50U」。
+            # 实测 2026-09-28：币安账户 4739U、Gate 1302U，每单却只占 ~50U 保证金。
+            # 0 一路保持 0（`clamp_margin` 的既定语义：0 = 该上限不可用）。
+            "margin_per_trade_usdt": float(MAX_SINGLE_ASSET_MARGIN),
             "max_open": int(MAX_CONCURRENT_POSITIONS_CAP or 5),
             "min_confidence": float(MIN_ENTRY_CONFIDENCE or 72.0),
         }
@@ -73,7 +80,11 @@ def global_risk_defaults() -> Dict[str, Any]:
 
 
 DEFAULT_GATE_POOL: Dict[str, Any] = {
-    "assets": [],
+    # ⚠️ 2026-09-28：`assets` 用 `None`（**未配置** ⇒ 不设限），不再是 `[]`。
+    # 新语义下 `[]` 专指"**显式**空池 ⇒ 该所停发"，而这里描述的是"没有任何配置"
+    # 的形态 —— 两者此前混用同一个值，正是审计里"同一个值两层语义相反"的根因。
+    # 本常量的实际作用只是**文档 + 逐位对拍锚点**（`test_account_key_identity.py`）。
+    "assets": None,
     **{k: global_risk_defaults()[k]
        for k in ("margin_per_trade_usdt", "max_open", "min_confidence")},
     "dry_run": True,
@@ -84,8 +95,19 @@ _ASSET_TOKEN_RE = re.compile(r"^[A-Z0-9]{2,15}$")
 
 
 def _normalize_assets(raw_assets: Any, venue: str) -> List[str]:
-    """准入币种规范化：单字符串视作一个币种；非法项丢弃并吼出来（绝不静默拆字符）。"""
-    if raw_assets in (None, ""):
+    """准入币种规范化：单字符串视作一个币种；非法项丢弃并吼出来（绝不静默拆字符）。
+
+    ⚠️ 2026-09-28 三所平权：**「未配置」与「显式配成空」必须区分开** ——
+    此前两者都归一成 `[]`，而 `[]` 在**执行层**是「该所停发」的开关、
+    在**选所层**是「不设限」的代名词（`selection._venue_pool_assets` 的注释里
+    明确把这处双关写成了既成事实）。同一个值两种含义，正是审计里
+    「OKX 无法用池开关停发、却又能被空池误停」的根因。
+
+    现在：`None` = **未配置 ⇒ 不设限**（返回 `None`）；`[]` = **显式空池 ⇒ 停发**。
+    """
+    if raw_assets is None:
+        return None
+    if raw_assets == "":
         return []
     items = [raw_assets] if isinstance(raw_assets, str) else list(raw_assets) if isinstance(raw_assets, (list, tuple, set)) else None
     if items is None:
@@ -140,11 +162,18 @@ def _pool_instrument_for_venue(inst_id: str, venue: str) -> str:
 
 
 def load_venue_pool(venue: str) -> Dict[str, Any]:
-    """统一多所池配置加载：优先读取各所覆盖项，缺省自动继承全局风控单一事实源。"""
+    """统一多所池配置加载：优先读取各所覆盖项，缺省自动继承全局风控单一事实源。
+
+    ⚠️ `assets` 有两态，**必须区分**（2026-09-28 三所平权，见 `_normalize_assets`）：
+    - `None` = 该所**未配置**准入清单 ⇒ 不设限（OKX 今天的形态：它此前根本没有池段）；
+    - `[]` = **显式**配成空 ⇒ 该所停发。
+    此前两者都归一成 `[]`，而 `[]` 在执行层是"停发"、在选所层是"不设限"。
+    """
     vkey = str(venue or "").strip().lower()
     defaults = global_risk_defaults()
     base_pool: Dict[str, Any] = {
-        "assets": [],
+        # 默认**不设限**（None），不是空池 —— 空池在执行层意味着"该所停发"。
+        "assets": None,
         "margin_per_trade_usdt": defaults["margin_per_trade_usdt"],
         "max_open": defaults["max_open"],
         "min_confidence": defaults["min_confidence"],
@@ -178,8 +207,6 @@ def load_venue_pool(venue: str) -> Dict[str, Any]:
         from scripts.instrument_pool import load_instruments, pool_is_trustworthy
         active_pool = load_instruments()
         if not pool_is_trustworthy():
-            # load_instruments 返回默认池仅供展示；缺失/损坏/空池绝不能
-            # 通过旧 venue_routing.json 继续放行真实新仓。
             base_pool["instruments"] = []
             base_pool["assets"] = []
             active_pool = []
@@ -203,15 +230,16 @@ def load_venue_pool(venue: str) -> Dict[str, Any]:
                     derived.add(inst)
             base_pool["instruments"] = sorted(derived)
     except Exception as exc:
-        # 主池不可读时保留旧路由配置；交易侧的主池可信闸会阻止新开仓。
         base_pool["pool_trustworthy"] = False
         print(f"[routing_policy] warn 无法从交易标的池派生 {vkey} 准入清单: {exc!r}")
-    assets = [str(a).upper() for a in (base_pool.get("assets") or []) if str(a).strip()]
-    base_pool["assets"] = sorted(set(assets))
     if base_pool.get("instruments") is not None:
         base_pool["instruments"] = sorted(set(base_pool.get("instruments") or []))
-        # 旧执行器仍读取 assets；让新池同时提供 canonical 裸币兼容视图。
         base_pool["assets"] = sorted({item.split("-", 1)[0] for item in base_pool["instruments"]})
+    else:
+        # None = 未配置（不设限）；[] = 显式空池（停发），不能用 `or []` 合并。
+        assets = base_pool.get("assets")
+        if assets is not None:
+            base_pool["assets"] = sorted({str(a).upper() for a in assets if str(a).strip()})
     try:
         base_pool["margin_per_trade_usdt"] = max(0.0, float(base_pool.get("margin_per_trade_usdt") or defaults["margin_per_trade_usdt"]))
         base_pool["max_open"] = max(1, int(base_pool.get("max_open") or defaults["max_open"]))

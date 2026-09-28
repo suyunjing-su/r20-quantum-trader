@@ -63,7 +63,7 @@ def fetch_single_instrument_data(item, all_positions, usdt_available, *,
         "sz": base_sz,
         "precision": item["precision"],
         "ctVal": item["ctVal"],
-        "risk_per_trade_usd": effective_risk_per_trade(item.get("risk_per_trade_usd", 15.0), usdt_available),
+        "risk_per_trade_usd": effective_risk_per_trade(item.get("risk_per_trade_usd", 0.0), usdt_available),
         "minSz": min_sz,
         # 标的分级信息随因子包下发，供拦截插件与提示词按「层级」而非写死币种名做通用判断
         "tier": item.get("tier", "tier_2_momentum"),
@@ -123,6 +123,16 @@ def fetch_single_instrument_data(item, all_positions, usdt_available, *,
                     "lever": p.get("lever", "3"),
                     "venue": str(p.get("venue") or p.get("exchange") or "okx").lower(),
                     "exchange": str(p.get("venue") or p.get("exchange") or "okx").lower(),
+                    # ⚠️ 单位覆盖（三所持仓接管）：外所在仓的 `pos` 是**该所原生单位**
+                    # （币安=币数、Gate=张），而 `f["ctVal"]`/`f["minSz"]`/`f["precision"]`
+                    # 来自 **OKX 合约池**。下游 `scale_out`/`position_exit` 用
+                    # `pos × ctVal × price` 算名义额与手续费，若沿用 OKX 的面值，
+                    # 币安仓会错 100 倍（XRP）、Gate 会错 10 倍。
+                    # 故把该所自己的值挂在持仓记录上，由下游**优先取用**；
+                    # 值为 None 时下游回落到 `f[...]`，OKX 路径逐位不变。
+                    "ctVal": (float(p["ctVal"]) if p.get("ctVal") else None),
+                    "minSz": (float(p["minSz"]) if p.get("minSz") else None),
+                    "precision": p.get("precision"),
                     "raw": p.get("raw", {}),
                 }
                 break

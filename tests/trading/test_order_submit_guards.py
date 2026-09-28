@@ -20,6 +20,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from scripts.trader.order_submit import submit_protected_limit_order
+from tests.venue_gate_stub import direct_venue_gate_adapter as _direct_venue_gate_adapter
 
 INST = "BTC-USDT-SWAP"
 
@@ -78,7 +79,11 @@ class Rig:
             current_environment=lambda: SimpleNamespace(
                 simulated=self.simulated, mode="demo" if self.simulated else "live"),
             fetch_ticker=lambda i: {"last": self.ticker},
-            okx_rest=self.okx, venue_registry=_Reg())
+            okx_rest=self.okx,
+            # 2026-09-28：OKX 边界从**保证金**换算张数（与币安/Gate 同口径）
+            quantize_size=lambda raw, step: (float(int(raw / (step or 1)) * (step or 1))
+                                             if raw > 0 else 0.0),
+            venue_registry=_Reg())
         params.update(over)
         # ⚠️ 隔离**真实**的 listing gate 与几何复验：
         # ① 真目录里没有我造的 `BTC_OKX` ⇒ 它会 fail-closed 拒单（那是它工作正常，
@@ -94,7 +99,8 @@ class Rig:
              patch("astra_backend.exchanges.registry.execution_open", return_value=execution_open), \
              patch("scripts.order_risk.validate_quote_geometry_and_rr",
                    side_effect=lambda *a, **k: (self.geometry_calls.append(a),
-                                                self.geometry)[1]):
+                                                self.geometry)[1]), \
+             _direct_venue_gate_adapter():
             return submit_protected_limit_order(
                 INST, "buy" if pos_side == "long" else "sell", pos_side, 3.0,
                 self.price, self.tp, self.sl, venue_ctx=venue_ctx, **params)
@@ -169,6 +175,8 @@ class PriceAnchorGateTest(unittest.TestCase):
                 MAX_LEVERAGE=20, MIN_LEVERAGE=1, canonical_base=lambda i: i.split("-")[0],
                 current_environment=lambda: SimpleNamespace(simulated=False, mode="live"),
                 fetch_ticker=lambda i: {"last": "100000"}, okx_rest=rig.okx,
+                quantize_size=lambda raw, step: (float(int(raw / (step or 1)) * (step or 1))
+                                                 if raw > 0 else 0.0),
                 venue_registry=_Reg())
 
     def test_buy_above_market_beyond_cross_threshold_is_rejected(self):

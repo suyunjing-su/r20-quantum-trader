@@ -386,6 +386,7 @@ class BinanceExecutionAndProtectionTests(unittest.TestCase):
             self.assertEqual(tp_qs["type"], ["TAKE_PROFIT_MARKET"])
             self.assertEqual(tp_qs["closePosition"], ["true"])
             self.assertEqual(tp_qs["workingType"], ["CONTRACT_PRICE"])
+            self.assertRegex(tp_qs["clientAlgoId"][0], r"^t-astratp[0-9a-f]{16}$")
 
             # SL 请求检查
             sl_qs = parse_qs(urlparse(captured[1].full_url).query)
@@ -394,6 +395,7 @@ class BinanceExecutionAndProtectionTests(unittest.TestCase):
             self.assertEqual(sl_qs["type"], ["STOP_MARKET"])
             self.assertEqual(sl_qs["closePosition"], ["true"])
             self.assertEqual(sl_qs["workingType"], ["CONTRACT_PRICE"])
+            self.assertRegex(sl_qs["clientAlgoId"][0], r"^t-astrasl[0-9a-f]{16}$")
 
     def test_execution_switch_gatekeeping(self):
         from astra_backend.exchanges import require_execution, execution_open

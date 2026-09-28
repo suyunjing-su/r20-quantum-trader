@@ -186,7 +186,10 @@ class NotificationsTests(unittest.TestCase):
             self.assertIn("首批止盈 (TP1 · 50%仓位)", msg_leg)
             self.assertIn("终极波段 (TP2 · 剩余仓位)：95000.0", msg_leg)
             self.assertIn("几何盈亏比：2.50 R", msg_leg)
-            self.assertIn("预估保证金", msg_leg)
+            # 2026-09-28：不再用 `张数 × 价格 ÷ 杠杆` 造「预估保证金」——
+            # 那正是把 199.9 XRP 的 49.9U 说成 6.72U 的形态。没给保证金就只说杠杆。
+            self.assertNotIn("预估保证金", msg_leg)
+            self.assertIn("3x 杠杆", msg_leg)
 
     def test_modern_notifier_partial_close_and_fees(self):
         import scripts.qq_notifier as notifier
@@ -210,7 +213,8 @@ class NotificationsTests(unittest.TestCase):
             self.assertIn("到手净利", msg)
             self.assertIn("+13.8000 USDT", msg)
             self.assertIn("交易手续费: -1.2000 U", msg)
-            self.assertIn("零风险放飞", msg)
+            # 文案 2026-09-28 精简过（去掉口号式收尾）：判据钉**语义**而非旧口号。
+            self.assertIn("锁定胜率放飞", msg)
             self.assertEqual(payload["pnl"], 13.8)
 
     def test_modern_notifier_interceptor_blocked(self):

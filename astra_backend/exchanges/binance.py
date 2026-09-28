@@ -20,6 +20,7 @@ import hashlib
 import hmac
 import json
 import time
+import uuid
 import warnings
 from decimal import Decimal, ROUND_DOWN
 from typing import Any, Dict, List, Optional
@@ -651,6 +652,7 @@ class BinanceAdapter(BinanceAlgoRequestsMixin, BaseExchangeAdapter):
             trigger_price=tp_px,
             type_="TAKE_PROFIT_MARKET",
             wt=wt,
+            client_algo_id=f"t-astratp{uuid.uuid4().hex[:16]}",
         )
 
         res["sl"] = send_protective_order(
@@ -663,6 +665,7 @@ class BinanceAdapter(BinanceAlgoRequestsMixin, BaseExchangeAdapter):
             trigger_price=sl_px,
             type_="STOP_MARKET",
             wt=wt,
+            client_algo_id=f"t-astrasl{uuid.uuid4().hex[:16]}",
         )
 
         return res

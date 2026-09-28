@@ -65,7 +65,7 @@ DEFAULT_RENEW_WITHIN_S = 24 * 3600
 DEFAULT_WATCHDOG_DEBOUNCE_S = 30 * 60
 #: 覆盖缺口容忍度（相对持仓量）：小于千分之一视为浮点噪音，不修
 DEFAULT_TOLERANCE_RATIO = 0.001
-#: 判定"这条腿属于本系统"的文本标记（与云端棘轮同一套：Gate `t-astrasl*`、Binance 类型名）
+#: 判定"这条腿属于本系统"的文本标记（Gate/Binance 均写入 `t-astrasl*` / `t-astratp*`）。
 OUR_SL_MARKERS = ("astrasl", "stop")
 OUR_TP_MARKERS = ("astratp", "take_profit")
 
@@ -90,10 +90,8 @@ def _row_text(row: Dict[str, Any]) -> str:
         order.get("text"), initial.get("text"), row.get("text"),
         row.get("type"), row.get("orderType"), raw.get("orderType"),
         raw.get("type"), row.get("algoType"),
-        # 第一百七十五刀：**客户端订单号**（Binance `clientAlgoId`/`clientOrderId` 等）——
-        # 补"标签存在但扫描器看不见"这个洞。⚠️ 如实说明：真机上 Binance 的 `clientAlgoId`
-        # 目前是交易所给的**随机串**（实测 20/20 不含 `astra`）⇒ 本行**不会**让当下的 Binance
-        # 腿变得可归因；给 Binance 腿打标签是**写入侧**的事，已登记（会改下单参数，需拍板）。
+        # 客户端订单号（Binance `clientAlgoId`/`clientOrderId` 等）是稳定归属标签的
+        # 主要载体；新建的 Algo 单由本系统写入 `t-astrasl*` / `t-astratp*`。
         row.get("clientAlgoId"), raw.get("clientAlgoId"),
         row.get("clientOrderId"), raw.get("clientOrderId"),
     ]

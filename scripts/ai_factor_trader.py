@@ -128,6 +128,7 @@ from scripts.trader.notifications import (
     entry_action_message,
     entry_failure_message,
     trade_open_kwargs,
+    venue_executed_facts,
 )
 from scripts.trader.order_intent import (
     build_order_intent,
@@ -770,12 +771,16 @@ def _rejection_focus_reason(decision, candidates: List[Dict[str, Any]],
     """壳（第八十七刀搬至 `scripts/trader/routing_policy.py`，纯函数）。"""
     return _routing_policy_rejection_reason(decision, candidates, preferred)
 
-def route_and_reserve_signal(inst_id: str, side: str, size: float, price: float,
+def route_and_reserve_signal(inst_id: str, side: str, price: float,
                              notional_usdt: float = 0.0, margin_usdt: float = 0.0,
-                             intent_id: str = "") -> Dict[str, Any]:
-    """壳（第八十七刀搬至 `scripts/trader/routing_policy.py`，调用期同名注入）。"""
+                             intent_id: str = "", leverage: float = 0.0) -> Dict[str, Any]:
+    """壳（第八十七刀搬至 `scripts/trader/routing_policy.py`，调用期同名注入）。
+
+    ⚠️ 2026-09-28：**不再接收张数** —— 路由层只认钱（保证金/名义额），
+    原生数量只在场所边界出现一次。见 `scripts/trader/routing_policy.py`。
+    """
     return _routing_policy_route(
-        inst_id, side, size, price, notional_usdt, margin_usdt, intent_id,
+        inst_id, side, price, notional_usdt, margin_usdt, intent_id, leverage,
         _decision_payload=_decision_payload,
         _rejection_focus_reason=_rejection_focus_reason,
         build_venue_candidates=build_venue_candidates,
@@ -881,6 +886,7 @@ def submit_protected_limit_order(inst_id: str, side: str, pos_side: str, size: f
         current_environment=current_environment,
         fetch_ticker=fetch_ticker,
         okx_rest=okx_rest,
+        quantize_size=quantize_size,
         venue_registry=venue_registry)
 
 
@@ -1015,6 +1021,8 @@ def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, execu
         record_signal_snapshot=record_signal_snapshot,
         record_trade=record_trade,
         sync_cloud_algo_stop=sync_cloud_algo_stop,
+        venue_registry=venue_registry,
+        amend_venue_stop_loss=amend_venue_stop_loss,
         ASSET_CLASS_PROFILES=ASSET_CLASS_PROFILES,
         TAKER_FEE_RATE=TAKER_FEE_RATE,
         TIME_STOP_ATR_BAND=TIME_STOP_ATR_BAND,
@@ -1210,6 +1218,7 @@ def execute_portfolio():
         pool_state=pool_state,
         query_positions=query_positions,
         read_cycle_health=read_cycle_health,
+        real_pos_dict=real_pos_dict,
         save_trackers=save_trackers    )
 
     if not cb_active and pool_is_trustworthy():
@@ -1255,6 +1264,7 @@ def execute_portfolio():
             size_for_decision=size_for_decision,
             submit_protected_limit_order=submit_protected_limit_order,
             trade_open_kwargs=trade_open_kwargs,
+            venue_executed_facts=venue_executed_facts,
         )
 
     # 4b. 跨所云端保护单巡检（roadmap G8）：Gate/Binance 的触发单带 expiration，

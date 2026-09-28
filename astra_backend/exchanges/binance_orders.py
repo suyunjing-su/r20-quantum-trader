@@ -73,7 +73,8 @@ def apply_protective_qty_policy(*,
 
 
 def send_protective_order(*, build_algo_order_request, inst, opp_side, position_side,
-                          private_algo_send, qty_str, trigger_price, type_, wt):
+                          private_algo_send, qty_str, trigger_price, type_, wt,
+                          client_algo_id=None):
     """按触发价是否有效决定是否发单；返回 algoId（缺则 orderId，皆无则 `""`）。
 
     本函数由 `BinanceAdapter.attach_protective_orders` 的两段**近乎逐字重复**的代码合并而来
@@ -99,6 +100,8 @@ def send_protective_order(*, build_algo_order_request, inst, opp_side, position_
             "working_type": wt,
             "position_side": position_side,
         }
+        if client_algo_id:
+            req_kwargs["client_algo_id"] = str(client_algo_id)
         apply_protective_qty_policy(req_kwargs=req_kwargs, qty_str=qty_str)
 
         req = build_algo_order_request(**req_kwargs)

@@ -47,7 +47,7 @@ import BaseSwitch from '../../components/base/BaseSwitch.vue'
 import BaseDialog from '../../components/base/BaseDialog.vue'
 import BaseEmpty from '../../components/base/BaseEmpty.vue'
 import { Save, RefreshCw, Layers, Trash2, Zap, ShieldCheck, Route, KeyRound,
-  Wallet, Activity, AlertTriangle, Loader2, Radar } from 'lucide-vue-next'
+  Wallet, Activity, AlertTriangle, Loader2, Radar, Share2, Copy, Eye } from 'lucide-vue-next'
 import BaseLoadingAnnounce from '../../components/base/BaseLoadingAnnounce.vue';
 
 const { api } = useApi()
@@ -155,13 +155,66 @@ const binanceExecPhrase = ref('')
 const okxExec = ref(false)
 const okxExecPhrase = ref('')
 const okxCredViewLive = ref(false)
-const orderMode = ref<'limit' | 'market'>('limit')
+const orderMode = ref<'limit' | 'market'>('market')
 const savingOrderMode = ref(false)
 const venueLatencies = ref<Record<string, number>>({})
 const savingMx = ref(false)
 const savingOkx = ref(false)
 const savingVenue = ref<'binance' | 'gate' | ''>('')
 const probingVenue = ref<'binance' | 'gate' | 'okx' | ''>('')
+const savingUnifiedEnv = ref(false)
+const isUnifiedLive = computed(() => config.value?.editable?.okx_environment === 'live')
+
+async function requestUnifiedEnvSwitch(targetEnv: 'demo' | 'live') {
+  if (savingUnifiedEnv.value) return
+  if (targetEnv === (isUnifiedLive.value ? 'live' : 'demo')) return
+
+  if (targetEnv === 'live') {
+    const _ok = await ask({
+      title: t('admin.security.confirmUnifiedLiveTitle'),
+      desc: t('admin.security.confirmUnifiedLiveDesc'),
+      detail: t('admin.security.confirmUnifiedLiveDetail'),
+      danger: true,
+      confirmPhrase: 'LIVE',
+      okText: t('common.switchLive'),
+    })
+    if (!_ok) {
+      toast.warn(t('admin.security.warnNotConfirmed'))
+      return
+    }
+  }
+
+  savingUnifiedEnv.value = true
+  try {
+    const isDemo = targetEnv === 'demo'
+    await api('/api/v1/admin/multi-exchange', {
+      method: 'PUT',
+      body: JSON.stringify({
+        okx_environment: targetEnv,
+        binance_testnet: isDemo,
+        gate_testnet: isDemo,
+      }),
+    })
+    await api('/api/v1/admin/config', {
+      method: 'PUT',
+      body: JSON.stringify({
+        okx_environment: targetEnv,
+      }),
+    })
+    if (config.value?.editable) {
+      config.value.editable.okx_environment = targetEnv
+    }
+    mxTestnet.value.binance = isDemo
+    mxTestnet.value.gate = isDemo
+    okxCredViewLive.value = (targetEnv === 'live')
+    toast.ok(t('admin.security.toastUnifiedEnvSaved', undefined, { env: targetEnv.toUpperCase() }))
+    await Promise.all([loadAll(), loadMx()])
+  } catch (e: any) {
+    toast.err(t('admin.security.errSaveFailed', undefined, { msg: e.message }))
+  } finally {
+    savingUnifiedEnv.value = false
+  }
+}
 
 async function loadAll() {
   loading.value = true
@@ -177,7 +230,9 @@ async function loadAll() {
       okxCredViewLive.value = (cfg.editable.okx_environment === 'live')
     }
     if (cfg?.editable?.order_mode) {
-      orderMode.value = (cfg.editable.order_mode === 'market' ? 'market' : 'limit')
+      orderMode.value = (cfg.editable.order_mode === 'limit' ? 'limit' : 'market')
+    } else {
+      orderMode.value = 'market'
     }
     newCapital.value = String(cfg.editable?.initial_capital ?? '')
     manualClose.value = !!cfg.editable?.manual_close_enabled
@@ -202,23 +257,6 @@ function applyRuntime(rt: any) {
 
 async function saveEnvironment() {
   const environment = config.value.editable.okx_environment
-  if (environment === 'live') {
-    // 批C(2026-09-13)：切 LIVE 是全站最高风险动作（真实资金），原先用 prompt() 收短语
-    // ——移动端 prompt 常被弱化，且样式/焦点不可控。改用项目危险操作确认框，
-    // 要求逐字输入 LIVE（与其余危险操作同一套门禁语义）。
-    const _ok = await ask({
-      title: t('admin.security.confirmLiveTitle'),
-      desc: t('admin.security.confirmLiveDesc'),
-      detail: t('admin.security.confirmLiveDetail'),
-      danger: true,
-      confirmPhrase: 'LIVE',
-      okText: t('common.switchLive'),
-    })
-    if (!_ok) {
-      toast.warn(t('admin.security.warnNotConfirmed'))
-      return
-    }
-  }
   savingOkx.value = true
   try {
     const body: any = { okx_environment: environment }
@@ -582,11 +620,35 @@ const okxEnvText = computed(() => okxEnvTextOf(config.value?.editable?.okx_envir
 const binanceEnvText = computed(() => envTextOf('binance', t('admin.security.envDemoBinance'), mx.value, mxTestnet.value, t))
 const gateEnvText = computed(() => envTextOf('gate', t('admin.security.envDemoGate'), mx.value, mxTestnet.value, t))
 
-function setOkxMode(mode: 'demo' | 'live') {
-  if (!config.value?.editable) return
-  config.value.editable.okx_environment = mode
-  okxCredViewLive.value = (mode === 'live')
-}
+const venueReadiness = computed(() => {
+  const okxReady = okxLinked.value
+  const b = mx.value?.venues?.binance
+  const binanceReady = !!(b?.has_api_key && b?.execution_open)
+  const g = mx.value?.venues?.gate
+  const gateReady = !!(g?.has_api_key && g?.execution_open)
+
+  const list: Array<{ id: string; name: string; ready: boolean }> = [
+    { id: 'okx', name: t('admin.security.okxNameShort'), ready: okxReady },
+    { id: 'binance', name: 'Binance', ready: binanceReady },
+    { id: 'gate', name: 'Gate.io', ready: gateReady },
+  ]
+  const readyList = list.filter((v) => v.ready)
+  return {
+    all: list,
+    ready: readyList,
+    readyCount: readyList.length,
+    readyNames: readyList.map((v) => v.name).join('、'),
+  }
+})
+
+const preferredVenueConflict = computed(() => {
+  if (preferredVenue.value === 'auto') return null
+  const target = venueReadiness.value.all.find((v) => v.id === preferredVenue.value)
+  if (!target || !target.ready) {
+    return target?.name || preferredVenue.value.toUpperCase()
+  }
+  return null
+})
 
 const TABS = computed<Array<{ key: TabKey; label: string; icon: any }>>(() => [
   { key: 'venues', label: t('admin.security.tabVenues'), icon: Route },
@@ -652,13 +714,102 @@ const healthAllOk = computed(() => {
   return chips.length > 0 && chips.every((h: any) => h.ok === h.total)
 })
 
-onMounted(() => { loadAll(); loadMx(); loadChannels() })
+// ---- Strategy Plaza Sharing ----
+const plazaSettings = ref({
+  enabled: false,
+  nickname: '0xEthan',
+  show_performance: true,
+  show_balance: false,
+  show_model: true,
+  show_strategy_params: true,
+  plaza_hub_url: 'https://hub.astraquant.tech',
+})
+const plazaIsLive = ref(false)
+const loadingPlaza = ref(false)
+const savingPlaza = ref(false)
+const showPlazaPreview = ref(false)
+const plazaPreviewData = ref<any>(null)
+const loadingPlazaPreview = ref(false)
+
+const plazaPublicUrl = computed(() => {
+  if (typeof window !== 'undefined' && window.location) {
+    return `${window.location.origin}/api/v1/public/plaza/profile`
+  }
+  return '/api/v1/public/plaza/profile'
+})
+
+async function loadPlazaSettings() {
+  loadingPlaza.value = true
+  try {
+    const res = await api<any>('/api/v1/admin/plaza/settings')
+    if (res?.settings) {
+      plazaSettings.value = { ...plazaSettings.value, ...res.settings }
+    }
+    plazaIsLive.value = Boolean(res?.is_live)
+  } catch {
+    // Keep defaults
+  } finally {
+    loadingPlaza.value = false
+  }
+}
+
+async function savePlazaSettings() {
+  savingPlaza.value = true
+  try {
+    const res = await api<any>('/api/v1/admin/plaza/settings', {
+      method: 'POST',
+      body: JSON.stringify(plazaSettings.value),
+    })
+    if (res?.settings) {
+      plazaSettings.value = { ...plazaSettings.value, ...res.settings }
+    }
+    plazaIsLive.value = Boolean(res?.is_live)
+    toast.ok(t('admin.security.toastPlazaSaved'))
+  } catch (err: any) {
+    toast.err(t('admin.security.errSaveFailed', undefined, { msg: err.message || 'Error' }))
+  } finally {
+    savingPlaza.value = false
+  }
+}
+
+function copyPlazaUrl() {
+  if (navigator.clipboard) {
+    navigator.clipboard.writeText(plazaPublicUrl.value)
+    toast.ok(t('admin.security.toastPlazaCopied'))
+  }
+}
+
+async function openPlazaPreview() {
+  showPlazaPreview.value = true
+  loadingPlazaPreview.value = true
+  try {
+    const res = await api<any>('/api/v1/public/plaza/profile')
+    plazaPreviewData.value = res
+  } catch (err: any) {
+    plazaPreviewData.value = { error: err.message }
+  } finally {
+    loadingPlazaPreview.value = false
+  }
+}
+
+function copyCloneParams() {
+  if (plazaPreviewData.value?.strategy_clone_payload && navigator.clipboard) {
+    const jsonStr = JSON.stringify(plazaPreviewData.value.strategy_clone_payload, null, 2)
+    navigator.clipboard.writeText(jsonStr)
+    toast.ok(t('admin.security.plazaCloneSuccess'))
+  }
+}
+
+onMounted(() => { loadAll(); loadMx(); loadChannels(); loadPlazaSettings() })
 </script>
 
 <template>
   <div class="sc">
     <PageHeader :title="t('nav.admin.security')" :description="t('admin.security.desc')">
       <template #actions>
+        <span class="badge mono" :class="isUnifiedLive ? 'badge-warn' : 'badge-accent'">
+          {{ isUnifiedLive ? t('admin.security.envLive') : t('admin.security.optDemo') }}
+        </span>
         <span class="badge badge-accent mono">
           {{ t('admin.security.chipRouting') }} {{ routingMode.toUpperCase() }}
         </span>
@@ -722,61 +873,44 @@ onMounted(() => { loadAll(); loadMx(); loadChannels() })
 
       <!-- ══════════ 页签 1：交易所与路由 ══════════ -->
       <template v-if="activeTab === 'venues'">
-        <SettingsSection :title="t('admin.security.routingTitle')" :description="t('admin.security.routingDesc')" :icon="Route">
+        <!-- 全局统一交易环境一键切换 -->
+        <SettingsSection :title="t('admin.security.unifiedEnvTitle')" :description="t('admin.security.unifiedEnvDesc')" :icon="ShieldCheck">
           <template #actions>
-            <button type="button" class="btn btn-primary btn-sm" :disabled="savingMx" @click="saveRouting">
-              <Loader2 v-if="savingMx" :size="13" class="animate-spin shrink-0" />
-              <Save v-else :size="13" />
-              <span>{{ savingMx ? t('admin.security.saving') : t('admin.security.saveRouting') }}</span>
-            </button>
+            <span class="badge mono" :class="isUnifiedLive ? 'badge-warn' : 'badge-accent'">
+              {{ isUnifiedLive ? t('admin.security.envLive') : t('admin.security.optDemo') }}
+            </span>
           </template>
 
           <div class="sc-group">
-            <span class="form-label">{{ t('admin.security.routingModeLabel') }}</span>
-            <div class="sc-radios sc-radios-3" role="radiogroup" :aria-label="t('admin.security.routingModeLabel')">
-              <label
-                v-for="m in ROUTING_MODES"
-                :key="m.value"
-                class="sc-radio"
-                :class="{ 'is-on': routingMode === m.value }"
+            <span class="form-label">{{ t('admin.security.unifiedEnvLabel') }}</span>
+            <div class="seg seg-compact" role="group" :aria-label="t('admin.security.unifiedEnvLabel')">
+              <button
+                type="button"
+                class="disabled:opacity-40 disabled:cursor-not-allowed"
+                :aria-pressed="!isUnifiedLive"
+                :class="{ 'seg-on': !isUnifiedLive }"
+                :disabled="savingUnifiedEnv"
+                @click="requestUnifiedEnvSwitch('demo')"
               >
-                <input v-model="routingMode" type="radio" name="routing-mode" :value="m.value" />
-                <span class="sc-radio-text">
-                  <span class="sc-radio-title">{{ t(m.labelKey) }}</span>
-                  <span class="sc-radio-desc">{{ t(m.descKey) }}</span>
-                </span>
-              </label>
-            </div>
-          </div>
-
-          <div class="sc-group">
-            <span class="form-label">{{ t('admin.security.manualLabel') }}</span>
-            <div class="sc-radios sc-radios-4" role="radiogroup" :aria-label="t('admin.security.manualLabel')">
-              <label
-                v-for="v in PREFERRED_VENUES"
-                :key="v.value"
-                class="sc-radio"
-                :class="{ 'is-on': preferredVenue === v.value }"
+                <Loader2 v-if="savingUnifiedEnv && !isUnifiedLive" :size="12" class="animate-spin shrink-0" />
+                <span>{{ t('admin.security.optDemo') }} · {{ t('admin.security.envDemoOkx') }}</span>
+              </button>
+              <button
+                type="button"
+                class="disabled:opacity-40 disabled:cursor-not-allowed"
+                :aria-pressed="isUnifiedLive"
+                :class="{ 'seg-on': isUnifiedLive }"
+                :disabled="savingUnifiedEnv"
+                @click="requestUnifiedEnvSwitch('live')"
               >
-                <input v-model="preferredVenue" type="radio" name="preferred-venue" :value="v.value" />
-                <span class="sc-radio-text">
-                  <span class="sc-radio-title">{{ t(v.labelKey) }}</span>
-                  <span class="sc-radio-desc">{{ t(v.descKey) }}</span>
-                </span>
-              </label>
+                <Loader2 v-if="savingUnifiedEnv && isUnifiedLive" :size="12" class="animate-spin shrink-0" />
+                <span>{{ t('admin.security.optLive') }} · {{ t('admin.security.envLive') }}</span>
+              </button>
             </div>
+            <p class="sc-hint">
+              {{ isUnifiedLive ? t('admin.security.unifiedLiveHint') : t('admin.security.unifiedDemoHint') }}
+            </p>
           </div>
-
-          <p class="sc-note">
-            <span class="label-caps">{{ t('admin.security.routingEffectiveTitle') }}</span>
-            <span>
-              <b class="mono is-accent">{{ routingMode.toUpperCase() }}</b>
-              <template v-if="preferredVenue !== 'auto'">
-                {{ t('admin.security.manualTag') }} <b class="mono is-accent">{{ preferredVenue.toUpperCase() }}</b>
-              </template>
-              — {{ t('admin.security.unconfiguredNote') }}
-            </span>
-          </p>
         </SettingsSection>
 
         <!-- 委托订单模式 -->
@@ -815,6 +949,104 @@ onMounted(() => { loadAll(); loadMx(); loadChannels() })
           </div>
         </SettingsSection>
 
+        <SettingsSection :title="t('admin.security.routingTitle')" :description="t('admin.security.routingDesc')" :icon="Route">
+          <template #actions>
+            <button type="button" class="btn btn-primary btn-sm" :disabled="savingMx" @click="saveRouting">
+              <Loader2 v-if="savingMx" :size="13" class="animate-spin shrink-0" />
+              <Save v-else :size="13" />
+              <span>{{ savingMx ? t('admin.security.saving') : t('admin.security.saveRouting') }}</span>
+            </button>
+          </template>
+
+          <div class="sc-group">
+            <span class="form-label">{{ t('admin.security.routingModeLabel') }}</span>
+            <div class="sc-radios sc-radios-3" role="radiogroup" :aria-label="t('admin.security.routingModeLabel')">
+              <label
+                v-for="m in ROUTING_MODES"
+                :key="m.value"
+                class="sc-radio"
+                :class="{ 'is-on': routingMode === m.value }"
+              >
+                <input v-model="routingMode" type="radio" name="routing-mode" :value="m.value" />
+                <span class="sc-radio-text">
+                  <span class="sc-radio-title">{{ t(m.labelKey) }}</span>
+                  <span class="sc-radio-desc">{{ t(m.descKey) }}</span>
+                </span>
+              </label>
+            </div>
+
+            <!-- 选所就绪度与协调说明卡 -->
+            <div class="sc-coord-panel" :class="{ 'is-danger': venueReadiness.readyCount === 0 }">
+              <div class="sc-coord-header">
+                <span class="badge mono" :class="venueReadiness.readyCount === 0 ? 'badge-warn' : 'badge-accent'">
+                  <Activity :size="11" />
+                  {{ t('admin.security.readyVenuesCount', undefined, { count: venueReadiness.readyCount, total: 3 }) }}
+                </span>
+                <span class="sc-coord-names">
+                  {{ venueReadiness.readyCount > 0 ? venueReadiness.readyNames : t('admin.security.noReadyVenues') }}
+                </span>
+              </div>
+              <p class="sc-coord-text">
+                <template v-if="routingMode === 'balanced'">
+                  <span v-if="venueReadiness.readyCount === 1">
+                    {{ t('admin.security.balancedCoordSingle', undefined, { venue: venueReadiness.readyNames }) }}
+                  </span>
+                  <span v-else-if="venueReadiness.readyCount === 2">
+                    {{ t('admin.security.balancedCoordDouble', undefined, { venues: venueReadiness.readyNames }) }}
+                  </span>
+                  <span v-else-if="venueReadiness.readyCount === 3">
+                    {{ t('admin.security.balancedCoordTriple') }}
+                  </span>
+                  <span v-else>
+                    {{ t('admin.security.balancedCoordNone') }}
+                  </span>
+                </template>
+                <template v-else-if="routingMode === 'auto'">
+                  {{ t('admin.security.autoCoordDesc', undefined, { venues: venueReadiness.readyCount > 0 ? venueReadiness.readyNames : t('admin.security.noReadyVenues') }) }}
+                </template>
+                <template v-else>
+                  {{ t('admin.security.splitCoordDesc') }}
+                </template>
+              </p>
+            </div>
+          </div>
+
+          <div class="sc-group">
+            <span class="form-label">{{ t('admin.security.manualLabel') }}</span>
+            <div class="sc-radios sc-radios-4" role="radiogroup" :aria-label="t('admin.security.manualLabel')">
+              <label
+                v-for="v in PREFERRED_VENUES"
+                :key="v.value"
+                class="sc-radio"
+                :class="{ 'is-on': preferredVenue === v.value }"
+              >
+                <input v-model="preferredVenue" type="radio" name="preferred-venue" :value="v.value" />
+                <span class="sc-radio-text">
+                  <span class="sc-radio-title">{{ t(v.labelKey) }}</span>
+                  <span class="sc-radio-desc">{{ t(v.descKey) }}</span>
+                </span>
+              </label>
+            </div>
+
+            <!-- 手选冲突告警 -->
+            <div v-if="preferredVenueConflict" role="alert" class="sc-conflict-warn">
+              <AlertTriangle :size="13" class="shrink-0" />
+              <span>{{ t('admin.security.preferredConflictWarn', undefined, { venue: preferredVenueConflict }) }}</span>
+            </div>
+          </div>
+
+          <p class="sc-note">
+            <span class="label-caps">{{ t('admin.security.routingEffectiveTitle') }}</span>
+            <span>
+              <b class="mono is-accent">{{ routingMode.toUpperCase() }}</b>
+              <template v-if="preferredVenue !== 'auto'">
+                {{ t('admin.security.manualTag') }} <b class="mono is-accent">{{ preferredVenue.toUpperCase() }}</b>
+              </template>
+              — {{ t('admin.security.unconfiguredNote') }}
+            </span>
+          </p>
+        </SettingsSection>
+
         <!-- 三所凭证 -->
         <SettingsSection :title="t('admin.security.credsTitle')" :description="t('admin.security.credsDesc')" :icon="KeyRound">
           <div class="sc-venues">
@@ -828,31 +1060,39 @@ onMounted(() => { loadAll(); loadMx(); loadChannels() })
               <template #env>
                 <div class="field-stack">
                   <span class="form-label">{{ t('admin.security.endpointTier') }}</span>
-                  <div class="seg seg-compact" role="group" :aria-label="t('admin.security.endpointTier')">
-                    <button
-                      type="button"
-                      :aria-pressed="!okxCredViewLive"
-                      :class="{ 'seg-on': !okxCredViewLive }"
-                      @click="setOkxMode('demo')"
-                    >
-                      <span>{{ t('admin.security.okxDemoDomain') }}</span>
-                    </button>
-                    <button
-                      type="button"
-                      :aria-pressed="okxCredViewLive"
-                      :class="{ 'seg-on': okxCredViewLive }"
-                      @click="setOkxMode('live')"
-                    >
-                      <span>{{ t('admin.security.okxLiveDomain') }}</span>
-                    </button>
+                  <div class="sc-env-indicator">
+                    <span class="badge mono" :class="isUnifiedLive ? 'badge-warn' : 'badge-accent'">
+                      {{ isUnifiedLive ? t('admin.security.envLive') : t('admin.security.envDemoOkx') }}
+                    </span>
+                    <span class="sc-env-hint">{{ t('admin.security.envFollowsUnified') }}</span>
                   </div>
                 </div>
               </template>
 
               <div class="sc-creds">
-                <span class="form-label">
-                  {{ (okxCredViewLive ? t('admin.security.liveTrio') : t('admin.security.demoTrio')) }}
-                </span>
+                <div class="sc-creds-header">
+                  <span class="form-label">
+                    {{ (okxCredViewLive ? t('admin.security.liveTrio') : t('admin.security.demoTrio')) }}
+                  </span>
+                  <div class="seg seg-compact" role="group" :aria-label="t('admin.security.okxCredViewLabel')">
+                    <button
+                      type="button"
+                      :aria-pressed="!okxCredViewLive"
+                      :class="{ 'seg-on': !okxCredViewLive }"
+                      @click="okxCredViewLive = false"
+                    >
+                      <span>{{ t('admin.security.viewDemoCred') }}</span>
+                    </button>
+                    <button
+                      type="button"
+                      :aria-pressed="okxCredViewLive"
+                      :class="{ 'seg-on': okxCredViewLive }"
+                      @click="okxCredViewLive = true"
+                    >
+                      <span>{{ t('admin.security.viewLiveCred') }}</span>
+                    </button>
+                  </div>
+                </div>
 
                 <div v-show="!okxCredViewLive" class="sc-creds-group">
                   <input v-model="keys.demo_key" type="password" :placeholder="t('admin.security.apiKeyKeep')" class="field" :aria-label="t('admin.security.demoKeyAria')" />
@@ -925,23 +1165,11 @@ onMounted(() => { loadAll(); loadMx(); loadChannels() })
               <template #env>
                 <div class="field-stack">
                   <span class="form-label">{{ t('admin.security.endpointTier') }}</span>
-                  <div class="seg seg-compact" role="group" :aria-label="t('admin.security.endpointTier')">
-                    <button
-                      type="button"
-                      :aria-pressed="mxTestnet.binance"
-                      :class="{ 'seg-on': mxTestnet.binance }"
-                      @click="mxTestnet.binance = true"
-                    >
-                      <span>{{ t('admin.security.binanceDemoDomain') }}</span>
-                    </button>
-                    <button
-                      type="button"
-                      :aria-pressed="!mxTestnet.binance"
-                      :class="{ 'seg-on': !mxTestnet.binance }"
-                      @click="mxTestnet.binance = false"
-                    >
-                      <span>{{ t('admin.security.binanceLiveDomain') }}</span>
-                    </button>
+                  <div class="sc-env-indicator">
+                    <span class="badge mono" :class="!mxTestnet.binance ? 'badge-warn' : 'badge-accent'">
+                      {{ !mxTestnet.binance ? t('admin.security.envLive') : t('admin.security.binanceDemoDomain') }}
+                    </span>
+                    <span class="sc-env-hint">{{ t('admin.security.envFollowsUnified') }}</span>
                   </div>
                 </div>
               </template>
@@ -1011,23 +1239,11 @@ onMounted(() => { loadAll(); loadMx(); loadChannels() })
               <template #env>
                 <div class="field-stack">
                   <span class="form-label">{{ t('admin.security.endpointTier') }}</span>
-                  <div class="seg seg-compact" role="group" :aria-label="t('admin.security.endpointTier')">
-                    <button
-                      type="button"
-                      :aria-pressed="mxTestnet.gate"
-                      :class="{ 'seg-on': mxTestnet.gate }"
-                      @click="mxTestnet.gate = true"
-                    >
-                      <span>{{ t('admin.security.gateSandboxDomain') }}</span>
-                    </button>
-                    <button
-                      type="button"
-                      :aria-pressed="!mxTestnet.gate"
-                      :class="{ 'seg-on': !mxTestnet.gate }"
-                      @click="mxTestnet.gate = false"
-                    >
-                      <span>{{ t('admin.security.gateLiveDomain') }}</span>
-                    </button>
+                  <div class="sc-env-indicator">
+                    <span class="badge mono" :class="!mxTestnet.gate ? 'badge-warn' : 'badge-accent'">
+                      {{ !mxTestnet.gate ? t('admin.security.envLive') : t('admin.security.gateSandboxDomain') }}
+                    </span>
+                    <span class="sc-env-hint">{{ t('admin.security.envFollowsUnified') }}</span>
                   </div>
                 </div>
               </template>
@@ -1113,6 +1329,144 @@ onMounted(() => { loadAll(); loadMx(); loadChannels() })
               <span class="sc-health-stat mono num">{{ h.ok }}/{{ h.total }} {{ t('admin.security.coinsUnit') }}</span>
               <span v-if="h.avg_ms" class="sc-health-ms mono num">{{ h.avg_ms }}ms</span>
               <span v-if="h.testnet" class="badge">{{ t('admin.security.sandboxTag') }}</span>
+            </div>
+          </div>
+        </SettingsSection>
+
+        <!-- 策略广场实盘共享 -->
+        <SettingsSection :title="t('admin.security.plazaShareTitle')" :description="t('admin.security.plazaShareDesc')" :icon="Share2">
+          <template #actions>
+            <span class="badge mono" :class="!isUnifiedLive ? 'badge-warn' : plazaSettings.enabled ? 'badge-accent' : ''">
+              {{ !isUnifiedLive ? t('admin.security.plazaDemoLocked') : plazaSettings.enabled ? t('admin.security.plazaActive') : t('admin.security.plazaOff') }}
+            </span>
+          </template>
+
+          <div class="sc-group">
+            <!-- 模拟盘锁定提示 -->
+            <p v-if="!isUnifiedLive" class="sc-hint flex items-center gap-1.5 text-amber-400">
+              <AlertTriangle :size="13" class="shrink-0" />
+              <span>{{ t('admin.security.plazaLiveOnlyAlert') }}</span>
+            </p>
+
+            <!-- 主开关 -->
+            <div class="flex items-center justify-between py-2 border-b border-[var(--border-subtle)]">
+              <div>
+                <span class="font-medium text-sm text-[var(--text-primary)]">{{ t('admin.security.plazaEnableLabel') }}</span>
+                <p class="text-xs text-[var(--text-muted)] mt-0.5">{{ t('admin.security.plazaShareDesc') }}</p>
+              </div>
+              <BaseSwitch
+                v-model="plazaSettings.enabled"
+                :disabled="!isUnifiedLive || savingPlaza"
+                :label="t('admin.security.plazaEnableLabel')"
+              />
+            </div>
+
+            <!-- 详细配置与链接 -->
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
+              <div class="space-y-1">
+                <label for="plaza-nickname-input" class="form-label text-xs">{{ t('admin.security.plazaNicknameLabel') }}</label>
+                <input
+                  id="plaza-nickname-input"
+                  v-model="plazaSettings.nickname"
+                  type="text"
+                  class="field text-xs disabled:opacity-40 disabled:cursor-not-allowed"
+                  maxlength="40"
+                  :disabled="!isUnifiedLive || savingPlaza"
+                  :placeholder="t('admin.security.plazaNicknamePlaceholder')"
+                />
+              </div>
+
+              <div class="space-y-1">
+                <label for="plaza-api-url-input" class="form-label text-xs">{{ t('admin.security.plazaApiUrlLabel') }}</label>
+                <div class="flex items-center gap-2">
+                  <input
+                    id="plaza-api-url-input"
+                    type="text"
+                    readonly
+                    class="field text-xs mono text-[var(--text-muted)] select-all disabled:opacity-40 disabled:cursor-not-allowed"
+                    :value="plazaPublicUrl"
+                  />
+                  <button
+                    type="button"
+                    class="btn btn-quiet btn-sm shrink-0"
+                    :disabled="!plazaSettings.enabled || !isUnifiedLive"
+                    @click="copyPlazaUrl"
+                  >
+                    <Copy :size="12" />
+                    <span>{{ t('admin.security.plazaCopyUrl') }}</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <!-- 隐私细分选项 -->
+            <div class="space-y-2 pt-2 border-t border-[var(--border-subtle)]">
+              <span class="form-label text-xs">{{ t('admin.security.plazaPrivacyCustom') }}</span>
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                <label class="flex items-center gap-2 cursor-pointer text-[var(--text-secondary)]">
+                  <input
+                    type="checkbox"
+                    v-model="plazaSettings.show_performance"
+                    :disabled="!isUnifiedLive || savingPlaza"
+                    class="rounded border-[var(--border-base)] text-[var(--color-primary)] disabled:opacity-40 disabled:cursor-not-allowed"
+                  />
+                  <span>{{ t('admin.security.plazaShowPerf') }}</span>
+                </label>
+
+                <label class="flex items-center gap-2 cursor-pointer text-[var(--text-secondary)]">
+                  <input
+                    type="checkbox"
+                    v-model="plazaSettings.show_balance"
+                    :disabled="!isUnifiedLive || savingPlaza"
+                    class="rounded border-[var(--border-base)] text-[var(--color-primary)] disabled:opacity-40 disabled:cursor-not-allowed"
+                  />
+                  <span>{{ t('admin.security.plazaShowBalance') }}</span>
+                </label>
+
+                <label class="flex items-center gap-2 cursor-pointer text-[var(--text-secondary)]">
+                  <input
+                    type="checkbox"
+                    v-model="plazaSettings.show_model"
+                    :disabled="!isUnifiedLive || savingPlaza"
+                    class="rounded border-[var(--border-base)] text-[var(--color-primary)] disabled:opacity-40 disabled:cursor-not-allowed"
+                  />
+                  <span>{{ t('admin.security.plazaShowModel') }}</span>
+                </label>
+
+                <label class="flex items-center gap-2 cursor-pointer text-[var(--text-secondary)]">
+                  <input
+                    type="checkbox"
+                    v-model="plazaSettings.show_strategy_params"
+                    :disabled="!isUnifiedLive || savingPlaza"
+                    class="rounded border-[var(--border-base)] text-[var(--color-primary)] disabled:opacity-40 disabled:cursor-not-allowed"
+                  />
+                  <span>{{ t('admin.security.plazaShowParams') }}</span>
+                </label>
+              </div>
+            </div>
+
+            <!-- 底部操作按钮 -->
+            <div class="flex items-center justify-between pt-3 border-t border-[var(--border-subtle)]">
+              <button
+                type="button"
+                class="btn btn-ghost btn-sm"
+                :disabled="!isUnifiedLive || !plazaSettings.enabled"
+                @click="openPlazaPreview"
+              >
+                <Eye :size="13" />
+                <span>{{ t('admin.security.plazaPreviewCard') }}</span>
+              </button>
+
+              <button
+                type="button"
+                class="btn btn-primary btn-sm"
+                :disabled="!isUnifiedLive || savingPlaza"
+                @click="savePlazaSettings"
+              >
+                <Loader2 v-if="savingPlaza" :size="13" class="animate-spin shrink-0" />
+                <Save v-else :size="13" />
+                <span>{{ savingPlaza ? t('admin.security.saving') : t('admin.security.plazaSaveSettings') }}</span>
+              </button>
             </div>
           </div>
         </SettingsSection>
@@ -1420,6 +1774,75 @@ onMounted(() => { loadAll(); loadMx(); loadChannels() })
         </button>
       </template>
     </BaseDialog>
+
+    <!-- ══════════ 策略广场名片预览 ══════════ -->
+    <BaseDialog
+      :open="showPlazaPreview"
+      :title="t('admin.security.plazaPreviewTitle')"
+      size="md"
+      @close="showPlazaPreview = false"
+    >
+      <div v-if="loadingPlazaPreview" class="py-8 flex justify-center items-center">
+        <Loader2 :size="24" class="animate-spin shrink-0 text-[var(--color-primary)]" />
+      </div>
+      <div v-else-if="plazaPreviewData" class="space-y-4">
+        <!-- 模拟策略广场卡片 -->
+        <div class="card p-4 border border-[var(--border-base)] bg-[var(--bg-elevated)] space-y-3">
+          <div class="flex items-center justify-between">
+            <div class="flex items-center gap-2">
+              <span class="font-bold text-sm text-[var(--text-primary)]">{{ plazaPreviewData.node_info?.nickname || plazaSettings.nickname }}</span>
+              <span class="badge badge-accent label-caps">{{ t('admin.security.plazaVerifiedBadge') }}</span>
+            </div>
+            <span class="text-xs text-[var(--text-muted)] mono">{{ plazaPreviewData.node_info?.system_version }}</span>
+          </div>
+
+          <div v-if="plazaPreviewData.performance?.visible" class="grid grid-cols-3 gap-2 py-2 border-y border-[var(--border-subtle)] text-center">
+            <div>
+              <span class="text-xs text-[var(--text-muted)]">{{ t('admin.security.plazaRoi') }}</span>
+              <p class="text-base font-bold text-emerald-400 font-mono">{{ plazaPreviewData.performance?.total_roi_pct >= 0 ? '+' : '' }}{{ plazaPreviewData.performance?.total_roi_pct }}%</p>
+            </div>
+            <div>
+              <span class="text-xs text-[var(--text-muted)]">{{ t('admin.security.plazaWinRate') }}</span>
+              <p class="text-base font-bold text-[var(--text-primary)] font-mono">{{ plazaPreviewData.performance?.win_rate_pct }}%</p>
+            </div>
+            <div>
+              <span class="text-xs text-[var(--text-muted)]">{{ t('admin.security.plazaTotalTrades') }}</span>
+              <p class="text-base font-bold text-[var(--text-primary)] font-mono">{{ plazaPreviewData.performance?.all_trades }} {{ t('admin.security.plazaTradeUnit') }}</p>
+            </div>
+          </div>
+
+          <div v-if="plazaPreviewData.model_specs?.visible" class="text-xs space-y-1">
+            <span class="text-[var(--text-muted)]">{{ t('admin.security.plazaDriverModel') }}:</span>
+            <span class="ml-2 font-mono font-medium text-[var(--color-primary)]">{{ plazaPreviewData.model_specs?.primary_model }}</span>
+            <span class="text-[var(--text-muted)] ml-2">({{ plazaPreviewData.model_specs?.reasoning_effort }} effort)</span>
+          </div>
+
+          <div v-if="plazaPreviewData.strategy_clone_payload?.visible" class="text-xs space-y-1">
+            <span class="text-[var(--text-muted)]">{{ t('admin.security.plazaRiskConfig') }}:</span>
+            <span class="ml-2 font-mono">{{ t('admin.security.plazaRiskSummary', undefined, { min: plazaPreviewData.strategy_clone_payload?.risk_settings?.min_leverage, max: plazaPreviewData.strategy_clone_payload?.risk_settings?.max_leverage, pct: (Number(plazaPreviewData.strategy_clone_payload?.risk_settings?.max_margin_equity_ratio || 0.35) * 100).toFixed(0) }) }}</span>
+          </div>
+        </div>
+
+        <div class="flex justify-end gap-2 pt-2">
+          <button
+            v-if="plazaPreviewData.strategy_clone_payload?.visible"
+            type="button"
+            class="btn btn-quiet btn-sm"
+            @click="copyCloneParams"
+          >
+            <Copy :size="13" />
+            <span>{{ t('admin.security.plazaTestCopy') }}</span>
+          </button>
+          <button
+            type="button"
+            class="btn btn-primary btn-sm"
+            @click="showPlazaPreview = false"
+          >
+            {{ t('admin.security.plazaPreviewClose') }}
+          </button>
+        </div>
+      </div>
+    </BaseDialog>
   </div>
 </template>
 
@@ -1560,6 +1983,64 @@ onMounted(() => { loadAll(); loadMx(); loadChannels() })
   display: flex;
   flex-direction: column;
   gap:6px;
+}
+.sc-creds-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--ds-space-2);
+}
+.sc-env-indicator {
+  display: flex;
+  align-items: center;
+  gap: var(--ds-space-2);
+}
+.sc-env-hint {
+  font-size: var(--text-4xs);
+  color: var(--ds-color-text-placeholder);
+}
+.sc-coord-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ds-space-2);
+  margin-top: var(--ds-space-3);
+  padding: var(--ds-space-3);
+  border-radius: var(--r-ctl);
+  border: 1px solid var(--ds-color-border-default);
+  background-color: var(--ds-color-bg-surface-inset);
+}
+.sc-coord-panel.is-danger {
+  border-color: var(--down-line);
+  background-color: var(--down-bg);
+}
+.sc-coord-header {
+  display: flex;
+  align-items: center;
+  gap: var(--ds-space-2);
+}
+.sc-coord-names {
+  font-size: var(--text-3xs);
+  font-weight: 600;
+  color: var(--ds-color-text-primary);
+}
+.sc-coord-text {
+  font-size: var(--text-3xs);
+  line-height: var(--leading-body);
+  color: var(--ds-color-text-description);
+  margin: 0;
+}
+.sc-conflict-warn {
+  display: flex;
+  align-items: center;
+  gap: var(--ds-space-2);
+  margin-top: var(--ds-space-2);
+  padding: var(--ds-space-2) var(--ds-space-3);
+  border-radius: var(--r-ctl);
+  background-color: var(--warn-bg);
+  border: 1px solid var(--warn-line);
+  color: var(--warn);
+  font-size: var(--text-3xs);
 }
 .sc-creds-group {
   display: flex;

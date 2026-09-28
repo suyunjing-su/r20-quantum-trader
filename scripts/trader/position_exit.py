@@ -39,6 +39,8 @@ def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, execu
     record_signal_snapshot,
     record_trade,
     sync_cloud_algo_stop,
+    venue_registry,
+    amend_venue_stop_loss,
     ASSET_CLASS_PROFILES,
     TAKER_FEE_RATE,
     TIME_STOP_ATR_BAND,
@@ -58,12 +60,13 @@ def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, execu
     profile = ASSET_CLASS_PROFILES.get(asset_type, ASSET_CLASS_PROFILES["crypto"])
     atr = max(f["atr"], cur_px * 0.005)
     prec = f["precision"]
-    ct_val = f["ctVal"]
+    ct_val = float(curr_pos.get("ctVal") or f["ctVal"])
     
     pos_sz = float(curr_pos["pos"])
     is_long = "long" in curr_pos["side"].lower()
     entry_px = float(curr_pos["avgPx"])
     pos_key = f"{inst_id}_{curr_pos['side']}"
+    pos_venue = str(curr_pos.get("venue") or curr_pos.get("exchange") or "okx").lower()
 
     now_ts = int(time.time())
     if pos_key not in trackers:
@@ -125,7 +128,7 @@ def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, execu
     hard_stop_px = float(t.get("trailingStopPx", 0.0) or 0.0)
     hard_stop_hit = protection_signals(is_long=is_long, cur_px=cur_px, hard_stop_px=hard_stop_px)
     if hard_stop_hit:
-        closed, close_detail = close_position_confirmed(inst_id, "long" if is_long else "short", pos_sz)
+        closed, close_detail = close_position_confirmed(inst_id, "long" if is_long else "short", pos_sz, venue=pos_venue)
         if not closed:
             executed_actions.append(f"[{name}] 硬止损平仓失败，仓位仍保留: {close_detail}")
             return False, "硬止损平仓失败"
@@ -140,41 +143,53 @@ def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, execu
         ))
         add_stop_cooldown(inst_id, "long" if is_long else "short", "硬止损")
         if notify_trade_close:
-            notify_trade_close(inst=name, pnl=pnl_val, stage="硬止损平仓", exit_px=cur_px)
+            notify_trade_close(inst=name, pnl=pnl_val, stage="硬止损平仓", exit_px=cur_px, venue=pos_venue)
         trackers.pop(pos_key, None)
         return True, "已硬止损"
 
     default_tp_dist = max(atr * profile["tp_atr_mult"], entry_px * profile["min_profit_ratio"])
     if not _float_or_zero(t.get("takeProfitPx")):
         t["takeProfitPx"] = round(entry_px + default_tp_dist if is_long else entry_px - default_tp_dist, prec)
-    protected, protection_detail = ensure_cloud_position_protection(
-        inst_id, "long" if is_long else "short", pos_sz, float(t["takeProfitPx"]), hard_stop_px
-    )
-    if not protected:
-        closed, close_detail = close_position_confirmed(inst_id, "long" if is_long else "short", pos_sz)
-        if not closed:
-            executed_actions.append(f"[{name}] 🚨 云端 OCO 缺失且安全退出失败: {protection_detail}; {close_detail}")
-            return False, "保护与退出均失败"
-        pnl_val = curr_pos["upl"]
-        executed_actions.append(f"[{name}] 🧯 云端 OCO 无法确认，已安全平仓: {protection_detail}")
-        record_trade(_close_trade_payload(
-            is_long=is_long, timestamp_full=timestamp_full, name=name,
-            action_type="保护失效退出", side_suffix="保护失效退出",
-            pos_sz=pos_sz, cur_px=cur_px,
-            fee=_close_fee(pos_sz, ct_val, cur_px, TAKER_FEE_RATE), pnl=pnl_val,
-            remark=f"云端 OCO 无法达到全仓覆盖，交易所确认安全平仓：{protection_detail}",
-        ))
-        add_stop_cooldown(inst_id, "long" if is_long else "short", "云端保护失效")
-        if notify_trade_close:
-            notify_trade_close(inst=name, pnl=pnl_val, stage="云端保护失效退出", exit_px=cur_px)
-        trackers.pop(pos_key, None)
-        return True, "保护失效安全退出"
+    _pos_side = "long" if is_long else "short"
+    # ⚠️ 云 OCO 核验（`okx_rest.pending_algo_orders` / `place_algo_oco`）是
+    # **OKX 直签链专属**。三所持仓接管（2026-09-28）后外所仓也会走到这里：
+    # 对币安/Gate 调用它必然失败（实测日志 `OKX 51001: Instrument ID doesn't exist`
+    # —— 它拿币安的标的去问 OKX），随后落进 fail-closed「安全退出」分支去平仓。
+    # 而那一刀真正的危险在这里：`close_position_confirmed` **不传 venue 就默认 okx**，
+    # 于是"保护失效退出"会把同名标的在 OKX 的仓平掉 —— 平的是别人的仓。
+    # 外所的保护腿由 `venue_protection` 场所看门狗独立核验与补挂，这里不重复。
+    if pos_venue == "okx":
+        protected, protection_detail = ensure_cloud_position_protection(
+            inst_id, _pos_side, pos_sz, float(t["takeProfitPx"]), hard_stop_px
+        )
+        if not protected:
+            closed, close_detail = close_position_confirmed(
+                inst_id, _pos_side, pos_sz, venue=pos_venue)
+            if not closed:
+                executed_actions.append(f"[{name}] 🚨 云端 OCO 缺失且安全退出失败: {protection_detail}; {close_detail}")
+                return False, "保护与退出均失败"
+            pnl_val = curr_pos["upl"]
+            executed_actions.append(f"[{name}] 🧯 云端 OCO 无法确认，已安全平仓: {protection_detail}")
+            record_trade(_close_trade_payload(
+                is_long=is_long, timestamp_full=timestamp_full, name=name,
+                action_type="保护失效退出", side_suffix="保护失效退出",
+                pos_sz=pos_sz, cur_px=cur_px,
+                fee=_close_fee(pos_sz, ct_val, cur_px, TAKER_FEE_RATE), pnl=pnl_val,
+                remark=f"云端 OCO 无法达到全仓覆盖，交易所确认安全平仓：{protection_detail}",
+            ))
+            add_stop_cooldown(inst_id, _pos_side, "云端保护失效")
+            if notify_trade_close:
+                notify_trade_close(inst=name, pnl=pnl_val, stage="云端保护失效退出", exit_px=cur_px, venue=pos_venue)
+            trackers.pop(pos_key, None)
+            return True, "保护失效安全退出"
+    else:
+        protection_detail = f"{pos_venue.upper()} 保护腿由场所看门狗核验（云 OCO 核验为 OKX 直签链专属）"
     t["cloudProtection"] = {"verifiedAt": timestamp_full, "detail": protection_detail}
 
     # 2. Volatility Time-Stop Exit (持仓超最长持仓时间且缩量横盘 → 时间止损，参数见后台风控管理页)
     hold_duration_sec = now_ts - t["entryTs"]
     if hold_duration_sec > TIME_STOP_HOURS * 3600 and abs(cur_profit_px) < TIME_STOP_ATR_BAND * atr:
-        closed, close_detail = close_position_confirmed(inst_id, "long" if is_long else "short", pos_sz)
+        closed, close_detail = close_position_confirmed(inst_id, "long" if is_long else "short", pos_sz, venue=pos_venue)
         if not closed:
             executed_actions.append(f"[{name}] 时间止损平仓失败，仓位仍保留: {close_detail}")
             return False, "平仓失败"
@@ -187,7 +202,7 @@ def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, execu
             remark=f"持仓超 {TIME_STOP_HOURS:g} 小时无突破，主动平仓释放配比",
         ))
         if notify_trade_close:
-            notify_trade_close(inst=name, pnl=float(curr_pos.get("upl", 0.0) or 0.0), stage="时间止损平仓", exit_px=cur_px)
+            notify_trade_close(inst=name, pnl=float(curr_pos.get("upl", 0.0) or 0.0), stage="时间止损平仓", exit_px=cur_px, venue=pos_venue)
         if pos_key in trackers: del trackers[pos_key]
         return True, "时间止损"
 
@@ -216,13 +231,29 @@ def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, execu
         # If dynamic floor stop ratcheted up, commit and sync to cloud OCO
         if dynamic_floor_sl > old_sl and old_sl > 0:
             t["trailingStopPx"] = dynamic_floor_sl
-            sync_cloud_algo_stop(inst_id, "long", dynamic_floor_sl, reason=t["stage_desc"])
+            if pos_venue == "okx":
+                sync_cloud_algo_stop(inst_id, "long", dynamic_floor_sl, reason=t["stage_desc"])
+            else:
+                # 外所：`sync_cloud_algo_stop` 走 OKX 直签链，对外所仓必然失败
+                # ——而 tracker 的 `trailingStopPx` 已经改成"已上移"⇒ **账实不符**
+                # （台账说止损抬了、交易所上其实没抬）。改用场所原生棘轮，与 AI
+                # 移损路径共用同一条 `amend_venue_stop_loss`。
+                try:
+                    _oil_ad = venue_registry.get_adapter(pos_venue)
+                    _oil_ok, _oil_note = amend_venue_stop_loss(
+                        _oil_ad, name, "long", dynamic_floor_sl, pos_sz)
+                    if not _oil_ok:
+                        executed_actions.append(
+                            f"[{name}] {pos_venue.upper()} 云端止损上移失败: {_oil_note}")
+                except Exception as _oil_exc:
+                    executed_actions.append(
+                        f"[{name}] {pos_venue.upper()} 云端止损上移异常: {_oil_exc}")
         else:
             t["trailingStopPx"] = dynamic_floor_sl
 
         # A. Hit Ratchet Floor Stop (Locked Profit Trigger)
         if cur_px <= dynamic_floor_sl and peak_profit_px >= tier1_breakeven_trigger:
-            closed, close_detail = close_position_confirmed(inst_id, "long", pos_sz)
+            closed, close_detail = close_position_confirmed(inst_id, "long", pos_sz, venue=pos_venue)
             if not closed:
                 executed_actions.append(f"[{name}] 锁利平多失败，仓位仍保留: {close_detail}")
                 return False, "平仓失败"
@@ -236,13 +267,13 @@ def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, execu
                 remark=f"最高 {t['highWaterMark']} 触发阶梯利润锁定线 {dynamic_floor_sl}",
             ))
             if notify_trade_close:
-                notify_trade_close(inst=name, pnl=pnl_val, stage="阶梯锁利平仓", exit_px=cur_px)
+                notify_trade_close(inst=name, pnl=pnl_val, stage="阶梯锁利平仓", exit_px=cur_px, venue=pos_venue)
             if pos_key in trackers: del trackers[pos_key]
             return True, "已阶梯锁利"
 
         # B. Kinetic Momentum Pullback Exit from Peak (Symmetric 2.0x ATR profit with 0.75x ATR pullback)
         if peak_profit_px >= momentum_tp_trigger and cur_px <= (t["highWaterMark"] - momentum_pullback_buffer):
-            closed, close_detail = close_position_confirmed(inst_id, "long", pos_sz)
+            closed, close_detail = close_position_confirmed(inst_id, "long", pos_sz, venue=pos_venue)
             if not closed:
                 executed_actions.append(f"[{name}] 动能见顶移动止盈失败，仓位仍保留: {close_detail}")
                 return False, "平仓失败"
@@ -256,7 +287,7 @@ def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, execu
                 remark=f"最高 {t['highWaterMark']} 动能回撤触及移动止盈线",
             ))
             if notify_trade_close:
-                notify_trade_close(inst=name, pnl=pnl_val, stage="移动止盈", exit_px=cur_px)
+                notify_trade_close(inst=name, pnl=pnl_val, stage="移动止盈", exit_px=cur_px, venue=pos_venue)
             if pos_key in trackers: del trackers[pos_key]
             return True, "已移动止盈"
 
@@ -275,13 +306,26 @@ def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, execu
         # If dynamic floor stop ratcheted down (tightened for short), commit and sync to cloud OCO
         if dynamic_floor_sl < old_sl and old_sl > 0:
             t["trailingStopPx"] = dynamic_floor_sl
-            sync_cloud_algo_stop(inst_id, "short", dynamic_floor_sl, reason=t["stage_desc"])
+            if pos_venue == "okx":
+                sync_cloud_algo_stop(inst_id, "short", dynamic_floor_sl, reason=t["stage_desc"])
+            else:
+                # 同多头分支：外所走场所原生棘轮，避免 tracker 谎报止损已上移。
+                try:
+                    _ois_ad = venue_registry.get_adapter(pos_venue)
+                    _ois_ok, _ois_note = amend_venue_stop_loss(
+                        _ois_ad, name, "short", dynamic_floor_sl, pos_sz)
+                    if not _ois_ok:
+                        executed_actions.append(
+                            f"[{name}] {pos_venue.upper()} 云端止损上移失败: {_ois_note}")
+                except Exception as _ois_exc:
+                    executed_actions.append(
+                        f"[{name}] {pos_venue.upper()} 云端止损上移异常: {_ois_exc}")
         else:
             t["trailingStopPx"] = dynamic_floor_sl
 
         # A. Hit Ratchet Floor Stop (Locked Profit Trigger)
         if cur_px >= dynamic_floor_sl and peak_profit_px >= tier1_breakeven_trigger:
-            closed, close_detail = close_position_confirmed(inst_id, "short", pos_sz)
+            closed, close_detail = close_position_confirmed(inst_id, "short", pos_sz, venue=pos_venue)
             if not closed:
                 executed_actions.append(f"[{name}] 锁利平空失败，仓位仍保留: {close_detail}")
                 return False, "平仓失败"
@@ -295,13 +339,13 @@ def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, execu
                 remark=f"最低 {t['lowWaterMark']} 触发阶梯利润锁定线 {dynamic_floor_sl}",
             ))
             if notify_trade_close:
-                notify_trade_close(inst=name, pnl=pnl_val, stage="阶梯锁利平仓", exit_px=cur_px)
+                notify_trade_close(inst=name, pnl=pnl_val, stage="阶梯锁利平仓", exit_px=cur_px, venue=pos_venue)
             if pos_key in trackers: del trackers[pos_key]
             return True, "已阶梯锁利"
 
         # B. Kinetic Momentum Pullback Exit from Peak (Symmetric 2.0x ATR profit with 0.75x ATR pullback)
         if peak_profit_px >= momentum_tp_trigger and cur_px >= (t["lowWaterMark"] + momentum_pullback_buffer):
-            closed, close_detail = close_position_confirmed(inst_id, "short", pos_sz)
+            closed, close_detail = close_position_confirmed(inst_id, "short", pos_sz, venue=pos_venue)
             if not closed:
                 executed_actions.append(f"[{name}] 动能见底移动止盈失败，仓位仍保留: {close_detail}")
                 return False, "平仓失败"
@@ -315,7 +359,7 @@ def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, execu
                 remark=f"最低 {t['lowWaterMark']} 动能反弹触及移动止盈线",
             ))
             if notify_trade_close:
-                notify_trade_close(inst=name, pnl=pnl_val, stage="移动止盈", exit_px=cur_px)
+                notify_trade_close(inst=name, pnl=pnl_val, stage="移动止盈", exit_px=cur_px, venue=pos_venue)
             if pos_key in trackers: del trackers[pos_key]
             return True, "已移动止盈"
 
