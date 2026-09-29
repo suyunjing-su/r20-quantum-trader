@@ -1,0 +1,43 @@
+# AstraQuant Agent API
+
+> API operating guide for AI agents integrating with a deployed AstraQuant instance. This file is served at `/llms.txt`; it describes the scoped Agent API, while the live OpenAPI schema and capability response define the current request contracts.
+
+## How to connect
+
+- Set `BASE_URL` to the origin of the target AstraQuant deployment; use HTTPS outside local development.
+- Discover available Agent routes with `GET {BASE_URL}/api/v1/agent/capabilities`.
+- Read the live route schemas from `GET {BASE_URL}/openapi.json` or the interactive docs at `{BASE_URL}/docs`.
+- Authenticate with the operator-provisioned key in the `X-API-Key` request header. Never put the key in a URL, query string, prompt, source control, or response body.
+- If the key is missing or rejected, stop and ask an authorized operator; do not try administrator credentials or alternate authentication paths.
+
+## Supported API areas
+
+Use only routes returned by capability discovery and permitted by the Agent API key scope. Supported areas include:
+
+- Model committee configuration: `/api/v1/admin/council/...`
+- Prompt workshop and strategy profiles: `/api/v1/admin/prompt-library`, `/api/v1/admin/prompt-profiles...`, `/api/v1/admin/prompts`
+- Self-evolution configuration: `/api/v1/admin/evolution/config`
+- Risk and physical interceptors: `/api/v1/admin/risk`, `/api/v1/admin/interceptors...`
+- LLM/provider configuration: `/api/v1/admin/llm...`
+- Instrument-pool mutations only: `POST /api/v1/admin/instruments`, `DELETE /api/v1/admin/instruments/{inst_id}`, `PUT /api/v1/admin/instruments/{inst_id}/venues`. The instrument listing is intentionally not available to Agent keys because it includes capital-tier metadata.
+- Safe exchange/routing configuration: `GET|PUT /api/v1/agent/exchanges/config`
+- Execution/model telemetry: `GET /api/v1/agent/telemetry`; execution-unit status: `GET /api/v1/admin/agents`
+
+For every request, follow the method, path, and schema from capability discovery and the live OpenAPI document. Existing endpoint validation, confirmation phrases, and audit logging still apply.
+
+## Safety boundaries
+
+- Agent API keys cannot access initial capital baselines, exchange access credentials, funding/capital tiers, account snapshots, manual-close endpoints, or unrelated admin routes.
+- Do not attempt to bypass the route allowlist or transform an excluded operation into another route.
+- Never enable execution, turn off `dry_run`, or make a destructive configuration change without the exact confirmation phrase required by the endpoint and explicit operator authorization.
+- Treat exchange execution switches as live operational controls; a successful API response is not evidence that an exchange order is safe or appropriate.
+- Telemetry exposes call metadata only; prompts and model responses are not stored or returned.
+- Never store, log, or repeat API keys or exchange credentials.
+
+## Developer references
+
+- [Agent API provisioning, routes, and exclusions](https://github.com/suyunjing-su/r20-quantum-trader/blob/main/docs/AGENT_API.md)
+- [English developer README](https://github.com/suyunjing-su/r20-quantum-trader/blob/main/README.md)
+- [中文开发者 README](https://github.com/suyunjing-su/r20-quantum-trader/blob/main/README.zh-CN.md)
+- [Backend architecture](https://github.com/suyunjing-su/r20-quantum-trader/blob/main/astra_backend/README.md)
+- [Exchange support matrix](https://github.com/suyunjing-su/r20-quantum-trader/blob/main/docs/exchange_support_matrix.md)

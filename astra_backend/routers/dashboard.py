@@ -304,6 +304,19 @@ async def robots_txt():
     )
 
 
+@router.get("/llms.txt", include_in_schema=False)
+def llms_txt():
+    """Serve the repository-level LLM/Agent documentation index."""
+    index_file = ROOT / "llms.txt"
+    if index_file.is_file():
+        return FileResponse(
+            str(index_file),
+            media_type="text/plain",
+            headers={"Cache-Control": "public, max-age=3600, s-maxage=86400"},
+        )
+    raise HTTPException(status_code=404, detail="llms.txt is unavailable")
+
+
 @router.get("/sitemap.xml", include_in_schema=False)
 async def sitemap_xml():
     f = VUE_DIST / "sitemap.xml"

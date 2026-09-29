@@ -336,6 +336,37 @@ def _read_raw_routing() -> Dict[str, Any]:
     return {}
 
 
+def _write_raw_routing(data: Dict[str, Any]) -> None:
+    """Atomically persist the routing document while preserving unrelated settings."""
+    tmp = ROUTING_FILE.with_suffix(".json.tmp")
+    try:
+        ROUTING_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+        os.replace(tmp, ROUTING_FILE)
+    except Exception:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except Exception:
+            pass
+        raise
+
+
+def update_venue_options(venue: str, options: Dict[str, Any]) -> None:
+    """Atomically update non-secret execution/routing knobs for one venue."""
+    vkey = str(venue or "").strip().lower()
+    if vkey not in POOL_VENUES:
+        raise ValueError(f"未知交易所：{venue}")
+    allowed = {"margin_per_trade_usdt", "max_open", "min_confidence", "dry_run"}
+    if set(options) - allowed:
+        raise ValueError(f"{vkey} 路由参数只允许配置 {sorted(allowed)}")
+    data = _read_raw_routing()
+    v_cfg = data.get(vkey) if isinstance(data.get(vkey), dict) else {}
+    v_cfg.update(options)
+    data[vkey] = v_cfg
+    _write_raw_routing(data)
+
+
 #: 手动选所合法值 = 注册表已登记场所 + auto（不硬编码场所名单，新所登记即生效）
 VALID_PREFERRED_VENUES = tuple(sorted(set(registered_venues()) | {"auto"}))
 

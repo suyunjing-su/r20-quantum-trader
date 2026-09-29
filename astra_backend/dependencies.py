@@ -25,6 +25,15 @@ MAX_POOL_SIZE = int(os.getenv("ASTRA_MAX_POOL_SIZE", "20"))
 MIN_POOL_SIZE = int(os.getenv("ASTRA_MIN_POOL_SIZE", "1"))
 STARTED_AT = time.time()
 REQUEST_SESSION: ContextVar[str] = ContextVar("astra_admin_session", default="")
+REQUEST_API_KEY_ACTOR: ContextVar[dict[str, Any] | None] = ContextVar("astra_api_key_actor", default=None)
+
+
+def authenticate_agent_api_key(candidate: str | None) -> dict[str, Any] | None:
+    """Validate the separately provisioned, least-scope Agent API key."""
+    expected = os.getenv("ASTRA_AGENT_API_KEY", "").strip()
+    if not candidate or not expected or not hmac.compare_digest(candidate, expected):
+        return None
+    return {"id": -1, "username": "agent-api-key", "role": "superadmin", "enabled": 1, "auth_method": "api_key"}
 
 okx = OKXClient()
 admin_auth = AdminAuthStore()
@@ -64,6 +73,9 @@ def current_admin(x_astra_session: str | None = None, x_astra_admin_token: str |
 
 
 def require_admin_header(x_astra_admin_token: Any = None, x_astra_session: Any = None) -> dict[str, Any]:
+    api_actor = REQUEST_API_KEY_ACTOR.get()
+    if api_actor:
+        return api_actor
     app_mod = sys.modules.get("astra_backend.app")
     session_tok = x_astra_session if isinstance(x_astra_session, str) else REQUEST_SESSION.get()
     admin_tok = x_astra_admin_token if isinstance(x_astra_admin_token, str) else None
@@ -76,6 +88,9 @@ def require_admin_header(x_astra_admin_token: Any = None, x_astra_session: Any =
 
 
 def require_superadmin(x_astra_session: Any = None) -> dict[str, Any]:
+    api_actor = REQUEST_API_KEY_ACTOR.get()
+    if api_actor:
+        return api_actor
     app_mod = sys.modules.get("astra_backend.app")
     if app_mod and hasattr(app_mod, "require_superadmin") and app_mod.require_superadmin is not require_superadmin:
         return app_mod.require_superadmin(x_astra_session)

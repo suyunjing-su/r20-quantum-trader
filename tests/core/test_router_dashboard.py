@@ -325,7 +325,20 @@ class StaticAssetTests(_Base):
         self.templates = mock.Mock()
         self._patch("templates", self.templates)
 
-    # ── robots / sitemap ─────────────────────────────────
+    # ── robots / sitemap / LLM index ──────────────────────
+    def test_llms_txt_serves_the_repository_agent_api_guide(self):
+        index = self.root / "llms.txt"
+        index.write_text("# AstraQuant Agent API\\n", encoding="utf-8")
+        out = A.llms_txt()
+        self.assertIsInstance(out, FileResponse)
+        self.assertEqual(out.path, str(index))
+        self.assertEqual(out.media_type, "text/plain")
+
+    def test_llms_txt_missing_is_404(self):
+        with self.assertRaises(HTTPException) as ctx:
+            A.llms_txt()
+        self.assertEqual(ctx.exception.status_code, 404)
+
     def test_robots_prefers_dist_then_public_then_default(self):
         (self.vue / "robots.txt").write_text("from-dist", encoding="utf-8")
         out = _run(A.robots_txt())

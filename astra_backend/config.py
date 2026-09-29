@@ -50,6 +50,7 @@ class Settings:
     notification_webhook: str = ""
     setup_token: str = ""
     admin_token: str = ""
+    agent_api_key: str = ""
     manual_close_enabled: bool = False
     order_mode: str = "market"
     #: ⚠️ 上报/展示用，**不是发单时的权威来源** —— 真正挂到订单上的 tag
@@ -95,6 +96,7 @@ def refresh_settings() -> Settings:
     settings.notification_webhook = os.getenv("ASTRA_NOTIFICATION_WEBHOOK", "")
     settings.setup_token = os.getenv("ASTRA_SETUP_TOKEN", "")
     settings.admin_token = os.getenv("ASTRA_ADMIN_TOKEN", "")
+    settings.agent_api_key = os.getenv("ASTRA_AGENT_API_KEY", "")
     settings.manual_close_enabled = os.getenv("ASTRA_MANUAL_CLOSE_ENABLED", "0") == "1"
     settings.order_mode = os.getenv("ASTRA_ORDER_MODE", "market").strip().lower() or "market"
     settings.okx_broker_tag = "6e2191f027c6SUDE"

@@ -18,7 +18,11 @@ scripts/evolution_shield._memory_lock、gateway worker 同路数的 flock 互斥
 """
 from __future__ import annotations
 
-import fcntl
+try:
+    import fcntl
+except ImportError:  # Windows
+    fcntl = None
+    import msvcrt
 import os
 import threading
 from contextlib import contextmanager
@@ -42,6 +46,29 @@ def _lock_path(target_file: str | os.PathLike[str]) -> Tuple[Path, str]:
     return lock_path, str(lock_path)
 
 
+def _acquire(fd: int) -> None:
+    if fcntl is not None:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        return
+    if os.fstat(fd).st_size == 0:
+        os.write(fd, b"\\0")
+    os.lseek(fd, 0, os.SEEK_SET)
+    while True:
+        try:
+            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+            return
+        except OSError:
+            continue
+
+
+def _release(fd: int) -> None:
+    if fcntl is not None:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return
+    os.lseek(fd, 0, os.SEEK_SET)
+    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+
+
 @contextmanager
 def file_lock(target_file: str | os.PathLike[str]) -> Iterator[None]:
     """对 target_file 的 RMW 取进程间互斥锁（阻塞式、同线程可重入）。"""
@@ -59,11 +86,11 @@ def file_lock(target_file: str | os.PathLike[str]) -> Iterator[None]:
     fd = os.open(key, os.O_RDWR | os.O_CREAT, 0o600)
     held[key] = 1
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        _acquire(fd)
         try:
             yield
         finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            _release(fd)
     finally:
         held.pop(key, None)
         os.close(fd)

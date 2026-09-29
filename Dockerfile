@@ -56,6 +56,7 @@ COPY scripts/ /app/scripts/
 COPY plugins/ /app/plugins/
 COPY deploy/ /app/deploy/
 COPY docs/ /app/docs/
+COPY llms.txt /app/llms.txt
 COPY env.example /app/env.example
 COPY data/prompt_library.json /app/data/prompt_library.json
 

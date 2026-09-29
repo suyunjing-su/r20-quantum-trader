@@ -34,6 +34,8 @@ from astra_backend.dependencies import (
     okx,
     read_json,
     script_state,
+    REQUEST_API_KEY_ACTOR,
+    authenticate_agent_api_key,
 )
 from astra_backend.schemas import *
 from astra_backend.routers import (
@@ -45,6 +47,7 @@ from astra_backend.routers import (
     llm_router,
     gateway_router,
     dashboard_router,
+    agent_router,
 )
 from astra_backend.routers.system import (
     runtime_overview,
@@ -115,12 +118,18 @@ def current_admin(x_astra_session: str | None = None, x_astra_admin_token: str |
 
 
 def require_admin_header(x_astra_admin_token: Any = None, x_astra_session: Any = None) -> dict[str, Any]:
+    api_actor = REQUEST_API_KEY_ACTOR.get()
+    if api_actor:
+        return api_actor
     session_tok = x_astra_session if isinstance(x_astra_session, str) else REQUEST_SESSION.get()
     admin_tok = x_astra_admin_token if isinstance(x_astra_admin_token, str) else None
     return current_admin(session_tok, admin_tok)
 
 
 def require_superadmin(x_astra_session: Any = None) -> dict[str, Any]:
+    api_actor = REQUEST_API_KEY_ACTOR.get()
+    if api_actor:
+        return api_actor
     session_tok = x_astra_session if isinstance(x_astra_session, str) else REQUEST_SESSION.get()
     user = admin_auth.validate_session(session_tok)
     if not user:
@@ -174,16 +183,40 @@ async def _env_value_error_handler(_request, exc: EnvValueError):
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 
+def _agent_api_key_scope_allows(method: str, path: str) -> bool:
+    """Agent keys can manage trading configuration, never account baselines or venue credentials."""
+    import re
+    route_rules = (
+        (r"^/api/v1/admin/(council(?:/.*)?|interceptors(?:/.*)?|policy(?:/.*)?|prompt-library|prompt-profiles(?:/.*)?|prompts|evolution/config)$", {"GET", "POST", "PUT", "DELETE"}),
+        (r"^/api/v1/admin/risk$", {"GET", "POST"}),
+        (r"^/api/v1/admin/risk/reset$", {"POST"}),
+        (r"^/api/v1/admin/instruments$", {"POST"}),
+        (r"^/api/v1/admin/instruments/[A-Z0-9-]+$", {"DELETE"}),
+        (r"^/api/v1/admin/instruments/[A-Z0-9-]+/venues$", {"PUT"}),
+        (r"^/api/v1/admin/llm(?:/.*)?$", {"GET", "POST", "PUT", "DELETE"}),
+        (r"^/api/v1/admin/multi-exchange$", {"GET"}),
+        (r"^/api/v1/agent/(?:capabilities|exchanges/config|telemetry(?:/.*)?)$", {"GET", "PUT"}),
+        (r"^/api/v1/admin/agents$", {"GET"}),
+    )
+    return any(method in methods and re.fullmatch(pattern, path) for pattern, methods in route_rules)
+
+
 @app.middleware("http")
 async def admin_session_context(request: Request, call_next):
     token = REQUEST_SESSION.set(request.headers.get("X-Astra-Session", ""))
+    api_actor = authenticate_agent_api_key(request.headers.get("X-API-Key"))
+    api_token = REQUEST_API_KEY_ACTOR.set(api_actor)
     try:
+        if api_actor and not _agent_api_key_scope_allows(request.method.upper(), request.url.path):
+            from fastapi.responses import JSONResponse
+            return JSONResponse(status_code=403, content={"detail": "Agent API Key 无权访问此接口；交易所凭证、初始本金基线与资金档位仅可由管理员会话配置"})
         response = await call_next(request)
         path = request.url.path
         if path.startswith("/api/v1/admin") or path.startswith("/admin") or path.startswith("/api/v1/account"):
             response.headers["Cache-Control"] = "private, no-cache, no-store, must-revalidate"
         return response
     finally:
+        REQUEST_API_KEY_ACTOR.reset(api_token)
         REQUEST_SESSION.reset(token)
 
 
@@ -284,6 +317,7 @@ app.include_router(strategy_router)
 app.include_router(llm_router)
 app.include_router(gateway_router)
 app.include_router(dashboard_router)
+app.include_router(agent_router)
 
 # 静态资源与 SPA 壳（结构优化阶段 2·B2 收尾）：原先是 "
 # from astra_backend.dashboard_cache import app as dashboard_app; app.mount("/", dashboard_app)"
