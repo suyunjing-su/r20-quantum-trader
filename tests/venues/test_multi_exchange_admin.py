@@ -132,7 +132,43 @@ class MultiExchangeApiTests(unittest.TestCase):
             self.assertEqual(r2.status_code, 200, r2.text)
             self.assertEqual(env_writes, {"ASTRA_BINANCE_EXECUTION": "1"})
 
-    def test_execution_status_field_exposed_in_get(self):
+    def test_binance_demo_execution_toggle_writes_demo_axis(self):
+        env_writes: dict = {}
+        with patch.object(app_module, "update_env", lambda v: env_writes.update(v)), \
+                patch.object(app_module, "save_secrets", lambda v: None), \
+                patch.object(app_module, "refresh_settings", lambda: None):
+            r = self.client.put("/api/v1/admin/multi-exchange", json={
+                "binance_testnet": True,
+                "binance_execution": True,
+                "confirmation": "OPEN BINANCE EXECUTION",
+            })
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(env_writes, {"ASTRA_BINANCE_TESTNET": "1",
+                                      "ASTRA_BINANCE_DEMO_EXECUTION": "1"})
+
+    def test_execution_toggle_without_tier_follows_current_testnet_axis(self):
+        env_writes: dict = {}
+        with patch.object(ex, "venue_testnet_enabled", lambda v: v == "binance"), \
+                patch.object(app_module, "update_env", lambda v: env_writes.update(v)), \
+                patch.object(app_module, "save_secrets", lambda v: None), \
+                patch.object(app_module, "refresh_settings", lambda: None):
+            r = self.client.put("/api/v1/admin/multi-exchange", json={
+                "binance_execution": True,
+                "confirmation": "OPEN BINANCE EXECUTION",
+            })
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(env_writes, {"ASTRA_BINANCE_DEMO_EXECUTION": "1"})
+
+    def test_execution_status_field_uses_current_testnet_axis(self):
+        with patch.object(ex, "venue_credentials", lambda v: ("", "")), \
+                patch.object(ex, "venue_testnet_enabled", lambda v: v == "binance"), \
+                patch.object(ex, "execution_open",
+                             lambda v, env: v == "binance" and env == "demo"):
+            data = self.client.get("/api/v1/admin/multi-exchange").json()
+        self.assertTrue(data["venues"]["binance"]["testnet"])
+        self.assertEqual(data["venues"]["binance"]["execution_environment"], "demo")
+        self.assertTrue(data["venues"]["binance"]["execution_open"])
+
         with patch.object(ex, "venue_credentials", lambda v: ("", "")), \
                 patch.object(ex, "venue_testnet_enabled", lambda v: False), \
                 patch.object(ex, "execution_open", lambda v: v == "gate"):

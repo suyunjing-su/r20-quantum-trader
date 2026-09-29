@@ -211,11 +211,31 @@ def _execution_open_for_status(venue: str, environment: str) -> bool:
         return bool(execution_open(venue))
 
 
+def _venue_execution_environment(venue: str, testnet: bool | None = None) -> str:
+    """Resolve the execution axis controlled by the venue's current endpoint tier.
+
+    ``*_EXECUTION`` is the live axis and ``*_DEMO_EXECUTION`` is the sandbox/demo
+    axis.  When a write omits the testnet field, follow the persisted venue tier
+    instead of silently defaulting to live.
+    """
+    if testnet is None:
+        from astra_backend.exchanges import venue_testnet_enabled
+        testnet = bool(venue_testnet_enabled(venue))
+    return "demo" if testnet else "live"
+
+
+def _execution_flag_name(venue: str, testnet: bool | None = None) -> str:
+    """Return the managed env key for a venue's selected execution axis."""
+    axis = _venue_execution_environment(venue, testnet)
+    suffix = "DEMO_EXECUTION" if axis == "demo" else "EXECUTION"
+    return f"ASTRA_{str(venue).upper()}_{suffix}"
+
+
 @router.get("/api/v1/admin/multi-exchange")
 def admin_multi_exchange_status(x_astra_admin_token: str | None = Header(default=None)) -> dict[str, Any]:
     require_admin_header(x_astra_admin_token)
     from astra_backend.exchanges import (
-        execution_open, registered_venues,
+        registered_venues,
         venue_credentials, venue_passphrase, venue_testnet_enabled
     )
     venues: dict[str, Any] = {}
@@ -231,6 +251,8 @@ def admin_multi_exchange_status(x_astra_admin_token: str | None = Header(default
         api_key, secret = _read_creds(v)
         live_ak, live_sk = _read_creds(v, "live")
         demo_ak, demo_sk = _read_creds(v, "demo")
+        testnet = bool(venue_testnet_enabled(v))
+        execution_environment = _venue_execution_environment(v, testnet)
         venues[v] = {
             "has_api_key": bool(api_key),
             "has_secret": bool(secret),
@@ -242,8 +264,12 @@ def admin_multi_exchange_status(x_astra_admin_token: str | None = Header(default
                 "has_api_key": bool(demo_ak),
                 "has_secret": bool(demo_sk),
             },
-            "testnet": venue_testnet_enabled(v),
-            "execution_open": execution_open(v),
+            "testnet": testnet,
+            # The console switch is for the currently selected endpoint tier.
+            # Calling execution_open(v) here always meant LIVE, even while the
+            # console displayed the venue as TESTNET/DEMO.
+            "execution_environment": execution_environment,
+            "execution_open": _execution_open_for_status(v, execution_environment),
         }
 
     from scripts.okx_runtime import current_environment
@@ -343,12 +369,14 @@ def admin_multi_exchange_update(payload: MultiExchangeUpdate,
         if payload.confirmation.strip().upper() != "OPEN GATE EXECUTION":
             raise HTTPException(status_code=400,
                                 detail="变更执行开关确认短语必须精确为：OPEN GATE EXECUTION")
-        env_values["ASTRA_GATE_EXECUTION"] = "1" if payload.gate_execution else "0"
+        env_values[_execution_flag_name("gate", payload.gate_testnet)] = (
+            "1" if payload.gate_execution else "0")
     if payload.binance_execution is not None:
         if payload.confirmation.strip().upper() != "OPEN BINANCE EXECUTION":
             raise HTTPException(status_code=400,
                                 detail="变更执行开关确认短语必须精确为：OPEN BINANCE EXECUTION")
-        env_values["ASTRA_BINANCE_EXECUTION"] = "1" if payload.binance_execution else "0"
+        env_values[_execution_flag_name("binance", payload.binance_testnet)] = (
+            "1" if payload.binance_execution else "0")
     if payload.okx_execution is not None:
         if payload.confirmation.strip().upper() != "OPEN OKX EXECUTION":
             raise HTTPException(status_code=400,
