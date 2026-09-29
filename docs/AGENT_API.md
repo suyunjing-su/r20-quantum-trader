@@ -10,7 +10,7 @@ Set `ASTRA_AGENT_API_KEY` to a unique, high-entropy secret in the backend enviro
 X-API-Key: <ASTRA_AGENT_API_KEY>
 ```
 
-The key is not returned by any API. If unset, API-key authentication is disabled. Rotate it by replacing the environment value and restarting the backend.
+The Agent key can be generated, rotated, and deleted from **Admin → Agents** (`/admin/agents`) by a superadmin. The full value is returned only once at generation and is never readable from the status endpoint. Deleting the key revokes access immediately; the console stores an explicit disabled override so an injected environment value cannot silently restore it on restart.
 
 ## Capability discovery
 

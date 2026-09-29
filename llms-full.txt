@@ -4,6 +4,8 @@
 
 ## 1. Connection and authentication
 
+The administrator console at `/admin/agents` provides one-time key generation/rotation and revocation for superadmins. The full key is returned only in the successful generate response; status reads disclose only whether a key is configured. Agent keys cannot call the management endpoint or manage their own credentials.
+
 - **Base URL:** use the origin of the deployment being operated. Use HTTPS except for local development.
 - **Authentication:** send `X-API-Key: <operator-provisioned ASTRA_AGENT_API_KEY>` on every request. The server compares the key in constant time. The key is not accepted in query parameters or request bodies.
 - **Content type:** use `Content-Type: application/json` for JSON request bodies.

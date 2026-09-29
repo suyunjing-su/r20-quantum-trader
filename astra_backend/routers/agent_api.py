@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import re
+import secrets
 from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException
@@ -14,6 +15,34 @@ from astra_backend.settings_store import update_env
 
 agent_router = APIRouter(tags=["agent-api"])
 VENUES = ("okx", "binance", "gate")
+
+
+@agent_router.get("/api/v1/admin/agent-api-key")
+def get_agent_api_key_status() -> dict[str, bool]:
+    """Expose key presence only; the secret itself is never readable after creation."""
+    require_superadmin()
+    return {"configured": bool(os.getenv("ASTRA_AGENT_API_KEY", "").strip())}
+
+
+@agent_router.post("/api/v1/admin/agent-api-key")
+def generate_agent_api_key() -> dict[str, Any]:
+    """Generate/rotate the scoped Agent key and disclose it only in this response."""
+    actor = require_superadmin()
+    key = secrets.token_urlsafe(48)
+    update_env({"ASTRA_AGENT_API_KEY": key})
+    audit_record("agent_api_key.generate", "success", {"actor": actor.get("username", "admin")})
+    return {"configured": True, "api_key": key, "shown_once": True}
+
+
+@agent_router.delete("/api/v1/admin/agent-api-key")
+def delete_agent_api_key() -> dict[str, bool]:
+    """Revoke the current key persistently, including deployment environment fallbacks."""
+    actor = require_superadmin()
+    # Keep an explicit blank override in .env so a container-level environment value
+    # cannot silently restore a key that an operator deleted from the console.
+    update_env({"ASTRA_AGENT_API_KEY": ""})
+    audit_record("agent_api_key.delete", "success", {"actor": actor.get("username", "admin")})
+    return {"configured": False}
 
 
 class AgentExchangeConfigUpdate(BaseModel):

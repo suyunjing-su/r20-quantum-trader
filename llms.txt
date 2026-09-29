@@ -8,6 +8,7 @@
 - Discover available Agent routes with `GET {BASE_URL}/api/v1/agent/capabilities`.
 - Read the live route schemas from `GET {BASE_URL}/openapi.json` or the interactive docs at `{BASE_URL}/docs`.
 - Authenticate with the operator-provisioned key in the `X-API-Key` request header. Never put the key in a URL, query string, prompt, source control, or response body.
+- Provision and revoke the dedicated key in the administrator console at **Admin → Agents** (`/admin/agents`). A superadmin can generate/rotate or delete it; the generated value is shown once only. Agents cannot manage their own key.
 - If the key is missing or rejected, stop and ask an authorized operator; do not try administrator credentials or alternate authentication paths.
 
 ## Supported API areas

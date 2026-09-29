@@ -19,16 +19,85 @@
  *       model_calls:[{id,caller,model,status,total_tokens,duration_ms}],
  *       secret_store:{initialized,count,store_mode,source_priority,keys[]} }
  */
-import { computed } from 'vue';
+import { computed, onMounted, ref } from 'vue';
 import { fmtDateTime } from '../../utils/format';
 import { useI18n } from '../../composables/useI18n';
 const { t } = useI18n();
 import PageHeader from '../../components/admin/PageHeader.vue';
 import BaseEmpty from '../../components/base/BaseEmpty.vue';
 import { useResource } from '../../composables/useResource';
+import { useApi } from '../../composables/useApi';
+import { useToast } from '../../composables/useToast';
+import { useAuthStore } from '../../stores/auth';
 import { Package, Cpu, KeyRound, RefreshCw, Loader2, AlertTriangle,
-  Activity, ShieldCheck, Radio } from 'lucide-vue-next';
+  Activity, ShieldCheck, Radio, Copy, Trash2, Plus } from 'lucide-vue-next';
 import BaseLoadingAnnounce from '../../components/base/BaseLoadingAnnounce.vue';
+
+const { api } = useApi();
+const toast = useToast();
+const auth = useAuthStore();
+const agentKeyConfigured = ref(false);
+const agentKeyLoading = ref(false);
+const agentKeyBusy = ref(false);
+const generatedAgentKey = ref('');
+
+async function loadAgentKeyStatus() {
+  if (!auth.isSuperadmin) return;
+  agentKeyLoading.value = true;
+  try {
+    const status = await api<{ configured: boolean }>('/api/v1/admin/agent-api-key');
+    agentKeyConfigured.value = status.configured;
+  } catch (e: any) {
+    toast.err(t('admin.agents.keyLoadFailed'), e?.message || String(e));
+  } finally {
+    agentKeyLoading.value = false;
+  }
+}
+
+async function generateAgentKey() {
+  if (agentKeyConfigured.value && !window.confirm(t('admin.agents.keyRotateConfirm'))) return;
+  agentKeyBusy.value = true;
+  try {
+    const result = await api<{ configured: boolean; api_key: string }>('/api/v1/admin/agent-api-key', {
+      method: 'POST',
+    });
+    agentKeyConfigured.value = result.configured;
+    generatedAgentKey.value = result.api_key;
+    toast.ok(t('admin.agents.keyGenerated'));
+  } catch (e: any) {
+    toast.err(t('admin.agents.keyActionFailed'), e?.message || String(e));
+  } finally {
+    agentKeyBusy.value = false;
+  }
+}
+
+async function deleteAgentKey() {
+  if (!window.confirm(t('admin.agents.keyDeleteConfirm'))) return;
+  agentKeyBusy.value = true;
+  try {
+    const result = await api<{ configured: boolean }>('/api/v1/admin/agent-api-key', {
+      method: 'DELETE',
+    });
+    agentKeyConfigured.value = result.configured;
+    generatedAgentKey.value = '';
+    toast.ok(t('admin.agents.keyDeleted'));
+  } catch (e: any) {
+    toast.err(t('admin.agents.keyActionFailed'), e?.message || String(e));
+  } finally {
+    agentKeyBusy.value = false;
+  }
+}
+
+async function copyAgentKey() {
+  try {
+    await navigator.clipboard.writeText(generatedAgentKey.value);
+    toast.ok(t('admin.agents.keyCopied'));
+  } catch {
+    toast.err(t('admin.agents.keyCopyFailed'));
+  }
+}
+
+onMounted(() => { void loadAgentKeyStatus(); });
 
 const { data, loading, error, loaded, reload: load } = useResource<any>('/api/v1/admin/agents', {
   immediate: true,
@@ -108,6 +177,44 @@ function ageText(a: any): string {
     </div>
 
     <template v-else>
+      <!-- Scoped Agent API key management (superadmin only) -->
+      <section v-if="auth.isSuperadmin" class="card agent-key-card" aria-labelledby="agent-key-title">
+        <header class="card-head">
+          <div>
+            <h2 id="agent-key-title" class="card-title"><KeyRound :size="14" />{{ t('admin.agents.apiKeyTitle') }}</h2>
+            <p class="card-sub">{{ t('admin.agents.apiKeyDesc') }}</p>
+          </div>
+          <span class="badge" :class="agentKeyConfigured ? 'badge-up' : 'badge-warn'">
+            {{ agentKeyLoading ? t('admin.agents.keyChecking') : agentKeyConfigured ? t('admin.agents.keyActive') : t('admin.agents.keyNotConfigured') }}
+          </span>
+        </header>
+
+        <div class="agent-key-body">
+          <p class="agent-key-note">{{ t('admin.agents.keyScopeNote') }}</p>
+          <div class="agent-key-actions">
+            <button type="button" class="btn btn-primary btn-sm" :disabled="agentKeyBusy || agentKeyLoading" @click="generateAgentKey">
+              <Loader2 v-if="agentKeyBusy" :size="14" class="animate-spin" />
+              <Plus v-else :size="14" />
+              <span>{{ agentKeyConfigured ? t('admin.agents.keyRotate') : t('admin.agents.keyGenerate') }}</span>
+            </button>
+            <button v-if="agentKeyConfigured" type="button" class="btn btn-danger btn-sm" :disabled="agentKeyBusy || agentKeyLoading" @click="deleteAgentKey">
+              <Trash2 :size="14" />
+              <span>{{ t('admin.agents.keyDelete') }}</span>
+            </button>
+          </div>
+
+          <div v-if="generatedAgentKey" class="agent-key-once" role="status">
+            <div class="agent-key-once-head">
+              <strong>{{ t('admin.agents.keyShownOnce') }}</strong>
+              <button type="button" class="btn btn-ghost btn-sm" @click="copyAgentKey">
+                <Copy :size="14" /><span>{{ t('admin.agents.keyCopy') }}</span>
+              </button>
+            </div>
+            <code class="agent-key-value">{{ generatedAgentKey }}</code>
+          </div>
+        </div>
+      </section>
+
       <!-- ══ 名册状态带 ══ -->
       <section class="card band">
         <template v-if="showSkeleton">
@@ -291,6 +398,50 @@ function ageText(a: any): string {
   display: flex;
   flex-direction: column;
   gap: var(--ds-space-4);
+}
+.agent-key-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ds-space-3);
+  padding: 0 var(--ds-space-4) var(--ds-space-4);
+}
+.agent-key-note {
+  margin: 0;
+  color: var(--ds-color-text-secondary);
+  font-size: var(--text-3xs);
+  line-height: var(--leading-body);
+}
+.agent-key-actions,
+.agent-key-once-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ds-space-2);
+  flex-wrap: wrap;
+}
+.agent-key-actions {
+  justify-content: flex-start;
+}
+.agent-key-once {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ds-space-2);
+  padding: var(--ds-space-3);
+  border: 1px solid var(--ds-color-border-default);
+  border-radius: var(--ds-radius-md);
+  background: var(--ds-color-bg-surface-inset);
+}
+.agent-key-once-head {
+  color: var(--warn);
+  font-size: var(--text-3xs);
+}
+.agent-key-value {
+  display: block;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  user-select: all;
+  color: var(--ds-color-text-primary);
+  font-size: var(--text-3xs);
 }
 
 /* ══ 状态带 ══ */
