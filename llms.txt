@@ -1,6 +1,6 @@
 # AstraQuant Agent API
 
-> API operating guide for AI agents integrating with a deployed AstraQuant instance. This file is served at `/llms.txt`; it describes the scoped Agent API, while the live OpenAPI schema and capability response define the current request contracts.
+> Quick-start guide served at `/llms.txt`. For endpoint-by-endpoint request, response, and safety details, read `/llms-full.txt`. Discover the live Agent scope at `/api/v1/agent/capabilities` and treat the deployment's `/openapi.json` as authoritative for current schemas.
 
 ## How to connect
 

@@ -272,7 +272,7 @@ cd ..
 
 | 学习与开发目标 | 查阅入口 | 核心说明 |
 |---|---|---|
-| **AI / Agent 文档索引** | `llms.txt` | 面向大模型与 Agent 的项目、开发、领域及在线 API 入口；系统通过 `/llms.txt` 提供 |
+| **AI / Agent API 文档** | `llms.txt`、`llms-full.txt` | 随部署提供的快速指南与详细 Agent API 参考，分别通过 `/llms.txt` 和 `/llms-full.txt` 访问；它们是操作文档，不是凭证文件 |
 | **后端分层与架构** | `astra_backend/README.md` | 后端分层架构（L0 门面 / L1 装配 / L2 路由 / L3 领域 / L4 子包）与新模块抽取规则 |
 | **运行时脚本与守护** | `scripts/README.md` | 哪个是入口/守护、38 个根层脚本用途、调度入口及双拼写 import 规范 |
 | **前端组件与状态机** | `frontend/src/components/admin/README.md` | 前端组件划分、Composables 逻辑抽离及 Vue 3 管理后台状态流转 |

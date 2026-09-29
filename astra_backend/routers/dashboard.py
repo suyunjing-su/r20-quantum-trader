@@ -317,6 +317,19 @@ def llms_txt():
     raise HTTPException(status_code=404, detail="llms.txt is unavailable")
 
 
+@router.get("/llms-full.txt", include_in_schema=False)
+def llms_full_txt():
+    """Serve the detailed Agent API reference bundled with the deployment."""
+    reference_file = ROOT / "llms-full.txt"
+    if reference_file.is_file():
+        return FileResponse(
+            str(reference_file),
+            media_type="text/plain",
+            headers={"Cache-Control": "public, max-age=3600, s-maxage=86400"},
+        )
+    raise HTTPException(status_code=404, detail="llms-full.txt is unavailable")
+
+
 @router.get("/sitemap.xml", include_in_schema=False)
 async def sitemap_xml():
     f = VUE_DIST / "sitemap.xml"

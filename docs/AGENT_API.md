@@ -1,6 +1,6 @@
 # Agent API
 
-Agent integrations can manage the r20 trading configuration through the existing versioned admin APIs using a dedicated, scoped API key. This is separate from administrator passwords/sessions and legacy admin tokens. The deployment bundles the machine-oriented API operating guide at `GET /llms.txt`; capability discovery and `/openapi.json` remain the live sources for supported paths and schemas.
+Agent integrations can manage the r20 trading configuration through the existing versioned admin APIs using a dedicated, scoped API key. This is separate from administrator passwords/sessions and legacy admin tokens. Deployments bundle two machine-readable guides: `GET /llms.txt` is the quick-start and scope overview, and `GET /llms-full.txt` is the detailed endpoint reference. Capability discovery and `/openapi.json` remain the live sources for supported paths and schemas.
 
 ## Provisioning
 

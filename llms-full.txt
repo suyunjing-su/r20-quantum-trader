@@ -1,0 +1,313 @@
+# AstraQuant Agent API — Full Reference
+
+> Detailed API reference for agents using an operator-provisioned, least-scope key. Deployed at `GET /llms-full.txt`. `GET /api/v1/agent/capabilities` and `/openapi.json` from the same deployment are authoritative if this static document differs from the running version.
+
+## 1. Connection and authentication
+
+- **Base URL:** use the origin of the deployment being operated. Use HTTPS except for local development.
+- **Authentication:** send `X-API-Key: <operator-provisioned ASTRA_AGENT_API_KEY>` on every request. The server compares the key in constant time. The key is not accepted in query parameters or request bodies.
+- **Content type:** use `Content-Type: application/json` for JSON request bodies.
+- **No implicit retries for writes:** before retrying a timed-out write, read the affected resource to determine whether the first write succeeded.
+- **No credential discovery:** never try admin tokens, sessions, environment access, alternate routes, or other keys if Agent API authentication fails.
+
+```bash
+BASE_URL="https://your-astraquant-host"
+AGENT_KEY="<injected-from-secret-manager>"
+curl --fail-with-body "$BASE_URL/api/v1/agent/capabilities" \
+  -H "X-API-Key: $AGENT_KEY"
+```
+
+Never print `AGENT_KEY` in shell tracing, logs, screenshots, prompts, source code, or request URLs. Do not log response bodies from secret-bearing model-provider write requests.
+
+## 2. Route discovery and access model
+
+### `GET /api/v1/agent/capabilities`
+
+No query parameters or body. Requires a valid Agent key. Returns JSON with:
+
+- `auth_header`: `X-API-Key`.
+- `scope`: `configuration-and-telemetry`.
+- `excluded`: `initial_capital_baseline`, `venue_credentials`, `capital_tiers`.
+- `routes`: resource groups and representative paths.
+
+This route is a discovery aid; endpoint methods and request schemas below plus the deployment's live OpenAPI document define the exact contract. A route being reachable as an admin is not sufficient: Agent-key requests must stay within the explicit scope.
+
+### Status and error conventions
+
+| HTTP status | Meaning for Agent API callers |
+|---|---|
+| `200` | Read or update completed; inspect the JSON result for operation-specific status. |
+| `400` | Invalid value, invalid state transition, missing/incorrect confirmation phrase, or endpoint-specific business validation. |
+| `401` | Agent key absent/invalid on a protected route, or authentication otherwise not satisfied. |
+| `403` | A valid Agent key attempted a route/method outside its allowlist. Do not retry using another route. |
+| `404` | Resource/identifier not found, or an explicitly hidden endpoint. |
+| `409` | State conflict, such as activation/deletion restrictions or a held instrument. |
+| `422` | FastAPI/Pydantic request validation failed; use the response `detail` to correct the input. |
+| `500` / `502` / `503` | Internal or upstream service failure. Treat write outcome as unknown if the response was lost; read back before retrying. |
+
+FastAPI error bodies normally use `{"detail": ...}`. Endpoint-specific responses may add fields. All mutating handlers preserve their existing validation and audit events.
+
+## 3. Model committee (council)
+
+All paths below are under `/api/v1/admin/council`.
+
+| Method and path | Purpose | Body / query | Success result |
+|---|---|---|---|
+| `GET /config` | Read committee settings, role bindings, available presets/suites, and model-health hints. | None | Config object including `enabled`, `consensus_mode`, `timeout_seconds`, `roles`, preset metadata and `model_health`. |
+| `PUT /config` | Replace committee settings. | JSON: `enabled` (bool), `consensus_mode` (string), `timeout_seconds` (30–420, default 240), `roles` (object). | `{"status":"ok","config":...}` |
+| `POST /apply-suite` | Apply a built-in suite. | `{"suite_id":"<suite id>"}` | `status`, `suite_id`, resulting `config`. |
+| `POST /reset-role` | Reset one role to its template. | `{"role_id":"<role id>"}` | `status`, `role_id`, resulting `config`. |
+| `GET /export` | Export committee configuration. | None | Export payload. |
+| `POST /import` | Import a committee configuration. | `{"payload":{...exported configuration...}}` | `status` and import result. |
+| `POST /test` | Run a committee debate/test. | Optional `{"mock_market_prompt":"<test context>"}`. Omit to use currently available runtime snapshots. | Debate/test result and context metadata. This is a test operation, not a trade instruction. |
+
+Example:
+
+```bash
+curl --fail-with-body -X PUT "$BASE_URL/api/v1/admin/council/config" \
+  -H "X-API-Key: $AGENT_KEY" -H 'Content-Type: application/json' \
+  -d '{"enabled":true,"consensus_mode":"standard","timeout_seconds":240,"roles":{}}'
+```
+
+Use a read-modify-write pattern for `roles`: first GET the current object, preserve unrelated roles/fields, then PUT. Role values are domain-defined; inspect the live response and OpenAPI schema rather than inventing role IDs. A seat bound to an unregistered model may fall back to the main model; check `model_health`.
+
+## 4. Prompt workshop and profiles
+
+### Library and global override
+
+| Method and path | Purpose | Request | Response / behavior |
+|---|---|---|---|
+| `GET /api/v1/admin/prompt-library` | Read base templates, active profile, profile list, module pipeline views, rendered previews, snapshots, and supported template variables. | None | Includes `active_style`, `active_profile_id`, `profiles`, `base_templates`, `pipelines`, `effective_templates`, `template_variables`; previews are marked `template_only_not_runtime`. |
+| `PUT /api/v1/admin/prompt-library` | Set the active legacy style and custom prompt layer. | `active_style`: `stable`, `aggressive`, or `custom`; optional/default-empty strings `trading_system`, `trading_user`, `evolution_system`, `evolution_user` (each max 12,000 chars). | `saved`, `active_style`, and an effect note. |
+| `GET /api/v1/admin/prompts` | Read the global trading-System override. | None | `content`, `enabled`, `base_prompt`, `effective_prompt`, `override_applied`, `path`. |
+| `PUT /api/v1/admin/prompts` | Write or clear the global override. | `{"content":"<override text>"}`; max 12,000 characters. Empty/whitespace content clears it. | `saved`, `enabled`, effect note. |
+
+### Profile lifecycle
+
+| Method and path | Purpose | Request | Response / errors |
+|---|---|---|---|
+| `GET /api/v1/admin/prompt-profiles` | List profiles and allowed template variables. | None | `active_profile_id`, `profiles`, `allowed_variables`, `template_variables`. |
+| `POST /api/v1/admin/prompt-profiles` | Create a profile from an existing source profile. | Required `name` (1–60 chars); optional `description` (max 240) and `source_id` (default `stable`, max 80). | `{"profile":...}`; `400` on invalid source/name. |
+| `PUT /api/v1/admin/prompt-profiles/{profile_id}` | Partial update of a profile. | Any subset of fields below. | `profile` plus `validation`; `400` invalid, `404` missing profile. |
+| `POST /api/v1/admin/prompt-profiles/{profile_id}/activate` | Activate profile. | No body. | `active_profile_id`, `profile`; `404` missing, `409` not activatable. |
+| `DELETE /api/v1/admin/prompt-profiles/{profile_id}` | Delete profile. | No body. | `{"deleted":true}`; `404` missing, `409` deletion forbidden (for example active/protected profile). |
+| `POST /api/v1/admin/prompt-profiles/validate` | Validate a profile candidate without saving it. | Profile fields accepted by PUT; use returned profile as the source of truth. | Validation report; `400` if invalid. |
+| `GET /api/v1/admin/prompt-profiles/{profile_id}/history` | Read revisions. | None. | `{"history":[...]}`. |
+| `POST /api/v1/admin/prompt-profiles/{profile_id}/rollback` | Restore a prior revision. | `{"revision_id":"<revision id>"}`; 1–80 chars `[A-Za-z0-9_-]+`. | `{"profile":...}`; `400` invalid revision, `404` missing profile/revision. |
+| `GET /api/v1/admin/prompt-profiles/{profile_id}/export` | Export one profile. | None. | Export JSON object; `404` if missing. |
+| `POST /api/v1/admin/prompt-profiles/import` | Import an exported profile. | Required `payload` object; optional `name_override` (max 60 chars). | `{"profile":...}`; `400` malformed import. |
+
+Profile update fields:
+
+| Field | Type / constraints | Meaning |
+|---|---|---|
+| `name` | string, 1–60 chars | Display name; whitespace-only rejected. |
+| `description` | string, max 240 chars | Profile description. |
+| `enabled` | boolean | Enable/disable the profile. |
+| `editor_mode` | `simple`, `advanced`, or `modules` | Editing representation. |
+| `simple_policy` | object | Simple-mode strategy policy; structure is profile/domain-defined. |
+| `pipelines` | object of arrays of module objects | Per-prompt module order/configuration. Read the current pipeline first; preserve module IDs and fields when changing `enabled` or module content. |
+| `trading_system`, `trading_user` | strings, each max 12,000 chars | Full trading System/User text override. |
+| `evolution_system`, `evolution_user` | strings, each max 12,000 chars | Full self-evolution System/User text override. |
+| `note` | string, max 240 chars, default `后台更新` | Revision/audit note; not a profile content field. |
+
+For surgical module changes, GET `/prompt-library` or `/prompt-profiles`, copy the target profile, edit only the intended `pipelines` module(s), send a PUT with the existing module identifiers and a note, then inspect the returned `validation`. Do not replace a complete pipeline with a guessed partial shape.
+
+Example create and edit:
+
+```bash
+curl --fail-with-body -X POST "$BASE_URL/api/v1/admin/prompt-profiles" \
+  -H "X-API-Key: $AGENT_KEY" -H 'Content-Type: application/json' \
+  -d '{"name":"Trend review","description":"Operator-approved profile","source_id":"stable"}'
+
+curl --fail-with-body -X PUT "$BASE_URL/api/v1/admin/prompt-profiles/<profile_id>" \
+  -H "X-API-Key: $AGENT_KEY" -H 'Content-Type: application/json' \
+  -d '{"enabled":true,"note":"Enable reviewed profile"}'
+```
+
+## 5. Self-evolution configuration
+
+| Method and path | Purpose | Request | Response |
+|---|---|---|---|
+| `GET /api/v1/admin/evolution/config` | Read evolution start boundary and count of eligible closed trades. | None. | `evolution_start_time`, `active_trades_count`, `note`. |
+| `PUT /api/v1/admin/evolution/config` | Change the evolution replay start boundary. | `{"start_time":"YYYY-MM-DD HH:MM:SS"}`; string length 10–30. | `ok`, new `evolution_start_time`, `active_trades_count`, `effect`. |
+
+This setting changes the set of trades included in future reviews. It does not update the initial capital baseline. Treat date-boundary changes as consequential; read the resulting count before proceeding.
+
+## 6. Risk configuration
+
+| Method and path | Purpose | Request | Response / behavior |
+|---|---|---|---|
+| `GET /api/v1/admin/risk` | Read risk schema, preset suites, configured/process/effective values and freshness/diff information. | Optional query `equity` (float, available USDT) to derive effective values. | `schema`, `suites`, `values`, `process_values`, `process_freshness`, `file_vs_process`, `engine_values`, `effect`. |
+| `POST /api/v1/admin/risk` | Apply a suite and/or explicit risk values. | `values` object (environment-key to value), optional `suite_id`, optional `confirmation`. | `updated`, `applied_suite`, current `values`, effect note. |
+| `POST /api/v1/admin/risk/reset` | Remove all custom risk overrides. | `{"confirmation":"RESET RISK"}` exactly (case is normalized by server). | `reset`, default `values`, effect note. |
+
+Example (a low-impact numeric update; the server validates the actual key and range):
+
+```bash
+curl --fail-with-body -X POST "$BASE_URL/api/v1/admin/risk" \
+  -H "X-API-Key: $AGENT_KEY" -H 'Content-Type: application/json' \
+  -d '{"values":{"ASTRA_MAX_LEVERAGE":5}}'
+```
+
+Extreme risk values require the exact phrase `HIGH RISK`; ordinary values still pass the risk schema/range checks. If response is `400`, do not weaken controls by guessing alternate keys or values. Changes are persisted to `.env`; execution processes may take up to one 15-minute trading cycle to observe them. Initial capital/baseline routes are not in scope.
+
+## 7. Physical interceptors
+
+All paths are under `/api/v1/admin/interceptors`.
+
+| Method and path | Purpose | Request | Success |
+|---|---|---|---|
+| `GET /` | List interceptors. | None. | `{"plugins":[...]}` |
+| `GET /{filename}` | Read interceptor detail. | Safe filename path parameter. | Plugin detail; `404` if absent. |
+| `PUT /{filename}/toggle` | Enable/disable. | `{"enabled":true}`. | Updated plugin state. |
+| `PUT /{filename}/code` | Replace code. | `{"code":"<source>"}`. | Updated plugin state; `400` if rejected. |
+| `POST /` | Create interceptor. | `{"filename":"<safe filename>","code":"<source>"}`. Filename length 3–100 chars. | Created plugin; `400` on invalid/duplicate code. |
+| `DELETE /{filename}` | Delete interceptor. | Filename path parameter. | `{"deleted":true,"filename":"..."}`. |
+| `POST /reorder` | Set pipeline order. | `{"pipeline_order":["filename.py",...]}`. | `{"plugins":[...]}`. |
+| `POST /test` | Run sandbox test. | Optional `{"scenario":{...}}`. | Sandbox result; does not authorize live trading. |
+
+Interceptor code changes affect a physical execution guard. Review source, test in sandbox, and obtain operator authorization before modifying or disabling one. Code/config changes are audited.
+
+## 8. Trading instrument pool
+
+Agent keys may mutate the pool but **cannot call `GET /api/v1/admin/instruments`**, because that listing contains capital-tier metadata.
+
+| Method and path | Purpose | Request | Success / notable errors |
+|---|---|---|---|
+| `POST /api/v1/admin/instruments` | Add a USDT perpetual instrument. | `{"inst_id":"BTC-USDT-SWAP","venues":["okx","binance"]}`. `inst_id` must match `[A-Z0-9]{2,15}-USDT-SWAP`; `venues` optional, allowed values `okx`, `binance`, `gate`. | Added instrument and validation details; `400` invalid/unsupported venue/contract, `409` duplicate or pool capacity. |
+| `DELETE /api/v1/admin/instruments/{inst_id}` | Remove an instrument. | JSON body `{"confirmation":"REMOVE BTC-USDT-SWAP"}`; exact uppercase instrument-specific phrase required. | Removed ID and new count; `400` bad phrase, `403` protected BTC sentinel, `404` missing, `409` held/tracked/minimum-pool constraint, `503` holdings unknown. |
+| `PUT /api/v1/admin/instruments/{inst_id}/venues` | Change venue assignments. | `{"venues":["okx","gate"]}`; non-empty list from `okx`, `binance`, `gate`. | Updated assignment/validation; `400` venue contract unavailable, `409` would remove a venue with open holdings, `503` holdings unknown. |
+
+Contract addition and venue assignment perform exchange contract validation and may depend on exchange public market-data availability. Deletion and venue reassignment fail closed when current holdings cannot be confirmed. Never retry destructive requests blindly; GET access is intentionally denied, so rely on mutation response and ask an administrator to inspect the protected listing when state is uncertain.
+
+## 9. LLM providers and models
+
+All paths are under `/api/v1/admin/llm`. Provider/model configuration supports model-provider API credentials, unlike the excluded **exchange** credentials. Treat any `api_key` supplied to a write as secret; use only operator-authorized secret values. Read endpoints mask keys.
+
+| Method and path | Purpose | Request fields / query | Success / errors |
+|---|---|---|---|
+| `GET /providers` or `GET /models` | Read provider/model inventory. | None. | Masked configuration from `load_llm_config(mask_keys=true)`. |
+| `POST /providers` | Create/update provider. | `name`, `base_url` required; optional `id`, `type`, `group`, `enabled`, `multi_key_enabled`, `response_api_enabled`, `api_key`, `api_format`, `api_path`, `description`, `models`. | Provider object; `400` validation error. |
+| `POST /providers/{provider_id}/toggle` | Toggle provider. | Optional `{"enabled":true}`; omitted body delegates toggle behavior to service. | Updated provider state; `400` invalid provider. |
+| `DELETE /providers/{provider_id}` | Delete provider. | None. | `{"deleted":true,"provider_id":"..."}`; `404` missing, `400` invalid state. |
+| `DELETE /providers/{provider_id}/models` | Clear provider model list. | None. | `{"cleared":true,"provider_id":"..."}`; `404` missing. |
+| `POST /models` or `POST /providers/{provider_id}/models` | Add/update model. | Required `id`; optional `name`, `provider_id`, `provider_name`, `base_url`, `api_key`, `api_format` (default `openai_chat`), `reasoning_type` (default `auto`), `default_effort`, `reasoning_effort`, `capabilities`, `context_length`, `description`. | Updated model object; `400` invalid configuration. |
+| `DELETE /models/{model_id}` or `DELETE /providers/{provider_id}/models/{model_id}` | Delete one model. | Path IDs. | `{"deleted":true,"model_id":"..."}`; `404` missing. |
+| `POST /activate` | Activate model/provider. | `model_id` required, optional `provider_id`, `reasoning_effort`, `thinking_timeout` (5–1800 seconds). | Active runtime/settings; `400` invalid model. |
+| `POST /settings` or `PUT /settings` | Update active model/failover settings. | Optional `thinking_timeout` (5–1800), `active_model_id`, `reasoning_effort`, `request_attempts` (1–10), `fallback_model_ids` array. | Settings object; `400` invalid selection/range. |
+| `GET /failover-events` | Read recent fallback events. | Query `limit` (default 30; service applies bound). | `{"events":[...]}`. |
+| `POST /test` | Test a provider/model connection. | Required `model`; optional `provider_id`, `base_url`, `api_key`, `api_format` (default `openai_chat`), `reasoning_effort` (`low`, `medium`, `high`, `minimal`, `none`, `auto`), `reasoning_type` (default `auto`). | Connection result includes `ok`, latency/status/reasoning metadata where available. Test payload key is not echoed by design; still avoid logging the request. |
+| `POST /fetch-models` | Discover remote models. | Optional `base_url`, `api_key`, `provider_id`. | Discovery result with `ok`, `total`, and models/errors. This sends a request to the configured provider. |
+
+Example settings update:
+
+```bash
+curl --fail-with-body -X PUT "$BASE_URL/api/v1/admin/llm/settings" \
+  -H "X-API-Key: $AGENT_KEY" -H 'Content-Type: application/json' \
+  -d '{"thinking_timeout":120,"request_attempts":2,"fallback_model_ids":[]}'
+```
+
+For provider/model objects, use GET first and preserve IDs and unrelated fields. Model/provider `api_key` values may be redacted in reads; never attempt to recover a masked secret from its placeholder. Provider-specific allowed `api_format`, reasoning behavior, and capability semantics are defined by the live OpenAPI schema and backend adapter.
+
+## 10. Safe venue and routing facade
+
+These Agent-specific routes avoid exposing exchange credential values or tier fields.
+
+### `GET /api/v1/agent/exchanges/config`
+
+No body. Returns:
+
+- `preferred_venue`, `routing_mode`, `okx_environment`.
+- `execution_enabled` per venue for the currently selected execution axis.
+- `venue_pools` mapping each venue to instrument IDs; sanitized `instrument_pool` master entries.
+- `venue_options` per venue (`margin_per_trade_usdt`, `max_open`, `min_confidence`, `dry_run`).
+- `testnet` flags and literal exclusion markers `credentials: excluded`, `capital_tiers: excluded`.
+
+No API credential values or `tier`, `capital_tier`, `funding_tier` fields are returned. Treat this as the authoritative safe read view for Agent-managed routing.
+
+### `PUT /api/v1/agent/exchanges/config`
+
+All fields are optional; omitted fields are unchanged. Unknown fields are ignored by Pydantic's default behavior only if the runtime schema allows it; rely on this table and live OpenAPI rather than sending extras.
+
+| Field | Type / allowed values | Effect |
+|---|---|---|
+| `preferred_venue` | `okx`, `binance`, `gate`, `auto` | Set routing preference. |
+| `routing_mode` | `auto`, `balanced`, `split` | Set routing mode. |
+| `okx_environment` | `demo`, `live` | Select OKX environment; it does not provide credentials. |
+| `binance_testnet`, `gate_testnet` | boolean | Select each exchange's demo/testnet axis. |
+| `okx_execution`, `binance_execution`, `gate_execution` | boolean | Change selected execution gate; `confirmation` must be exactly `OPEN OKX EXECUTION`, `OPEN BINANCE EXECUTION`, or `OPEN GATE EXECUTION` for the one gate being changed. |
+| `venue_pools` | object: venue name → array of instrument IDs | Set per-venue pool; each array max 500; each ID must match `[A-Z0-9]{2,15}-USDT-SWAP`. Master pool assignments synchronize. |
+| `venue_options` | object: venue name → option object | Allowed only: `margin_per_trade_usdt` 0–1,000,000; `max_open` 1–100; `min_confidence` 0–100; `dry_run` boolean. |
+| `confirmation` | string | Exact phrase used by execution gate or `UPDATE VENUE ROUTING` when setting any `dry_run` to false. |
+
+Example safe pool/options change (dry-run remains on):
+
+```bash
+curl --fail-with-body -X PUT "$BASE_URL/api/v1/agent/exchanges/config" \
+  -H "X-API-Key: $AGENT_KEY" -H 'Content-Type: application/json' \
+  -d '{"preferred_venue":"auto","routing_mode":"balanced","venue_pools":{"okx":["BTC-USDT-SWAP"],"binance":["BTC-USDT-SWAP"]},"venue_options":{"binance":{"max_open":4,"min_confidence":80,"dry_run":true}}}'
+```
+
+Write each execution switch in a separate request because each one needs its own exact phrase. Likewise, disabling `dry_run` must be a separate request with `confirmation: "UPDATE VENUE ROUTING"`; do not combine it with an execution switch. Opening execution is an operational decision and must not be inferred from an API request or configuration change.
+
+## 11. Venue status (read only)
+
+### `GET /api/v1/admin/multi-exchange`
+
+This is the only Agent-allowed `/api/v1/admin/multi-exchange` method. It returns routing/venue health, pool IDs, selected execution state, and credential-presence booleans such as `has_api_key`; it does **not** return secret values. Do not call its `PUT` or `POST /test-connection` methods with an Agent key: they are explicitly out of scope.
+
+## 12. Execution and model telemetry
+
+### `GET /api/v1/agent/telemetry`
+
+Query parameters:
+
+| Name | Type | Default / range | Meaning |
+|---|---|---|---|
+| `limit` | integer | default 50; clamped to 1–200 | Maximum recent model-call rows loaded. |
+| `caller` | string, optional | no default | Exact caller-name filter, applied to loaded rows. |
+
+Response: `items` (metadata rows), `count`, bounded `limit`, `content_stored: false`. Metadata can include caller, model, reasoning effort, status, start time, duration, character/token counts, prompt fingerprint, transport, and error type. Prompt and response text are neither stored nor returned. Because caller filtering is applied after the bounded read, a filtered result may contain fewer than `limit` rows.
+
+Example:
+
+```bash
+curl --fail-with-body "$BASE_URL/api/v1/agent/telemetry?limit=100&caller=trading" \
+  -H "X-API-Key: $AGENT_KEY"
+```
+
+### `GET /api/v1/admin/agents`
+
+Read-only execution-unit/gateway status. Returns up to 100 job-run-derived agent statuses, model statistics, up to 50 model-call rows, prompt transport policy, and secret-store **status metadata**. No write method is allowed with the Agent key. Do not treat status metadata as credential material.
+
+## 13. Explicitly unavailable through Agent API
+
+The route allowlist denies these operations even if a caller knows their administrator URLs:
+
+- Initial capital baseline update and account baseline controls.
+- Binance, Gate, or OKX access credentials, credential testing, or account snapshots.
+- Capital/funding tier read or mutation; the instrument GET listing is excluded for this reason.
+- Manual close, account execution, and unrelated administrative routes.
+- `PUT /api/v1/admin/multi-exchange` and `POST /api/v1/admin/multi-exchange/test-connection`.
+
+Do not attempt to route around these boundaries. Ask an authorized administrator to perform excluded operations.
+
+## 14. Operational behavior and safe workflow
+
+1. Fetch `/api/v1/agent/capabilities` and the current resource before a write.
+2. Validate the proposed change against live schema and endpoint constraints. Preserve unknown fields in nested documents.
+3. For modifications, change only requested fields; for delete/activation/reset/route execution writes, require explicit operator authorization and exact phrase where specified.
+4. Read the resource back and verify effect. If a write times out, read before retrying.
+5. Keep `dry_run` enabled and execution gates closed unless an authorized operator explicitly directs otherwise.
+6. Never include Agent key or exchange secrets in logs, generated reports, telemetry, documentation, or assistant output.
+7. Use audit results and endpoint errors honestly; never claim a change succeeded without a successful response and read-back.
+
+## 15. Developer documentation
+
+- [Agent API provisioning and scope](https://github.com/suyunjing-su/r20-quantum-trader/blob/main/docs/AGENT_API.md)
+- [Developer README (English)](https://github.com/suyunjing-su/r20-quantum-trader/blob/main/README.md)
+- [开发者 README（简体中文）](https://github.com/suyunjing-su/r20-quantum-trader/blob/main/README.zh-CN.md)
+- [Backend layering](https://github.com/suyunjing-su/r20-quantum-trader/blob/main/astra_backend/README.md)
+- [Exchange support matrix](https://github.com/suyunjing-su/r20-quantum-trader/blob/main/docs/exchange_support_matrix.md)
+- [Risk and failure semantics](https://github.com/suyunjing-su/r20-quantum-trader/blob/main/docs/FAILURE_SEMANTICS.md)

@@ -273,7 +273,7 @@ cd ..
 
 | To learn about | Read | Purpose |
 |---|---|---|
-| **AI / Agent documentation index** | `llms.txt` | Curated LLM-readable project, developer, domain, and live API references; served at `/llms.txt` |
+| **AI / Agent API guides** | `llms.txt`, `llms-full.txt` | Deployed quick-start and detailed Agent API reference, served at `/llms.txt` and `/llms-full.txt`; these are operating docs, never credential files |
 | **Backend layering** | `astra_backend/README.md` | L0 facade / L1 wiring / L2 routers / L3 domain / L4 subpackages and module extraction guidelines |
 | **Runtime scripts & daemons** | `scripts/README.md` | Which file is an entry point vs. a background daemon, root module directory, and dual-spelling import rules |
 | **Frontend components & state** | `frontend/src/components/admin/README.md` | Vue 3 components, composables, pinia stores, and trading workstation state machines |

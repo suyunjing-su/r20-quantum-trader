@@ -334,9 +334,17 @@ class StaticAssetTests(_Base):
         self.assertEqual(out.path, str(index))
         self.assertEqual(out.media_type, "text/plain")
 
-    def test_llms_txt_missing_is_404(self):
+    def test_llms_full_txt_serves_the_detailed_agent_api_reference(self):
+        reference = self.root / "llms-full.txt"
+        reference.write_text("# AstraQuant Agent API — Full Reference\\n", encoding="utf-8")
+        out = A.llms_full_txt()
+        self.assertIsInstance(out, FileResponse)
+        self.assertEqual(out.path, str(reference))
+        self.assertEqual(out.media_type, "text/plain")
+
+    def test_llms_full_txt_missing_is_404(self):
         with self.assertRaises(HTTPException) as ctx:
-            A.llms_txt()
+            A.llms_full_txt()
         self.assertEqual(ctx.exception.status_code, 404)
 
     def test_robots_prefers_dist_then_public_then_default(self):
