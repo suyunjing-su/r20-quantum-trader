@@ -141,6 +141,23 @@ class InjectionContractTest(unittest.TestCase):
             abt.construct_full_market_prompt([_PACKAGE()])
         self.assertTrue(calls, "safe_float 未被调用 —— 未走注入项")
 
+    def test_minimum_exchange_order_values_reach_model(self):
+        pkg = _PACKAGE()
+        pkg["minimum_order_requirements"] = {
+            "binance": {"minimum_notional_usdt": 5.0},
+            "gate": {"minimum_notional_usdt": 2.5},
+        }
+        text = abt.construct_full_market_prompt([pkg])
+        self.assertIn("BINANCE 最小名义 5 USDT", text)
+        self.assertIn("GATE 最小名义 2.5 USDT", text)
+        self.assertIn("最低保证金=门槛÷杠杆", text)
+        self.assertIn("严禁低于门槛下单", text)
+
+    def test_missing_minimum_specs_are_not_guessed(self):
+        text = abt.construct_full_market_prompt([_PACKAGE()])
+        self.assertIn("各所合约规格暂不可用", text)
+        self.assertIn("不得臆测门槛", text)
+
     def test_active_profile_patch_is_observed(self):
         sentinel = {"name": "补丁策略", "pipelines": {}}
         with patch.object(abt, "active_profile", lambda: sentinel):

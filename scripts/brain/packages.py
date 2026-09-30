@@ -37,6 +37,46 @@ except ImportError:       # 以 scripts.brain.* 包被导入（PROJECT_ROOT 在 
     from scripts.market_data_health import note_failure
 
 
+def _minimum_order_requirements(base: str, price: float) -> Dict[str, Any]:
+    """从三所公共合约规格计算当前价格下的最小开仓名义价值。"""
+    requirements: Dict[str, Any] = {
+        venue: {"minimum_notional_usdt": None, "source": "unavailable"}
+        for venue in ("okx", "binance", "gate")
+    }
+    try:
+        from astra_backend.exchanges.registry import adapter_environment, get_adapter
+    except Exception:
+        return requirements
+
+    for venue in ("okx", "binance", "gate"):
+        try:
+            adapter = get_adapter(venue, environment=adapter_environment(venue))
+            spec = adapter.fetch_instrument_spec(base)
+            if spec is None:
+                continue
+            raw = getattr(spec, "raw", {}) or {}
+            minimum = 0.0
+            if venue == "binance":
+                # USDⓈ-M exchangeInfo 的 MIN_NOTIONAL / NOTIONAL 为 USDT 名义门槛；
+                # minQty × 价格也必须同时满足。
+                for item in raw.get("filters", []):
+                    if item.get("filterType") in {"MIN_NOTIONAL", "NOTIONAL"}:
+                        minimum = max(minimum, float(item.get("notional") or item.get("minNotional") or 0))
+                minimum = max(minimum, float(getattr(spec, "min_size", 0) or 0) * price)
+            else:
+                # OKX: minSz × ctVal；Gate: order_size_min × quanto_multiplier。
+                minimum = (float(getattr(spec, "min_size", 0) or 0)
+                           * float(getattr(spec, "ct_val", 0) or 0) * price)
+            if minimum > 0:
+                requirements[venue] = {
+                    "minimum_notional_usdt": round(minimum, 8),
+                    "source": "public_contract_spec",
+                }
+        except Exception as exc:
+            note_failure(f"{venue}_minimum_order_spec", exc)
+    return requirements
+
+
 def fetch_single_instrument_package(item: Dict[str, Any], *,
                                    fetch_candles,
                                    fetch_single_indicator) -> Dict[str, Any]:
@@ -80,6 +120,7 @@ def fetch_single_instrument_package(item: Dict[str, Any], *,
         "recent_15m": [],
         "recent_1h": [],
         "recent_4h": [],
+        "minimum_order_requirements": {},
         "calculus": {"valid": False, "regime": "DATA_UNRELIABLE", "quality": 0.0},
         "data_quality": "invalid"
     }
@@ -295,4 +336,6 @@ def fetch_single_instrument_package(item: Dict[str, Any], *,
     except Exception as exc:
         pkg["calculus"] = {"valid": False, "regime": "DATA_UNRELIABLE", "quality": 0.0, "error": str(exc)}
     pkg["data_quality"] = "valid" if required_market_data else "invalid"
+    if pkg["price"] > 0:
+        pkg["minimum_order_requirements"] = _minimum_order_requirements(name, pkg["price"])
     return pkg

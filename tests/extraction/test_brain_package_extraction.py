@@ -23,6 +23,7 @@ import re
 import unittest
 import urllib.request
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import scripts.ai_brain_trader as abt
@@ -73,6 +74,13 @@ class MoveIsLosslessTest(unittest.TestCase):
         out = []
         for ln in lines:
             stripped = ln.strip()
+            # v8.4.1: 每轮包新增一次动态交易所最小名义规格采集，不属于原始行情迁移体。
+            if stripped in {
+                '"minimum_order_requirements": {},',
+                'if pkg["price"] > 0:',
+                'pkg["minimum_order_requirements"] = _minimum_order_requirements(name, pkg["price"])',
+            }:
+                continue
             if self._LATENCY_START_RE.match(stripped) or self._LATENCY_PUBLISH_RE.match(stripped):
                 continue
             if self._NOTE_RE.match(stripped):
@@ -151,6 +159,43 @@ class FacadeDelegationTest(unittest.TestCase):
         self.assertIs(got["fetch_single_indicator"], abt.fetch_single_indicator)
 
 
+class MinimumOrderRequirementsTest(unittest.TestCase):
+    def test_fetches_and_normalizes_all_venue_minimums(self):
+        specs = {
+            "okx": SimpleNamespace(min_size=1, ct_val=0.01, raw={}),
+            "binance": SimpleNamespace(
+                min_size=0.01, ct_val=1.0,
+                raw={"filters": [{"filterType": "MIN_NOTIONAL", "notional": "5"}]},
+            ),
+            "gate": SimpleNamespace(min_size=2, ct_val=0.1, raw={}),
+        }
+
+        class Adapter:
+            def __init__(self, venue):
+                self.venue = venue
+
+            def fetch_instrument_spec(self, base):
+                self.assert_base = base
+                return specs[self.venue]
+
+        with patch("astra_backend.exchanges.registry.adapter_environment", return_value="live"), \
+             patch("astra_backend.exchanges.registry.get_adapter",
+                   side_effect=lambda venue, environment: Adapter(venue)):
+            got = brain_packages._minimum_order_requirements("SUI", 100.0)
+
+        self.assertEqual(got["binance"]["minimum_notional_usdt"], 5.0)
+        self.assertEqual(got["okx"]["minimum_notional_usdt"], 1.0)
+        self.assertEqual(got["gate"]["minimum_notional_usdt"], 20.0)
+        self.assertEqual(set(got), {"okx", "binance", "gate"})
+
+    def test_unavailable_contract_specs_remain_unknown(self):
+        with patch("astra_backend.exchanges.registry.adapter_environment", return_value="live"), \
+             patch("astra_backend.exchanges.registry.get_adapter", side_effect=OSError("offline")):
+            got = brain_packages._minimum_order_requirements("SUI", 1.0)
+        self.assertEqual(set(got), {"okx", "binance", "gate"})
+        self.assertTrue(all(row["minimum_notional_usdt"] is None for row in got.values()))
+
+
 class FailSoftContractTest(unittest.TestCase):
     ITEM = {"instId": "FAKE-USDT-SWAP", "name": "FAKE", "type": "crypto", "precision": 4}
 
@@ -169,7 +214,7 @@ class FailSoftContractTest(unittest.TestCase):
                     "askPx", "fundingRate", "oiUsd", "vol24h", "lsRatio", "takerNetUsd",
                     "atr", "rsi", "vwap_bias", "macd_hist", "macd_accel", "vol_ratio",
                     "obv_flow", "adx_1h", "smart_money", "recent_15m", "recent_1h",
-                    "recent_4h", "calculus", "data_quality"):
+                    "recent_4h", "minimum_order_requirements", "calculus", "data_quality"):
             self.assertIn(key, pkg, f"失败路径缺字段 {key}")
         self.assertEqual(pkg["instId"], "FAKE-USDT-SWAP")
         self.assertEqual(pkg["price"], 0.0)

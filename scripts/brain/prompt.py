@@ -166,8 +166,19 @@ def construct_full_market_prompt(packages: List[Dict[str, Any]], pos_summary: st
         )
         _xv_line = xvenue_prompt_line(p)
         xv_suffix = ("\n" + _xv_line) if _xv_line else ""
+        min_specs = p.get("minimum_order_requirements")
+        if isinstance(min_specs, dict):
+            min_order_line = "；".join(
+                (f"{venue.upper()} 最小名义 {float(row['minimum_notional_usdt']):g} USDT"
+                 if isinstance(row, dict) and row.get("minimum_notional_usdt") is not None
+                 else f"{venue.upper()} 门槛未知（不得在该所开仓）")
+                for venue, row in sorted(min_specs.items())
+            ) or "各所合约规格暂不可用（不得臆测门槛；开仓前必须核验）"
+        else:
+            min_order_line = "各所合约规格暂不可用（不得臆测门槛；开仓前必须核验）"
         info = f"""---------------------------------------------------------
 【{p['name']} ({p['instId']})】| 数据质量: {quality} | 现价: {p['price']} | 24H涨跌: {p['chg24h']}% | 盘口买/卖: {p['bidPx']}/{p['askPx']}
+- 🧾 交易所合约最小开仓名义价值（按当前价从公共合约规格预取）: {min_order_line}。实际限价成交名义额必须不低于所选交易所门槛；按本单杠杆折算最低保证金=门槛÷杠杆，若本周期允许保证金或止损/R:R无法满足则输出 WAIT，严禁低于门槛下单。
 - 🏛️ 三重滤网宏观结构: 4H宏观大势={p.get('macro_4h', '4H_MACRO_RANGE')} | 1H波段结构={p.get('structure_1h', '1H_SWING_CHOP')}
 - 👑 顶级聪明钱 (SmartMoney Top100): {("加权做多占比=" + str(sm.get('weighted_long_pct')) + "% | 24H净流入=" + str(sm.get('net_flow_usdt', '--')) + " | 多头均价=" + str(sm.get('avg_long_entry', '--')) + " | 空头均价=" + str(sm.get('avg_short_entry', '--')) + " | " + str(sm.get('top_win_rate', ''))) if sm.get('available') else "数据源缺失（OKX CLI 已移除，暂无公开 V5 等价接口；本项不构成任何方向的证据，禁止臆测填充）"}
 - 📐 1H核心波段指标: 1H ATR(14)={p.get('atr_1h', p.get('atr', '--'))} (止损基准: {sl_atr_desc}) | 1H RSI(14)={p.get('rsi_1h', '--')} | 1H ADX趋势强度={adx_val} (注:<20无趋势垃圾市, ≥22强单边)
