@@ -142,6 +142,7 @@ class LlmTransportTailsTests(unittest.TestCase):
         self.assertEqual(reasoning, "Chain")
         self.assertEqual(usage["total_tokens"], 50)
 
+    def test_parse_openai_chat_stream(self):
         body = (
             'data: {"choices":[{"delta":{"reasoning_content":"think "}}]}\n\n'
             'data: {"choices":[{"delta":{"content":"pong"}}]}\n\n'
@@ -175,6 +176,32 @@ class LlmTransportTailsTests(unittest.TestCase):
         self.assertEqual(content, "PONG")
         self.assertEqual(reasoning, "plan")
         self.assertEqual(usage, {"total_tokens": 5})
+
+    def test_parse_llm_response_extracts_cached_tokens(self):
+        res_openai = {
+            "choices": [{"message": {"content": "ok"}}],
+            "usage": {"prompt_tokens": 2000, "completion_tokens": 10,
+                      "prompt_tokens_details": {"cached_tokens": 1500}},
+        }
+        _, _, u1 = _parse_llm_response("openai_chat", res_openai)
+        self.assertEqual(u1.get("cached_tokens"), 1500)
+
+        res_ds = {
+            "choices": [{"message": {"content": "ok"}}],
+            "usage": {"prompt_tokens": 2000, "completion_tokens": 10,
+                      "prompt_cache_hit_tokens": 1800},
+        }
+        _, _, u2 = _parse_llm_response("openai_chat", res_ds)
+        self.assertEqual(u2.get("cached_tokens"), 1800)
+
+        res_claude = {
+            "content": [{"type": "text", "text": "ok"}],
+            "usage": {"input_tokens": 2000, "output_tokens": 10,
+                      "cache_read_input_tokens": 1600},
+        }
+        _, _, u3 = _parse_llm_response("claude_messages", res_claude)
+        self.assertEqual(u3.get("cached_tokens"), 1600)
+
 
     # -------------------------------------------------------------------------
     # 3. 请求规约构建 (build_request_spec & build_chat_payload)
