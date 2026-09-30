@@ -65,7 +65,8 @@ def _routes_in(node_src: str) -> list:
 class StrategyRouterSplitTest(unittest.TestCase):
     def test_static_route_table_is_identical_and_ordered(self):
         r = subprocess.run(["git", "show", legacy_rev_path(f"{PRE}:{BASELINE}")],
-                           capture_output=True, text=True, cwd=str(ROOT))
+                           capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           cwd=str(ROOT))
         self.assertEqual(r.returncode, 0, f"基线取不到：{r.stderr[:200]}")
         want = _routes_in(r.stdout)
         self.assertEqual(len(want), 35, f"基线应有 35 条路由，实际 {len(want)}")
@@ -92,7 +93,8 @@ class StrategyRouterSplitTest(unittest.TestCase):
                 t = tuple(op.get("tags") or [])
                 tags[t] = tags.get(t, 0) + 1
         r = subprocess.run(["git", "show", legacy_rev_path(f"{PRE}:{BASELINE}")],
-                           capture_output=True, text=True, cwd=str(ROOT))
+                           capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           cwd=str(ROOT))
         want = {(p, m) for p, m, _ in _routes_in(r.stdout)}
         self.assertEqual(live, want, "线上接口面（路径×方法）与拆分前不一致")
         self.assertEqual(len(live), 35)
@@ -113,17 +115,15 @@ class StrategyRouterSplitTest(unittest.TestCase):
     def test_old_module_path_still_importable(self):
         """外部 `from astra_backend.routers.strategy import router` 必须照旧可用。
 
-        ⚠️ 本仓 FastAPI 版本的 `include_router` 是**惰性**的：聚合器的 `routes`
-        里放的是 `_IncludedRouter` **句柄**（4 个子路由），真正的 35 条在应用
-        规格解析时才展开 —— 故此处只断言"4 个句柄 + 可挂载"，35 条由
-        `test_live_openapi_route_surface_unchanged` 从 OpenAPI 规格校验。
+        FastAPI 不保证 `include_router` 的内部存储形态：不同版本可能保留子路由
+        句柄，也可能立即复制为 APIRoute。这里只验证公开契约——聚合器可导入且
+        确实包含路由，不把 FastAPI 的内部实现细节当成生产契约。
         """
         from astra_backend.routers.strategy import router
         self.assertTrue(hasattr(router, "routes"))
-        self.assertEqual(len(router.routes), len(INCLUDE_ORDER),
-                         "聚合器应有 4 个子路由句柄（惰性 include）")
-        self.assertTrue(all(type(r).__name__ == "_IncludedRouter" for r in router.routes),
-                        "应为 FastAPI 的惰性 include 句柄")
+        self.assertTrue(router.routes, "策略聚合器不得为空")
+        self.assertTrue(all(getattr(r, "path", None) for r in router.routes),
+                        "聚合器中的每个路由都必须有可匹配路径")
 
     def test_judgment_actually_notices_a_change(self):
         src = (PKG / "council.py").read_text(encoding="utf-8")
