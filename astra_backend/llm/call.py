@@ -31,6 +31,8 @@ from astra_backend.llm.transport import (
     _LLMHardError,
     _LLMTransientError,
     _attempt_llm_call,
+    _parse_stream_response,
+    _read_stream_body,
     build_request_spec,
 )
 
@@ -116,7 +118,7 @@ def fetch_remote_models(reload_config: Callable[[], Dict[str, Any]], get_active_
     last_err = ""
     saw_auth_error = False
     for ep, hdrs in endpoints:
-        hdrs["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 AstraQuant/8.3"
+        hdrs["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 AstraQuant/6.6"
         req = urllib.request.Request(ep, headers=hdrs)
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -393,27 +395,9 @@ def test_llm_connection(reload_config: Callable[[], Dict[str, Any]],
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             latency_ms = int((time.perf_counter() - t0) * 1000)
             status_code = resp.getcode()
-            body_bytes = resp.read()
-            res_json = json.loads(body_bytes.decode("utf-8", errors="replace"))
+            body_bytes = _read_stream_body(resp)
+            content, reasoning_content, usage = _parse_stream_response(api_format, body_bytes)
 
-            content = ""
-            reasoning_content = ""
-            usage = res_json.get("usage", {})
-
-            if api_format == "claude_messages":
-                content = "".join(c.get("text", "") for c in res_json.get("content", []) if c.get("type") == "text")
-                reasoning_content = "\n".join(c.get("thinking", "") for c in res_json.get("content", []) if c.get("type") == "thinking")
-            elif api_format == "openai_responses":
-                content = str(res_json.get("output_text") or "")
-                for item in res_json.get("output", []):
-                    if item.get("type") == "reasoning":
-                        reasoning_content += str(item.get("content") or item.get("summary") or "")
-            else:
-                msg = res_json.get("choices", [{}])[0].get("message", {})
-                content = str(msg.get("content", ""))
-                reasoning_content = str(msg.get("reasoning_content") or "")
-
-            content = content.strip()
             reasoning_tokens = (
                 usage.get("completion_tokens_details", {}).get("reasoning_tokens")
                 or usage.get("output_tokens_details", {}).get("reasoning_tokens")
@@ -454,14 +438,13 @@ def test_llm_connection(reload_config: Callable[[], Dict[str, Any]],
         ])
         if is_param_conflict and api_format == "openai_chat":
             try:
-                fb_payload = {"model": model, "messages": test_messages}
+                fb_payload = {"model": model, "messages": test_messages, "stream": True}
                 fb_req = urllib.request.Request(endpoint, data=json.dumps(fb_payload).encode("utf-8"), headers=headers)
                 t1 = time.perf_counter()
                 with urllib.request.urlopen(fb_req, timeout=timeout) as fb_resp:
                     fb_latency = int((time.perf_counter() - t1) * 1000)
-                    fb_body = fb_resp.read().decode("utf-8", errors="replace")
-                    fb_json = json.loads(fb_body)
-                    fb_msg = fb_json.get("choices", [{}])[0].get("message", {})
+                    fb_body = _read_stream_body(fb_resp)
+                    fb_content, _, _ = _parse_stream_response(api_format, fb_body)
                     return {
                         "ok": True,
                         "status_code": 200,
@@ -469,7 +452,7 @@ def test_llm_connection(reload_config: Callable[[], Dict[str, Any]],
                         "model": model,
                         "api_format": api_format,
                         "endpoint": endpoint,
-                        "response_preview": str(fb_msg.get("content", ""))[:120] or "OK",
+                        "response_preview": fb_content[:120] or "OK",
                         "warning": f"上游服务拒绝了参数 ({err_body[:80]}…)，系统已自适应去除冲突参数并测试成功",
                         "compatibility_note": "模型不支持自定义 reasoning_effort 或 temperature 参数；实际调用将自动去除",
                     }

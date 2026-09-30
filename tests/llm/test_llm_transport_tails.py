@@ -21,6 +21,7 @@ from astra_backend.llm.transport import (
     _attempt_llm_call,
     _is_transient_http,
     _parse_llm_response,
+    _parse_stream_response,
     build_chat_payload,
     build_request_spec,
 )
@@ -141,6 +142,40 @@ class LlmTransportTailsTests(unittest.TestCase):
         self.assertEqual(reasoning, "Chain")
         self.assertEqual(usage["total_tokens"], 50)
 
+        body = (
+            'data: {"choices":[{"delta":{"reasoning_content":"think "}}]}\n\n'
+            'data: {"choices":[{"delta":{"content":"pong"}}]}\n\n'
+            'data: [DONE]\n'
+        )
+        content, reasoning, usage = _parse_stream_response("openai_chat", body)
+        self.assertEqual(content, "pong")
+        self.assertEqual(reasoning, "think")
+        self.assertEqual(usage, {})
+
+    def test_parse_claude_messages_stream(self):
+        body = (
+            'event: message_start\n'
+            'data: {"type":"message_start","message":{"usage":{"input_tokens":3}}}\n\n'
+            'data: {"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"plan"}}\n\n'
+            'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"PONG"}}\n\n'
+            'data: {"type":"message_delta","usage":{"output_tokens":2}}\n\n'
+        )
+        content, reasoning, usage = _parse_stream_response("claude_messages", body)
+        self.assertEqual(content, "PONG")
+        self.assertEqual(reasoning, "plan")
+        self.assertEqual(usage, {"input_tokens": 3, "output_tokens": 2})
+
+    def test_parse_openai_responses_stream(self):
+        body = (
+            'data: {"type":"response.reasoning_summary_text.delta","delta":"plan"}\n\n'
+            'data: {"type":"response.output_text.delta","delta":"PONG"}\n\n'
+            'data: {"type":"response.completed","response":{"usage":{"total_tokens":5}}}\n\n'
+        )
+        content, reasoning, usage = _parse_stream_response("openai_responses", body)
+        self.assertEqual(content, "PONG")
+        self.assertEqual(reasoning, "plan")
+        self.assertEqual(usage, {"total_tokens": 5})
+
     # -------------------------------------------------------------------------
     # 3. 请求规约构建 (build_request_spec & build_chat_payload)
     # -------------------------------------------------------------------------
@@ -229,6 +264,18 @@ class LlmTransportTailsTests(unittest.TestCase):
             response_format={"type": "json_object"},
         )
         self.assertEqual(p2.get("response_format"), {"type": "json_object"})
+
+    def test_build_request_spec_all_protocols_enable_streaming(self):
+        for api_format in ("openai_chat", "openai_responses", "claude_messages"):
+            with self.subTest(api_format=api_format):
+                _, headers, payload = build_request_spec(
+                    "gpt-4o",
+                    [{"role": "user", "content": "hi"}],
+                    "https://api.example/v1",
+                    api_format=api_format,
+                )
+                self.assertTrue(payload["stream"])
+                self.assertEqual(headers["Accept"], "text/event-stream")
 
     def test_build_chat_payload_compatibility_wrapper(self):
         payload = build_chat_payload(

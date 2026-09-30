@@ -92,6 +92,119 @@ def _parse_llm_response(target_format: str, res_json: Dict[str, Any]) -> Tuple[s
     return content, reasoning_content, usage
 
 
+def _parse_stream_response(target_format: str, body: bytes | str) -> Tuple[str, str, Dict[str, Any]]:
+    """Parse an SSE response while retaining compatibility with JSON-only gateways.
+
+    OpenAI Chat/Responses and Claude Messages use different event names, but all
+    of them carry JSON after ``data:``.  Accumulating deltas here means callers
+    keep the same completed-response contract as the old non-streaming path.
+    """
+    text = body.decode("utf-8", errors="replace") if isinstance(body, bytes) else str(body)
+    if "data:" not in text:
+        try:
+            return _parse_llm_response(target_format, json.loads(text))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("流式响应体非 JSON/SSE") from exc
+
+    content_parts: List[str] = []
+    reasoning_parts: List[str] = []
+    usage: Dict[str, Any] = {}
+    completed_response: Optional[Dict[str, Any]] = None
+
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if not data or data == "[DONE]":
+            continue
+        try:
+            event = json.loads(data)
+        except ValueError:
+            # Providers occasionally emit comments/keep-alives in an SSE body.
+            continue
+        if not isinstance(event, dict):
+            continue
+
+        event_usage = event.get("usage")
+        if isinstance(event_usage, dict) and event_usage:
+            usage.update(event_usage)
+
+        if target_format == "claude_messages":
+            event_type = event.get("type")
+            if event_type == "content_block_delta":
+                delta = event.get("delta") or {}
+                if delta.get("type") == "text_delta":
+                    content_parts.append(str(delta.get("text") or ""))
+                elif delta.get("type") in ("thinking_delta", "signature_delta"):
+                    reasoning_parts.append(str(delta.get("thinking") or ""))
+            elif event_type == "message_start":
+                message = event.get("message") or {}
+                if isinstance(message.get("usage"), dict):
+                    usage.update(message["usage"])
+            elif event_type == "message_delta":
+                delta_usage = event.get("usage")
+                if isinstance(delta_usage, dict):
+                    usage.update(delta_usage)
+            continue
+
+        if target_format == "openai_responses":
+            event_type = str(event.get("type") or "")
+            if event_type == "response.output_text.delta":
+                content_parts.append(str(event.get("delta") or ""))
+            elif "reasoning" in event_type and event_type.endswith(".delta"):
+                reasoning_parts.append(str(event.get("delta") or event.get("text") or ""))
+            elif event_type == "response.completed" and isinstance(event.get("response"), dict):
+                completed_response = event["response"]
+            continue
+
+        # OpenAI Chat Completions and compatible gateways.
+        for choice in event.get("choices") or []:
+            if not isinstance(choice, dict):
+                continue
+            delta = choice.get("delta") or choice.get("message") or {}
+            if not isinstance(delta, dict):
+                continue
+            piece = delta.get("content")
+            if isinstance(piece, list):
+                piece = "".join(str(p.get("text") or p) if isinstance(p, dict) else str(p) for p in piece)
+            if piece is not None:
+                content_parts.append(str(piece))
+            reasoning_piece = delta.get("reasoning_content") or delta.get("reasoning")
+            if reasoning_piece is not None:
+                reasoning_parts.append(str(reasoning_piece))
+
+    if completed_response:
+        final_content, final_reasoning, final_usage = _parse_llm_response(target_format, completed_response)
+        if not content_parts:
+            content_parts.append(final_content)
+        if not reasoning_parts:
+            reasoning_parts.append(final_reasoning)
+        if not usage:
+            usage = final_usage
+        else:
+            for key, value in final_usage.items():
+                usage.setdefault(key, value)
+
+    return "".join(content_parts).strip(), "\n".join(reasoning_parts).strip(), usage
+
+
+def _read_stream_body(resp: Any) -> bytes:
+    """Consume an SSE response line-by-line, with a test/gateway read fallback."""
+    readline = getattr(resp, "readline", None)
+    if not callable(readline):
+        return resp.read()
+    first = readline()
+    if not isinstance(first, (bytes, bytearray)):
+        # Lightweight response doubles and a few compatible gateways expose only read().
+        return resp.read()
+    chunks = [bytes(first)]
+    for line in resp:
+        if isinstance(line, (bytes, bytearray)):
+            chunks.append(bytes(line))
+    return b"".join(chunks)
+
+
 def build_request_spec(
     model: str,
     messages: List[Dict[str, str]],
@@ -123,6 +236,8 @@ def build_request_spec(
 
         headers = {
             "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+            "Cache-Control": "no-cache",
             "User-Agent": "AstraQuant/8.3 (Claude-Messages)",
             "anthropic-version": "2023-06-01",
         }
@@ -137,6 +252,7 @@ def build_request_spec(
             "model": model,
             "max_tokens": max_tokens,
             "messages": chat_messages,
+            "stream": True,
         }
         if system_chunks:
             payload["system"] = "\n\n".join(system_chunks)
@@ -168,6 +284,8 @@ def build_request_spec(
 
         headers = {
             "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+            "Cache-Control": "no-cache",
             "User-Agent": "AstraQuant/8.3 (OpenAI-Responses)",
         }
         if api_key:
@@ -176,6 +294,7 @@ def build_request_spec(
         payload: Dict[str, Any] = {
             "model": model,
             "input": messages,
+            "stream": True,
         }
         if response_format and response_format.get("type") == "json_object":
             payload["text"] = {"format": {"type": "json_object"}}
@@ -190,6 +309,8 @@ def build_request_spec(
 
         headers = {
             "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+            "Cache-Control": "no-cache",
             "User-Agent": "AstraQuant/8.3 (OpenAI-Chat)",
         }
         if api_key:
@@ -198,6 +319,7 @@ def build_request_spec(
         payload: Dict[str, Any] = {
             "model": model,
             "messages": messages,
+            "stream": True,
         }
 
         # Temperature handling for reasoning models vs normal models
@@ -287,13 +409,13 @@ def _attempt_llm_call(
             and cand.get("api_format", "openai_chat") == "openai_chat"
             and any(kw in err_b.lower() for kw in ["reasoning_effort", "temperature", "response_format", "invalid parameter"])
         ):
-            fb_payload = {"model": cand["model"], "messages": messages}
+            fb_payload = {"model": cand["model"], "messages": messages, "stream": True}
             fb_req = urllib.request.Request(endpoint, data=json.dumps(fb_payload).encode("utf-8"), headers=headers)
             try:
                 with urllib.request.urlopen(fb_req, timeout=effective_timeout) as fb_resp:
                     latency_ms = int((time.perf_counter() - t0) * 1000)
-                    fb_json = json.loads(fb_resp.read().decode("utf-8", errors="replace"))
-                content, reasoning, usage = _parse_llm_response(cand.get("api_format", "openai_chat"), fb_json)
+                    fb_body = _read_stream_body(fb_resp)
+                content, reasoning, usage = _parse_stream_response(cand.get("api_format", "openai_chat"), fb_body)
                 if not content and not reasoning:
                     raise _LLMTransientError(f"模型 {cand['model']} 返回空正文（已自适应去参数重试）")
                 return content, reasoning, usage, latency_ms
@@ -330,13 +452,11 @@ def _attempt_llm_call(
 
     with resp_handle as resp:
         latency_ms = int((time.perf_counter() - t0) * 1000)
-        body_bytes = resp.read()
-        try:
-            res_json = json.loads(body_bytes.decode("utf-8", errors="replace"))
-        except ValueError as exc:
-            raise _LLMTransientError(f"LLM 响应体非 JSON（模型 {cand['model']}）：{str(body_bytes[:160])!r}") from exc
-
-    content, reasoning, usage = _parse_llm_response(cand.get("api_format", "openai_chat"), res_json)
+        body_bytes = _read_stream_body(resp)
+    try:
+        content, reasoning, usage = _parse_stream_response(cand.get("api_format", "openai_chat"), body_bytes)
+    except ValueError as exc:
+        raise _LLMTransientError(f"LLM 响应体非 JSON/SSE（模型 {cand['model']}）：{str(exc)[:200]}") from exc
     if not content and not reasoning:
         raise _LLMTransientError(f"模型 {cand['model']} 返回空正文（HTTP 200 但无 content/reasoning，疑似上游静默失败）")
     return content, reasoning, usage, latency_ms
