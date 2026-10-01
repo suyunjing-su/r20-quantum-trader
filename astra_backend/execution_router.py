@@ -833,6 +833,40 @@ def close_position(symbol: str, *, venue: str = "gate", adapter: Any = None,
     # 平仓**前**抓一份待平仓的事实：归属判定要用它的量/方向，而平完就读不到了
     # （本刀实测踩到：平完再读只剩空仓 ⇒ matched 判不出来 ⇒ 一张腿都没撤）。
     _before_position = _read_symbol_position(ad, asset, pos_side)
+    close_evidence = None
+    if v == "binance":
+        close_evidence = {
+            "schema_version": 1,
+            "observed_at_ms": int(time.time() * 1000),
+            "book_status": "UNOBSERVED",
+            "close_reference_price": None,
+            "close_side": None,
+            "close_spread_bps": None,
+            "close_bid_depth_5_usdt": None,
+            "close_ask_depth_5_usdt": None,
+        }
+        try:
+            pos_side_actual = str((_before_position or {}).get("side") or "").lower()
+            close_side = "SELL" if pos_side_actual == "long" else "BUY" if pos_side_actual == "short" else ""
+            book = ad.fetch_orderbook(asset, depth=5)
+            bids = book.get("bids") if isinstance(book, dict) else None
+            asks = book.get("asks") if isinstance(book, dict) else None
+            if close_side and bids and asks:
+                bid_rows = [(float(row[0]), float(row[1])) for row in bids[:5]]
+                ask_rows = [(float(row[0]), float(row[1])) for row in asks[:5]]
+                best_bid, best_ask = bid_rows[0][0], ask_rows[0][0]
+                mid = (best_bid + best_ask) / 2
+                if mid > 0:
+                    close_evidence.update({
+                        "book_status": "OBSERVED",
+                        "close_side": close_side,
+                        "close_reference_price": best_bid if close_side == "SELL" else best_ask,
+                        "close_spread_bps": (best_ask - best_bid) / mid * 10000,
+                        "close_bid_depth_5_usdt": sum(px * qty for px, qty in bid_rows),
+                        "close_ask_depth_5_usdt": sum(px * qty for px, qty in ask_rows),
+                    })
+        except Exception as evidence_exc:
+            print(f"[binance execution evidence] warn {asset} pre-close book unavailable: {evidence_exc}")
     try:
         kwargs: Dict[str, Any] = {}
         try:
@@ -850,6 +884,15 @@ def close_position(symbol: str, *, venue: str = "gate", adapter: Any = None,
     # 换算成功——旧实现只查异常，把 {"closed": False} 也报成 ok=True。
     if isinstance(data, dict) and data.get("closed") is False:
         return _fail("close", f"{v.upper()} 平仓未受理: {data.get('reason') or data}", venue=v, asset=asset)
+    if close_evidence is not None:
+        close_evidence["order_id"] = str(data.get("order_id") or data.get("id") or "") or None
+        close_evidence["order_status"] = str(data.get("status") or "UNKNOWN")
+        if close_evidence.get("order_id"):
+            try:
+                from scripts.trader.execution_evidence import persist_binance_execution_evidence
+                persist_binance_execution_evidence(close_evidence)
+            except Exception as evidence_exc:
+                print(f"[binance execution evidence] warn close persist skipped: {evidence_exc}")
 
     # ── 平仓后收尾：核验归零 → 撤掉**可证明属于本系统**的该合约保护腿 ──────────
     # 为什么放在这里：遗留腿的产生源头就是"平仓路径从不撤腿"（实测 `close_position`

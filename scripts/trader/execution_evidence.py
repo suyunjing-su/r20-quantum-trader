@@ -14,7 +14,8 @@ def persist_binance_execution_evidence(evidence: Dict[str, Any]) -> bool:
     This is best-effort: an evidence-write failure must never undo an accepted order.
     Missing measurements stay null and are never synthesized as zero.
     """
-    if not isinstance(evidence, dict) or not evidence.get("entry_order_id"):
+    evidence_id = evidence.get("entry_order_id") or evidence.get("order_id")
+    if not isinstance(evidence, dict) or not evidence_id:
         return False
     root = Path(os.environ.get("ASTRA_DATA_DIR") or Path(__file__).resolve().parents[2] / "data")
     path = root / "binance_execution_evidence.json"
@@ -29,7 +30,7 @@ def persist_binance_execution_evidence(evidence: Dict[str, Any]) -> bool:
                     rows = {}
             except (OSError, ValueError):
                 rows = {}
-            rows[str(evidence["entry_order_id"])] = evidence
+            rows[str(evidence_id)] = evidence
             fd, tmp = tempfile.mkstemp(prefix=".binance-evidence-", suffix=".tmp", dir=str(root))
             try:
                 with os.fdopen(fd, "w", encoding="utf-8") as handle:

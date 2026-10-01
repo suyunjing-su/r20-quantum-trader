@@ -36,8 +36,11 @@ class ExecutionEvidenceTests(unittest.TestCase):
             evidence = {"entry_order_id": "123", "spread_bps": None,
                         "book_status": "UNOBSERVED"}
             self.assertTrue(persist_binance_execution_evidence(evidence))
+            close_evidence = {"order_id": "456", "close_reference_price": 99.5}
+            self.assertTrue(persist_binance_execution_evidence(close_evidence))
             path = str(Path(tmp) / "binance_execution_evidence.json")
-            self.assertEqual(load_binance_execution_evidence(path), {"123": evidence})
+            self.assertEqual(load_binance_execution_evidence(path), {
+                "123": evidence, "456": close_evidence})
             with open(path, encoding="utf-8") as handle:
                 self.assertIsNone(json.load(handle)["123"]["spread_bps"])
 

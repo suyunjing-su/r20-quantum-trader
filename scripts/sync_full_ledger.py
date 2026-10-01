@@ -423,6 +423,11 @@ def fetch_binance_closed_trades(environment: str = "demo", tz_bj=None) -> list:
                 "protection_status": "UNOBSERVED",
                 "protection_leg_ids": None,
                 "actual_close_vwap": None,
+                "close_book_status": "UNOBSERVED",
+                "close_spread_bps": None,
+                "close_bid_depth_5_usdt": None,
+                "close_ask_depth_5_usdt": None,
+                "close_reference_price": None,
                 "close_slippage_bps": None,
                 "close_slippage_status": "UNOBSERVED_NO_TRIGGER_REFERENCE",
             }
@@ -453,7 +458,23 @@ def fetch_binance_closed_trades(environment: str = "demo", tz_bj=None) -> list:
                 close_order_id = str(matched.get("orderId") or "")
                 close_fills = [t for t in sym_trades
                                if close_order_id and str(t.get("orderId") or "") == close_order_id]
-                execution_quality["actual_close_vwap"] = measure_fill_vwap(close_fills)["vwap"]
+                close_fill = measure_fill_vwap(close_fills)
+                execution_quality["actual_close_vwap"] = close_fill["vwap"]
+                close_evidence = evidence_by_order.get(close_order_id, {}) if close_order_id else {}
+                if close_evidence:
+                    close_slippage = directional_slippage_bps(
+                        close_evidence.get("close_side"),
+                        close_evidence.get("close_reference_price"), close_fill["vwap"])
+                    execution_quality.update({
+                        "close_book_status": close_evidence.get("book_status", "UNOBSERVED"),
+                        "close_spread_bps": close_evidence.get("close_spread_bps"),
+                        "close_bid_depth_5_usdt": close_evidence.get("close_bid_depth_5_usdt"),
+                        "close_ask_depth_5_usdt": close_evidence.get("close_ask_depth_5_usdt"),
+                        "close_reference_price": close_evidence.get("close_reference_price"),
+                        "close_slippage_bps": close_slippage,
+                        "close_slippage_status": "OBSERVED_TOUCH_BENCHMARK" if close_slippage is not None
+                        else "UNOBSERVED_NO_MATCHED_FILL_OR_REFERENCE",
+                    })
             except Exception:
                 pass
 
