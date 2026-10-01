@@ -893,8 +893,8 @@ def execute_brain_pending_cancels(pending_mgmt_list: List[Any]) -> List[Dict[str
     return log
 
 
-def _resolve_calculation_equity() -> tuple[float | None, str | None, str]:
-    """Resolve settled equity from the configured execution policy, fail-closed."""
+def _resolve_calculation_equity() -> tuple[float | None, str | None, str, float | None]:
+    """Resolve calculation equity and available funds from the configured routing policy."""
     try:
         from astra_backend.exchanges import get_adapter, routing_policy
         from math import isfinite
@@ -905,6 +905,7 @@ def _resolve_calculation_equity() -> tuple[float | None, str | None, str]:
         venues = ("okx", "binance", "gate")
         if routing_enabled:
             values = []
+            available_values = []
             for venue in venues:
                 try:
                     if venue == "okx":
@@ -914,19 +915,30 @@ def _resolve_calculation_equity() -> tuple[float | None, str | None, str]:
                         details = row.get("details") or []
                         usdt = next((d for d in details if str(d.get("ccy", "")).upper() == "USDT"), None)
                         value = float((usdt or {}).get("eq") or (usdt or {}).get("cashBal") or 0.0)
+                        available = (usdt or {}).get("availEq") or (usdt or {}).get("availBal")
                     else:
                         adapter_env = ("sandbox" if venue == "gate" else "demo") if environment == "demo" else "live"
                         snapshot = get_adapter(venue, environment=adapter_env).account_snapshot()
                         value = float(snapshot.get("equity_usdt"))
+                        available = snapshot.get("available_usdt")
                     if isfinite(value) and value >= 0:
                         values.append(value)
+                        try:
+                            available_value = float(available)
+                            if isfinite(available_value) and available_value >= 0:
+                                available_values.append(available_value)
+                        except (TypeError, ValueError):
+                            pass
                 except Exception:
                     continue
-            return (round(sum(values), 2), None, "multi_venue_display_equity") if values else (None, None, "unknown_display_equity")
+            if not values:
+                return None, None, "unknown_display_equity", None
+            return (round(sum(values), 2), None, "multi_venue_display_equity",
+                    round(sum(available_values), 2) if available_values else None)
 
         venue = routing_policy.active_execution_venue(environment)
         if venue is None:
-            return None, None, "unknown_active_venue"
+            return None, None, "unknown_active_venue", None
         if venue == "okx":
             from scripts import okx_rest
             rows = okx_rest.balances()
@@ -936,15 +948,22 @@ def _resolve_calculation_equity() -> tuple[float | None, str | None, str]:
             raw = (usdt or {}).get("cashBal")
             if raw in (None, ""):
                 raw = (usdt or {}).get("eq")
+            available = (usdt or {}).get("availEq") or (usdt or {}).get("availBal")
         else:
             adapter_env = ("sandbox" if venue == "gate" else "demo") if environment == "demo" else "live"
             snapshot = get_adapter(venue, environment=adapter_env).account_snapshot()
             raw = snapshot.get("settled_equity_usdt")
+            available = snapshot.get("available_usdt")
         value = float(raw)
-        return (round(value, 2), venue, "single_open_venue_settled_equity") if isfinite(value) and value >= 0 else (None, venue, "unknown_settled_equity")
+        available_value = float(available) if available not in (None, "") else None
+        if available_value is not None and (not isfinite(available_value) or available_value < 0):
+            available_value = None
+        if isfinite(value) and value >= 0:
+            return round(value, 2), venue, "single_open_venue_settled_equity", available_value
+        return None, venue, "unknown_settled_equity", available_value
     except Exception as exc:
         print(f"[AI Brain Batch] calculation equity unavailable: {type(exc).__name__}: {exc}")
-        return None, None, "unknown_calculation_equity"
+        return None, None, "unknown_calculation_equity", None
 
 
 def execute_batch_ai_brain_cycle(
@@ -952,6 +971,7 @@ def execute_batch_ai_brain_cycle(
     active_positions_detail: List[Dict[str, Any]] = None,
     usdt_available: float = None,
     policy_snapshot: Optional[Dict[str, Any]] = None,
+    calculation_equity_info: tuple[float | None, str | None, str, float | None] | None = None,
 ) -> Optional[Dict[str, Any]]:
     """Fetch all six crypto symbols, call the LLM once, then persist an auditable result."""
     base_url, api_key = get_cpa_client_config()
@@ -1038,12 +1058,19 @@ def execute_batch_ai_brain_cycle(
         packages=packages,
         time_str=time_str    )
 
-    calculation_equity, calculation_venue, calculation_basis = _resolve_calculation_equity()
+    (calculation_equity, calculation_venue, calculation_basis, calculation_available) = (
+        calculation_equity_info if calculation_equity_info is not None
+        else _resolve_calculation_equity())
     runtime_context = {
         "calculation_equity": calculation_equity,
         "calculation_venue": calculation_venue,
         "calculation_basis": calculation_basis,
+        "calculation_available": calculation_available,
     }
+    if calculation_available is not None:
+        usdt_available = calculation_available
+    else:
+        usdt_available = None
     prompt = construct_full_market_prompt(
         packages, pos_summary, positions_context,
         pending_orders_detail=pending_orders_list,

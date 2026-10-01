@@ -544,16 +544,31 @@ def scan_risk_gates_and_ai_brain(*,
         query_positions,
         read_cycle_health,
         real_pos_dict,
-        save_trackers):
+        save_trackers,
+        calculation_equity_info=None,
+        risk_values=None):
     """相位 4 前段：熔断判定 + 单标的保证金上限自适应 + 主脑批量扫描 + 池可信闸。
 
     段内不动控制流（无 return/break）：`executed_actions` 由**原地 append** 回传
     （故只入参、不返回）；`brain_cache` 在段内顶层初始化为 `{}` ⇒ 必然绑定。
     4 项输出见调用点解包。
     """
-    cb_active, cb_reason = is_circuit_breaker_active(usdt_available)
-    # 单标的累计保证金上限按可用余额自适应，与提示词 {{risk_budget}} 同口径
-    ASSET_MARGIN_CAP = effective_single_asset_margin(usdt_available)
+    risk_equity = (calculation_equity_info[0]
+                   if isinstance(calculation_equity_info, (tuple, list)) and calculation_equity_info
+                   else usdt_available)
+    try:
+        cb_active, cb_reason = is_circuit_breaker_active(
+            risk_equity, risk_values=risk_values) if isinstance(risk_values, dict) else is_circuit_breaker_active(risk_equity)
+    except TypeError:
+        # Preserve existing injected test/extension callbacks that accept one argument.
+        cb_active, cb_reason = is_circuit_breaker_active(risk_equity)
+    if isinstance(risk_values, dict):
+        ratio = float(risk_values.get("ASTRA_SINGLE_ASSET_EQUITY_RATIO", 0.30) or 0.0)
+        absolute = float(risk_values.get("ASTRA_MAX_SINGLE_ASSET_MARGIN_USDT", 0.0) or 0.0)
+        ratio_cap = max(round(float(risk_equity or 0.0) * ratio, 2), 1.0) if risk_equity and risk_equity > 0 else 0.0
+        ASSET_MARGIN_CAP = (min(absolute, ratio_cap) if ratio_cap > 0 else absolute) if absolute > 0 else ratio_cap
+    else:
+        ASSET_MARGIN_CAP = effective_single_asset_margin(usdt_available)
 
     brain_cache = {}
     # One LLM call covers the full six-instrument universe and all active positions.
@@ -568,7 +583,16 @@ def scan_risk_gates_and_ai_brain(*,
             # 汇入多所（Binance / Gate）在管持仓，形成三所平权持仓全景。
             # 审计(2026-09-13)：必须复用 1a 已冻结的周期快照（零重复出网）。
             _merge_cross_venue_positions(active_pos_list, xv_positions_by_venue, all_factors)
-            brain_cache = execute_batch_ai_brain_cycle(pos_desc, active_pos_list, usdt_available=usdt_available) or {}
+            try:
+                brain_cache = execute_batch_ai_brain_cycle(
+                    pos_desc, active_pos_list, usdt_available=usdt_available,
+                    calculation_equity_info=calculation_equity_info) or {}
+            except TypeError as _compat_exc:
+                if "calculation_equity_info" not in str(_compat_exc):
+                    raise
+                # Older injected callbacks used by extensions/tests may not yet accept the snapshot.
+                brain_cache = execute_batch_ai_brain_cycle(
+                    pos_desc, active_pos_list, usdt_available=usdt_available) or {}
             if brain_cache:
                 refreshed_ok, refreshed_positions, refreshed_error = query_positions()
                 if not refreshed_ok:

@@ -91,7 +91,8 @@ def check_black_swan_sentinel(*, fetch_candles_direct, news_sentiment_file: str)
 
 def is_circuit_breaker_active(usdt_available: float = None, *, circuit_breaker_file: str,
                               ledger_json_file: str, current_environment,
-                              effective_daily_loss_limit, sentinel_check):
+                              effective_daily_loss_limit, sentinel_check,
+                              risk_values=None):
     # 1. Black Swan Sentinel Check
     # ⚠️ 第八十一刀：`sentinel_check` 由门面壳传入**门面全局
     # `check_black_swan_sentinel`**（必填，非默认）—— 既有活体接线测试
@@ -148,7 +149,13 @@ def is_circuit_breaker_active(usdt_available: float = None, *, circuit_breaker_f
             except Exception:
                 _mode = ""  # 环境不可判 → 保守全计（宁停不漏）
             today_pnl = ledger_daily_closed_pnl(ledger, _mode, today_str)
-            _loss_cap = effective_daily_loss_limit(usdt_available)
+            if isinstance(risk_values, dict):
+                ratio = max(float(risk_values.get("ASTRA_DAILY_LOSS_EQUITY_RATIO", 0.0) or 0.0), 0.0)
+                absolute = max(float(risk_values.get("ASTRA_MAX_DAILY_LOSS_USDT", 0.0) or 0.0), 0.0)
+                equity_cap = max(float(usdt_available or 0.0) * ratio, 0.0)
+                _loss_cap = min(absolute, equity_cap) if absolute > 0 and ratio > 0 else (absolute or equity_cap)
+            else:
+                _loss_cap = effective_daily_loss_limit(usdt_available)
             if today_pnl < -_loss_cap:
                 return True, f"今日累计回撤 ({today_pnl:.2f}U) 触及单日最大风控熔断限额 ({_loss_cap}U｜按可用余额自适应)"
         except Exception as e:

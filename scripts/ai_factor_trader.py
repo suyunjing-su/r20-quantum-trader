@@ -257,12 +257,14 @@ try:
     sys.path.append(os.path.join(WORKSPACE_DIR, "scripts"))
     from db_manager import record_trade_sqlite
     from qq_notifier import notify_trade_open, notify_trade_close
-    from ai_brain_trader import execute_batch_ai_brain_cycle, get_latest_ai_decision, read_cycle_health
+    from ai_brain_trader import (execute_batch_ai_brain_cycle, get_latest_ai_decision,
+                                 read_cycle_health, _resolve_calculation_equity)
 except Exception:
     record_trade_sqlite = None
     notify_trade_open = None
     notify_trade_close = None
     execute_batch_ai_brain_cycle = None
+    _resolve_calculation_equity = lambda: (None, None, "unknown_calculation_equity", None)
     get_latest_ai_decision = None
     read_cycle_health = None
 
@@ -615,7 +617,7 @@ def check_black_swan_sentinel() -> Tuple[bool, str]:
         news_sentiment_file=NEWS_SENTIMENT_FILE)
 
 
-def is_circuit_breaker_active(usdt_available: float = None):
+def is_circuit_breaker_active(usdt_available: float = None, *, risk_values=None):
     """壳（第八十一刀搬至 `scripts/trader/circuit_guard.py`，同上注入形状）。"""
     # 注意：行情/情绪文件的注入**不在这里** —— 基线 breaker 经由门面全局
     # sentinel 间接使用它们；本壳把 sentinel 本身注入（同一 patch 面、更短的路径）。
@@ -625,8 +627,8 @@ def is_circuit_breaker_active(usdt_available: float = None):
         ledger_json_file=LEDGER_JSON_FILE,
         current_environment=current_environment,
         effective_daily_loss_limit=effective_daily_loss_limit,
-        # 活体接线测试的 patch 面（aft.check_black_swan_sentinel）经此保留
-        sentinel_check=check_black_swan_sentinel)
+        sentinel_check=check_black_swan_sentinel,
+        risk_values=risk_values)
 
 
 
@@ -1180,6 +1182,23 @@ def execute_portfolio():
         return None
     (_xv_total, active_pos_count, all_positions, entries_blocked, long_count, pending_inst_ids, real_pos_dict, reserved_long_count, reserved_short_count, reserved_slot_count, short_count, usdt_available, xv_positions_by_venue) = _phase1
 
+    # 资金区间选择与本周期余额共用同一份路由/账户快照，避免 AI 与执行风控各自取不同账户。
+    calculation_equity_info = _resolve_calculation_equity()
+    calculation_equity, calculation_venue, calculation_basis, calculation_available = calculation_equity_info
+    if calculation_equity is None or calculation_available is None:
+        usdt_available = 0.0  # 缺失≠0：执行预算用零作 fail-closed 闸，原始未知仍保留在 info。
+    else:
+        usdt_available = calculation_available
+    from astra_backend.risk_config import current_values as _risk_values_for_equity
+    cycle_risk_values = _risk_values_for_equity(calculation_equity)
+    _pool_capacity = max(len(TARGET_INSTRUMENTS or []), 1)
+    _configured_positions = int(cycle_risk_values.get("ASTRA_MAX_CONCURRENT_POSITIONS", 0) or 0)
+    cycle_max_positions = (_pool_capacity if _configured_positions <= 0
+                           else max(1, min(_configured_positions, _pool_capacity)))
+    cycle_max_same_direction = max(1, min(
+        int(cycle_risk_values.get("ASTRA_MAX_SAME_DIRECTION_POSITIONS", 3) or 1),
+        cycle_max_positions))
+
     # 2. Parallel fetch for the configured crypto universe
     all_factors, executed_actions, trackers = fetch_universe_and_manage_positions(
         all_positions=all_positions,
@@ -1206,8 +1225,10 @@ def execute_portfolio():
         timestamp_full=timestamp_full,
         trackers=trackers,
         usdt_available=usdt_available,
+        calculation_equity_info=calculation_equity_info,
+        risk_values=cycle_risk_values,
         xv_positions_by_venue=xv_positions_by_venue,
-        MAX_CONCURRENT_POSITIONS=MAX_CONCURRENT_POSITIONS,
+        MAX_CONCURRENT_POSITIONS=cycle_max_positions,
         _collect_okx_position_payloads=_collect_okx_position_payloads,
         _merge_cross_venue_positions=_merge_cross_venue_positions,
         effective_single_asset_margin=effective_single_asset_margin,
@@ -1222,6 +1243,20 @@ def execute_portfolio():
         save_trackers=save_trackers    )
 
     if not cb_active and pool_is_trustworthy():
+        _cycle_margin_ratio = float(cycle_risk_values.get("ASTRA_MAX_MARGIN_EQUITY_RATIO", 0.0) or 0.0)
+        _cycle_asset_margin_cap = float(cycle_risk_values.get("ASTRA_MAX_SINGLE_ASSET_MARGIN_USDT", 0.0) or 0.0)
+
+        def _cycle_order_margin_gate(planned_margin, *, size, price, ct_val, leverage, usdt_available):
+            return _order_margin_gate_impl(
+                planned_margin, size=size, price=price, ct_val=ct_val,
+                leverage=leverage, usdt_available=usdt_available,
+                max_single_asset_margin=_cycle_asset_margin_cap,
+                max_margin_equity_ratio=_cycle_margin_ratio)
+
+        def _cycle_equity_margin_cap(equity):
+            return _equity_margin_cap_impl(
+                equity, max_margin_equity_ratio=_cycle_margin_ratio)
+
         execute_entry_scan(
             all_factors=all_factors,
             brain_cache=brain_cache,
@@ -1236,9 +1271,9 @@ def execute_portfolio():
             reserved_short_count=reserved_short_count,
             reserved_slot_count=reserved_slot_count,
             ASSET_CLASS_PROFILES=ASSET_CLASS_PROFILES,
-            MAX_CONCURRENT_POSITIONS=MAX_CONCURRENT_POSITIONS,
+            MAX_CONCURRENT_POSITIONS=cycle_max_positions,
             MAX_LEVERAGE=MAX_LEVERAGE,
-            MAX_SAME_DIRECTION_POSITIONS=MAX_SAME_DIRECTION_POSITIONS,
+            MAX_SAME_DIRECTION_POSITIONS=cycle_max_same_direction,
             MAX_SCALE_IN_COUNT=MAX_SCALE_IN_COUNT,
             MIN_ENTRY_CONFIDENCE=MIN_ENTRY_CONFIDENCE,
             MIN_LEVERAGE=MIN_LEVERAGE,
@@ -1248,7 +1283,7 @@ def execute_portfolio():
             clamp_ai_leverage=clamp_ai_leverage,
             entry_action_message=entry_action_message,
             entry_failure_message=entry_failure_message,
-            equity_margin_cap=equity_margin_cap,
+            equity_margin_cap=_cycle_equity_margin_cap,
             evaluate_asset_signal=evaluate_asset_signal,
             instrument_profile=instrument_profile,
             is_tradfi_market_liquid=is_tradfi_market_liquid,
@@ -1256,7 +1291,7 @@ def execute_portfolio():
             max_size_within_margin=max_size_within_margin,
             normalize_bracket_prices=normalize_bracket_prices,
             notify_trade_open=notify_trade_open,
-            order_margin_gate=order_margin_gate,
+            order_margin_gate=_cycle_order_margin_gate,
             pyramiding_gate=pyramiding_gate,
             quantize_size=quantize_size,
             resolve_entry_prices=resolve_entry_prices,
