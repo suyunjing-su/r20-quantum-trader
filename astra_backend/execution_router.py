@@ -564,11 +564,15 @@ def open_protected_position(decision: Dict[str, Any], *,
     except Exception as exc:
         return _fail("leverage", f"设置杠杆失败: {exc}", venue=venue)
 
-    # 仅采集可核验的 Binance 入场前盘口证据；采集失败不阻断交易，字段保持 None。
+    # Binance/Gate 发单前采集公开盘口证据；采集失败不阻断交易，字段保持 None。
     execution_evidence = None
-    if venue == "binance":
+    if venue in ("binance", "gate"):
         execution_evidence = {
             "schema_version": 1,
+            "venue": venue,
+            "evidence_type": "entry",
+            "asset": asset,
+            "position_side": side,
             "observed_at_ms": int(time.time() * 1000),
             "signal_price": float(entry) if entry and float(entry) > 0 else None,
             "book_status": "UNOBSERVED",
@@ -592,8 +596,8 @@ def open_protected_position(decision: Dict[str, Any], *,
                     execution_evidence.update({
                         "book_status": "OBSERVED",
                         "spread_bps": (best_ask - best_bid) / mid * 10000,
-                        "bid_depth_5_usdt": sum(px * qty for px, qty in bid_rows),
-                        "ask_depth_5_usdt": sum(px * qty for px, qty in ask_rows),
+                        "bid_depth_5_usdt": sum(px * qty * float(spec.ct_val or 1.0) for px, qty in bid_rows),
+                        "ask_depth_5_usdt": sum(px * qty * float(spec.ct_val or 1.0) for px, qty in ask_rows),
                     })
                     want_buy = action in ("BUY_LONG", "BUY", "LONG")
                     levels = ask_rows if want_buy else bid_rows
@@ -612,7 +616,7 @@ def open_protected_position(decision: Dict[str, Any], *,
                         reference = best_ask if want_buy else best_bid
                         execution_evidence["estimated_slippage_bps"] = abs(vwap - reference) / reference * 10000
         except Exception as evidence_exc:
-            print(f"[binance execution evidence] warn {asset} pre-entry book unavailable: {evidence_exc}")
+            print(f"[{venue} execution evidence] warn {asset} pre-entry book unavailable: {evidence_exc}")
 
     # 入场单（按模式发市价单或限价单，系统默认市价单）
     order_mode = str(decision.get("order_mode") or os.getenv("ASTRA_ORDER_MODE", "market")).strip().lower()
@@ -834,9 +838,13 @@ def close_position(symbol: str, *, venue: str = "gate", adapter: Any = None,
     # （本刀实测踩到：平完再读只剩空仓 ⇒ matched 判不出来 ⇒ 一张腿都没撤）。
     _before_position = _read_symbol_position(ad, asset, pos_side)
     close_evidence = None
-    if v == "binance":
+    if v in ("binance", "gate"):
         close_evidence = {
             "schema_version": 1,
+            "venue": v,
+            "evidence_type": "close",
+            "asset": asset,
+            "position_side": str((_before_position or {}).get("side") or "").lower(),
             "observed_at_ms": int(time.time() * 1000),
             "book_status": "UNOBSERVED",
             "close_reference_price": None,
@@ -889,8 +897,8 @@ def close_position(symbol: str, *, venue: str = "gate", adapter: Any = None,
         close_evidence["order_status"] = str(data.get("status") or "UNKNOWN")
         if close_evidence.get("order_id"):
             try:
-                from scripts.trader.execution_evidence import persist_binance_execution_evidence
-                persist_binance_execution_evidence(close_evidence)
+                from scripts.trader.execution_evidence import persist_venue_execution_evidence
+                persist_venue_execution_evidence(close_evidence)
             except Exception as evidence_exc:
                 print(f"[binance execution evidence] warn close persist skipped: {evidence_exc}")
 

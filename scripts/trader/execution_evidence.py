@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 
-def persist_binance_execution_evidence(evidence: Dict[str, Any]) -> bool:
+def persist_venue_execution_evidence(evidence: Dict[str, Any]) -> bool:
     """Persist observed entry evidence keyed by the exchange order id.
 
     This is best-effort: an evidence-write failure must never undo an accepted order.
@@ -18,7 +18,7 @@ def persist_binance_execution_evidence(evidence: Dict[str, Any]) -> bool:
     if not isinstance(evidence, dict) or not evidence_id:
         return False
     root = Path(os.environ.get("ASTRA_DATA_DIR") or Path(__file__).resolve().parents[2] / "data")
-    path = root / "binance_execution_evidence.json"
+    path = root / "venue_execution_evidence.json"
     try:
         from astra_backend.file_locks import file_lock
         root.mkdir(parents=True, exist_ok=True)
@@ -47,13 +47,40 @@ def persist_binance_execution_evidence(evidence: Dict[str, Any]) -> bool:
         return False
 
 
-def load_binance_execution_evidence(path: str) -> Dict[str, Any]:
+def load_venue_execution_evidence(path: str) -> Dict[str, Any]:
     try:
         with open(path, "r", encoding="utf-8") as handle:
             rows = json.load(handle)
         return rows if isinstance(rows, dict) else {}
     except (OSError, ValueError):
         return {}
+
+
+def match_timed_execution_evidence(rows: Dict[str, Any], *, venue: str, asset: str,
+                                   position_side: str, evidence_type: str,
+                                   target_time_ms: int, max_delta_ms: int = 20 * 60 * 1000) -> Dict[str, Any]:
+    """Return a unique nearest lifecycle snapshot; ambiguous matches stay unobserved."""
+    candidates = []
+    for row in (rows or {}).values():
+        if not isinstance(row, dict):
+            continue
+        if (str(row.get("venue") or "").lower() != str(venue).lower()
+                or str(row.get("asset") or "").upper() != str(asset).upper()
+                or str(row.get("position_side") or "").lower() != str(position_side).lower()
+                or str(row.get("evidence_type") or "").lower() != str(evidence_type).lower()):
+            continue
+        try:
+            delta = abs(int(row.get("observed_at_ms") or 0) - int(target_time_ms))
+        except (TypeError, ValueError):
+            continue
+        if delta <= max_delta_ms:
+            candidates.append((delta, row))
+    if not candidates:
+        return {}
+    candidates.sort(key=lambda item: item[0])
+    if len(candidates) > 1 and candidates[0][0] == candidates[1][0]:
+        return {}
+    return candidates[0][1]
 
 
 def measure_fill_vwap(trades: list) -> Dict[str, Any]:

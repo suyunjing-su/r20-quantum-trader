@@ -840,6 +840,9 @@ class FetchGateClosedTradesTests(unittest.TestCase):
         self.assertEqual(row["open_time"], "2026-09-01 10:00:00")
         self.assertEqual(row["environment"], "demo")
         self.assertEqual(row["account_mode"], "DEMO")
+        self.assertEqual(row["execution_quality"]["entry_spread_bps"], None)
+        self.assertEqual(row["execution_quality"]["close_slippage_status"],
+                         "UNOBSERVED_NO_MATCHED_REFERENCE")
 
     def test_the_live_environment_is_labelled_live(self):
         ad = _FakeSigned({

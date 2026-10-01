@@ -7,9 +7,9 @@ from unittest.mock import patch
 
 from scripts.trader.execution_evidence import (
     directional_slippage_bps,
-    load_binance_execution_evidence,
+    load_venue_execution_evidence,
     measure_fill_vwap,
-    persist_binance_execution_evidence,
+    persist_venue_execution_evidence,
 )
 
 
@@ -31,15 +31,45 @@ class ExecutionEvidenceTests(unittest.TestCase):
         self.assertAlmostEqual(directional_slippage_bps("BUY", 100, 101), 100)
         self.assertAlmostEqual(directional_slippage_bps("SELL", 100, 99), 100)
 
+    def test_timed_match_requires_venue_asset_side_and_unique_nearest(self):
+        from scripts.trader.execution_evidence import match_timed_execution_evidence
+        rows = {
+            "entry-1": {"venue": "gate", "asset": "BTC", "position_side": "long",
+                        "evidence_type": "entry", "observed_at_ms": 1000, "key": "first"},
+            "entry-2": {"venue": "gate", "asset": "BTC", "position_side": "long",
+                        "evidence_type": "entry", "observed_at_ms": 2000, "key": "second"},
+            "other": {"venue": "binance", "asset": "BTC", "position_side": "long",
+                      "evidence_type": "entry", "observed_at_ms": 1500, "key": "wrong venue"},
+        }
+        matched = match_timed_execution_evidence(
+            rows, venue="gate", asset="BTC", position_side="long",
+            evidence_type="entry", target_time_ms=1900, max_delta_ms=1000)
+        self.assertEqual(matched.get("key"), "second")
+        self.assertEqual(match_timed_execution_evidence(
+            rows, venue="gate", asset="BTC", position_side="short",
+            evidence_type="entry", target_time_ms=1900, max_delta_ms=1000), {})
+
+    def test_timed_match_ambiguous_tie_is_not_assigned(self):
+        from scripts.trader.execution_evidence import match_timed_execution_evidence
+        rows = {
+            "a": {"venue": "gate", "asset": "BTC", "position_side": "long",
+                  "evidence_type": "entry", "observed_at_ms": 900},
+            "b": {"venue": "gate", "asset": "BTC", "position_side": "long",
+                  "evidence_type": "entry", "observed_at_ms": 1100},
+        }
+        self.assertEqual(match_timed_execution_evidence(
+            rows, venue="gate", asset="BTC", position_side="long",
+            evidence_type="entry", target_time_ms=1000), {})
+
     def test_evidence_sidecar_persists_by_exchange_order_id(self):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"ASTRA_DATA_DIR": tmp}):
             evidence = {"entry_order_id": "123", "spread_bps": None,
                         "book_status": "UNOBSERVED"}
-            self.assertTrue(persist_binance_execution_evidence(evidence))
+            self.assertTrue(persist_venue_execution_evidence(evidence))
             close_evidence = {"order_id": "456", "close_reference_price": 99.5}
-            self.assertTrue(persist_binance_execution_evidence(close_evidence))
-            path = str(Path(tmp) / "binance_execution_evidence.json")
-            self.assertEqual(load_binance_execution_evidence(path), {
+            self.assertTrue(persist_venue_execution_evidence(close_evidence))
+            path = str(Path(tmp) / "venue_execution_evidence.json")
+            self.assertEqual(load_venue_execution_evidence(path), {
                 "123": evidence, "456": close_evidence})
             with open(path, encoding="utf-8") as handle:
                 self.assertIsNone(json.load(handle)["123"]["spread_bps"])

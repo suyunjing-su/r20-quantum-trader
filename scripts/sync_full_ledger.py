@@ -433,9 +433,9 @@ def fetch_binance_closed_trades(environment: str = "demo", tz_bj=None) -> list:
             }
             try:
                 from scripts.trader.execution_evidence import (
-                    directional_slippage_bps, load_binance_execution_evidence, measure_fill_vwap)
-                evidence_file = os.path.join(DATA_DIR, "binance_execution_evidence.json")
-                evidence_by_order = load_binance_execution_evidence(evidence_file)
+                    directional_slippage_bps, load_venue_execution_evidence, measure_fill_vwap)
+                evidence_file = os.path.join(DATA_DIR, "venue_execution_evidence.json")
+                evidence_by_order = load_venue_execution_evidence(evidence_file)
                 matched_entry = open_candidates[-1] if open_candidates else {}
                 entry_order_id = str(matched_entry.get("orderId") or "")
                 entry_evidence = evidence_by_order.get(entry_order_id, {}) if entry_order_id else {}
@@ -557,6 +557,18 @@ def fetch_gate_closed_trades(environment: str = "sandbox", tz_bj=None) -> list:
         except Exception:
             pass
 
+        gate_trades_by_contract = {}
+        for contract in sorted({str(r.get("contract") or "").upper() for r in close_rows
+                                if r.get("contract")}):
+            try:
+                rows = ad_gate.signed_request(
+                    "GET", "/api/v4/futures/usdt/my_trades",
+                    params={"contract": contract, "limit": 1000})
+                gate_trades_by_contract[contract] = rows if isinstance(rows, list) else []
+            except Exception as trade_exc:
+                gate_trades_by_contract[contract] = []
+                print(f"[sync_full_ledger] warn Gate 成交明细不可读 {contract}: {trade_exc}")
+
         for r in close_rows:
             close_id = str(r.get("id") or "")
             contract = str(r.get("contract", "")).upper()
@@ -606,6 +618,130 @@ def fetch_gate_closed_trades(environment: str = "sandbox", tz_bj=None) -> list:
             except Exception:
                 pass
 
+            execution_quality = {
+                "schema_version": 1,
+                "entry_book_status": "UNOBSERVED",
+                "entry_spread_bps": None,
+                "entry_bid_depth_5_usdt": None,
+                "entry_ask_depth_5_usdt": None,
+                "estimated_entry_slippage_bps": None,
+                "actual_entry_vwap": None,
+                "entry_slippage_bps": None,
+                "protection_status": "UNOBSERVED",
+                "protection_leg_ids": None,
+                "actual_close_vwap": close_px if close_px > 0 else None,
+                "close_book_status": "UNOBSERVED",
+                "close_spread_bps": None,
+                "close_bid_depth_5_usdt": None,
+                "close_ask_depth_5_usdt": None,
+                "close_reference_price": None,
+                "close_slippage_bps": None,
+                "close_slippage_status": "UNOBSERVED_NO_MATCHED_REFERENCE",
+            }
+            try:
+                from scripts.trader.execution_evidence import (
+                    directional_slippage_bps, load_venue_execution_evidence, measure_fill_vwap)
+                evidence_by_order = load_venue_execution_evidence(
+                    os.path.join(DATA_DIR, "venue_execution_evidence.json"))
+                position_side = "long" if side == "多" else "short"
+                side_sign = 1 if position_side == "long" else -1
+                opened_ms = first_open * 1000 if first_open > 0 else 0
+                closed_ms = time_sec * 1000
+                entry_evidence, close_evidence = {}, {}
+                contract_trades = gate_trades_by_contract.get(contract, [])
+                open_fills, close_fills = [], []
+                open_order_ids, close_order_ids = set(), set()
+                for trade in contract_trades:
+                    try:
+                        trade_ms = int(float(trade.get("create_time") or 0) * 1000)
+                        trade_size = float(trade.get("size") or 0)
+                        close_size = float(trade.get("close_size") or 0)
+                        trade_price = float(trade.get("price") or 0)
+                    except (TypeError, ValueError):
+                        continue
+                    if trade_ms <= 0 or trade_price <= 0 or abs(trade_size) <= 0:
+                        continue
+                    if (opened_ms and abs(trade_ms - opened_ms) <= 10_000
+                            and trade_size * side_sign > 0):
+                        opening_qty = max(0.0, abs(trade_size) - abs(close_size))
+                        if opening_qty > 0:
+                            open_fills.append({"qty": opening_qty, "price": trade_price})
+                            if trade.get("order_id"):
+                                open_order_ids.add(str(trade.get("order_id")))
+                    if (abs(trade_ms - closed_ms) <= 10_000 and trade_size * side_sign < 0
+                            and abs(close_size) > 0):
+                        close_fills.append({"qty": min(abs(trade_size), abs(close_size)),
+                                            "price": trade_price})
+                        if trade.get("order_id"):
+                            close_order_ids.add(str(trade.get("order_id")))
+                if len(open_order_ids) == 1:
+                    entry_order_id = next(iter(open_order_ids))
+                    entry_evidence = evidence_by_order.get(entry_order_id, {})
+                    open_fills = []
+                    for trade in contract_trades:
+                        if str(trade.get("order_id") or "") != entry_order_id:
+                            continue
+                        try:
+                            trade_ms = int(float(trade.get("create_time") or 0) * 1000)
+                            trade_size = float(trade.get("size") or 0)
+                            close_size = float(trade.get("close_size") or 0)
+                            trade_price = float(trade.get("price") or 0)
+                        except (TypeError, ValueError):
+                            continue
+                        if (opened_ms <= trade_ms <= closed_ms and trade_size * side_sign > 0
+                                and trade_price > 0):
+                            opening_qty = max(0.0, abs(trade_size) - abs(close_size))
+                            if opening_qty > 0:
+                                open_fills.append({"qty": opening_qty, "price": trade_price})
+                if len(close_order_ids) == 1:
+                    close_order_id = next(iter(close_order_ids))
+                    close_evidence = evidence_by_order.get(close_order_id, {})
+                    close_fills = []
+                    for trade in contract_trades:
+                        if str(trade.get("order_id") or "") != close_order_id:
+                            continue
+                        try:
+                            trade_size = float(trade.get("size") or 0)
+                            close_size = float(trade.get("close_size") or 0)
+                            trade_price = float(trade.get("price") or 0)
+                        except (TypeError, ValueError):
+                            continue
+                        if trade_size * side_sign < 0 and abs(close_size) > 0 and trade_price > 0:
+                            close_fills.append({"qty": min(abs(trade_size), abs(close_size)),
+                                                "price": trade_price})
+                entry_vwap = measure_fill_vwap(open_fills)
+                close_vwap = measure_fill_vwap(close_fills)
+                execution_quality["actual_entry_vwap"] = entry_vwap["vwap"]
+                execution_quality["actual_close_vwap"] = close_vwap["vwap"]
+                if entry_evidence:
+                    execution_quality.update({
+                        "entry_book_status": entry_evidence.get("book_status", "UNOBSERVED"),
+                        "entry_spread_bps": entry_evidence.get("spread_bps"),
+                        "entry_bid_depth_5_usdt": entry_evidence.get("bid_depth_5_usdt"),
+                        "entry_ask_depth_5_usdt": entry_evidence.get("ask_depth_5_usdt"),
+                        "estimated_entry_slippage_bps": entry_evidence.get("estimated_slippage_bps"),
+                        "protection_status": entry_evidence.get("protection_status", "UNOBSERVED"),
+                        "protection_leg_ids": entry_evidence.get("protection_leg_ids"),
+                        "entry_slippage_bps": directional_slippage_bps(
+                            position_side, entry_evidence.get("signal_price"), entry_vwap["vwap"]),
+                    })
+                if close_evidence:
+                    close_slippage = directional_slippage_bps(
+                        close_evidence.get("close_side"), close_evidence.get("close_reference_price"),
+                        close_vwap["vwap"])
+                    execution_quality.update({
+                        "close_book_status": close_evidence.get("book_status", "UNOBSERVED"),
+                        "close_spread_bps": close_evidence.get("close_spread_bps"),
+                        "close_bid_depth_5_usdt": close_evidence.get("close_bid_depth_5_usdt"),
+                        "close_ask_depth_5_usdt": close_evidence.get("close_ask_depth_5_usdt"),
+                        "close_reference_price": close_evidence.get("close_reference_price"),
+                        "close_slippage_bps": close_slippage,
+                        "close_slippage_status": "OBSERVED_TOUCH_BENCHMARK" if close_slippage is not None
+                        else "UNOBSERVED_NO_MATCHED_FILL_OR_REFERENCE",
+                    })
+            except Exception:
+                pass
+
             out.append({
                 "id": f"gate_closed_{close_id}_{time_sec}",
                 "inst": base,
@@ -634,6 +770,7 @@ def fetch_gate_closed_trades(environment: str = "sandbox", tz_bj=None) -> list:
                 "status": "closed",
                 "exit_reason": "🎯 目标止盈达成" if net_pnl > 0 else "🛑 触发云端止损",
                 "signal_snapshot": gt_snap,
+                "execution_quality": execution_quality,
             })
     except Exception as exc:
         _mark("gate", "failed", reason=str(exc)[:200])
