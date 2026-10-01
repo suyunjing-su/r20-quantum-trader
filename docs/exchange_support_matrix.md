@@ -109,7 +109,7 @@
 | 大户多空比 | ✅ topLongShortPositionRatio | ✅ contract_stats top_lsr_* | 证据行双所大户比 + 分歧标注 | ✅ |
 | Taker 主动比 | ✅ takerlongshortRatio | ✅ lsr_taker | 未消费（W4 候选，OKX 同项已在主链） | — |
 | 清算数据 | ❌ 合约端点无免费等价 | ✅ liq_*（contract_stats 聚合） | 未消费（W2 清算放量雷达；逐笔流需签名——评估为不做） | — |
-| OI（现值/历史） | ✅ openInterest / openInterestHist | ✅ open_interest(_value) | 未消费（主链 OI 用 OKX rubik；W4 多源互证候选） | — |
+| OI（现值/历史） | ✅ openInterest / openInterestHist | ✅ open_interest(_value) | 跨所证据行消费现值（主链 OI 仍用 OKX rubik） | — |
 | 新币上线公告 | ✅ CMS bapi（实测 2253 篇，免费） | ❌ 网页 403（不做抓取） | 未消费（W3 先做人工读小工具） | — |
 
 三所中位数 oracle（防插针）：所需三所现价端点全部免费可用，门禁改造在 W2 排期。

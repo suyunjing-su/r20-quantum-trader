@@ -370,7 +370,7 @@ class CryptoOnlySourceTests(_Base, unittest.TestCase):
         for fragment in ("funding-rate", "open-interest", "long-short-account-ratio",
                          "taker-volume"):
             self.assertNotIn(fragment, urls)
-        self.assertEqual(pkg["fundingRate"], 0.0)
+        self.assertEqual(pkg["fundingRate"], "N/A")
         self.assertEqual(pkg["oiUsd"], "N/A")
         # ★ `adx_1h` **本来就在默认包里**（默认值 0.0）—— 所以"键不在"根本不是判据；
         #   真判据是**没有去调用**指标接口，且值停在默认

@@ -113,7 +113,7 @@ def fetch_single_instrument_package(item: Dict[str, Any], *,
         "chg24h": 0.0,
         "bidPx": 0.0,
         "askPx": 0.0,
-        "fundingRate": 0.0,
+        "fundingRate": "N/A",
         "oiUsd": "N/A",
         "vol24h": 0.0,
         "lsRatio": "N/A",
@@ -306,7 +306,9 @@ def fetch_single_instrument_package(item: Dict[str, Any], *,
             with urllib.request.urlopen(req, timeout=3) as resp:
                 d = json.loads(resp.read().decode("utf-8"))
                 if d.get("code") == "0" and d.get("data"):
-                    pkg["fundingRate"] = round(float(d["data"][0].get("fundingRate", 0)) * 100, 4)
+                    _funding = d["data"][0].get("fundingRate")
+                if _funding is not None:
+                    pkg["fundingRate"] = round(float(_funding) * 100, 4)
         except Exception as exc:
             note_failure("okx_funding_rate", exc)
 

@@ -546,13 +546,16 @@ def scan_risk_gates_and_ai_brain(*,
         real_pos_dict,
         save_trackers,
         calculation_equity_info=None,
-        risk_values=None):
+        risk_values=None,
+        cycle_max_positions=None):
     """相位 4 前段：熔断判定 + 单标的保证金上限自适应 + 主脑批量扫描 + 池可信闸。
 
     段内不动控制流（无 return/break）：`executed_actions` 由**原地 append** 回传
     （故只入参、不返回）；`brain_cache` 在段内顶层初始化为 `{}` ⇒ 必然绑定。
     4 项输出见调用点解包。
     """
+    effective_max_positions = (cycle_max_positions if cycle_max_positions is not None
+                              else MAX_CONCURRENT_POSITIONS)
     risk_equity = (calculation_equity_info[0]
                    if isinstance(calculation_equity_info, (tuple, list)) and calculation_equity_info
                    else usdt_available)
@@ -577,7 +580,7 @@ def scan_risk_gates_and_ai_brain(*,
             pos_desc = "当前系统总" + venue_position_span(
                 okx_count=active_pos_count, okx_long=long_count, okx_short=short_count,
                 xv_positions_by_venue=xv_positions_by_venue, xv_total=_xv_total,
-                max_positions=MAX_CONCURRENT_POSITIONS)
+                max_positions=effective_max_positions)
             # 持仓全景装配（阶段 4·B3 第三十一刀：迁至 scripts/trader/position_universe.py）
             active_pos_list = _collect_okx_position_payloads(all_factors, trackers)
             # 汇入多所（Binance / Gate）在管持仓，形成三所平权持仓全景。

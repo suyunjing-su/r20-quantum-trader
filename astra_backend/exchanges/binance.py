@@ -479,6 +479,9 @@ class BinanceAdapter(BinanceAlgoRequestsMixin, BaseExchangeAdapter):
         side: 'long'/'buy' -> 'BUY', 'short'/'sell' -> 'SELL'。
         reduce_only: 净模式平仓专用（对冲模式禁传，由调用方按 positionSide 分流）。
         """
+        # Check credentials before public instrument metadata so private operations
+        # fail with the stable capability error instead of a local-spec error.
+        self._keys()
         inst = self.native_symbol(symbol)
         s = "BUY" if str(side).lower() in ("long", "buy") else "SELL"
         qty = float(contracts)

@@ -380,12 +380,22 @@ def fetch_single_instrument_package(item: Dict[str, Any]) -> Dict[str, Any]:
     与其他模块的引用都按全局名查找，故调用点无需改动。
     两个原有行情函数与按池准入选择多所同源行情的函数均在调用时注入，避免子模块 import 期绑定。
     """
-    return _fetch_single_instrument_package(
-        item,
-        fetch_candles=fetch_candles,
-        fetch_single_indicator=fetch_single_indicator,
-        fetch_market_bundle=fetch_market_bundle,
-    )
+    try:
+        return _fetch_single_instrument_package(
+            item,
+            fetch_candles=fetch_candles,
+            fetch_single_indicator=fetch_single_indicator,
+            fetch_market_bundle=fetch_market_bundle,
+        )
+    except TypeError as exc:
+        if "fetch_market_bundle" not in str(exc):
+            raise
+        # Keep compatibility with older injected package builders.
+        return _fetch_single_instrument_package(
+            item,
+            fetch_candles=fetch_candles,
+            fetch_single_indicator=fetch_single_indicator,
+        )
 
 # ── SYSTEM_PROMPT · v7.6 优质预设基线 ──────────────────────────────────────
 # 设计契约：
@@ -1078,7 +1088,13 @@ def execute_batch_ai_brain_cycle(
         runtime_context_out=runtime_context, policy_snapshot=policy_snapshot,
         calculation_equity=calculation_equity)
 
-    profile = active_profile(equity=calculation_equity)
+    try:
+        profile = active_profile(equity=calculation_equity)
+    except TypeError as exc:
+        if "equity" not in str(exc):
+            raise
+        # Older injected profile selectors are equity-agnostic.
+        profile = active_profile()
     # 审计 P1-3：覆盖层由 get_effective_system_prompt 在布局**之后**追加（此前被布局丢弃）
     effective_system_prompt = get_effective_system_prompt(profile=profile, context=runtime_context)
 

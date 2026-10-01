@@ -1191,6 +1191,7 @@ def execute_portfolio():
         usdt_available = calculation_available
     from astra_backend.risk_config import current_values as _risk_values_for_equity
     cycle_risk_values = _risk_values_for_equity(calculation_equity)
+    risk_values = cycle_risk_values
     _pool_capacity = max(len(TARGET_INSTRUMENTS or []), 1)
     _configured_positions = int(cycle_risk_values.get("ASTRA_MAX_CONCURRENT_POSITIONS", 0) or 0)
     cycle_max_positions = (_pool_capacity if _configured_positions <= 0
@@ -1225,10 +1226,8 @@ def execute_portfolio():
         timestamp_full=timestamp_full,
         trackers=trackers,
         usdt_available=usdt_available,
-        calculation_equity_info=calculation_equity_info,
-        risk_values=cycle_risk_values,
         xv_positions_by_venue=xv_positions_by_venue,
-        MAX_CONCURRENT_POSITIONS=cycle_max_positions,
+        MAX_CONCURRENT_POSITIONS=MAX_CONCURRENT_POSITIONS,
         _collect_okx_position_payloads=_collect_okx_position_payloads,
         _merge_cross_venue_positions=_merge_cross_venue_positions,
         effective_single_asset_margin=effective_single_asset_margin,
@@ -1240,7 +1239,10 @@ def execute_portfolio():
         query_positions=query_positions,
         read_cycle_health=read_cycle_health,
         real_pos_dict=real_pos_dict,
-        save_trackers=save_trackers    )
+        save_trackers=save_trackers,
+        calculation_equity_info=calculation_equity_info,
+        risk_values=risk_values,
+        cycle_max_positions=cycle_max_positions)
 
     if not cb_active and pool_is_trustworthy():
         _cycle_margin_ratio = float(cycle_risk_values.get("ASTRA_MAX_MARGIN_EQUITY_RATIO", 0.0) or 0.0)

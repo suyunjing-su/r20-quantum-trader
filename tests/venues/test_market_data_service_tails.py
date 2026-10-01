@@ -640,18 +640,13 @@ class FetchFundingRateTests(_Sandbox, unittest.TestCase):
             self.assertEqual(mds.fetch_funding_rate("BTC-USDT-SWAP"), 0.5)
         self.assertTrue(af.called)
 
-    def test_a_missing_rate_field_silently_becomes_zero(self):
-        # ⚠️ 实测行为（本刀仅记录，**未改**）：第 584 行是
-        #   `float(data["data"][0].get("fundingRate", 0.0)) * 100` —— 用 `.get(..., 0.0)`
-        #   兜底 ⇒ **字段缺失 = 费率恰好 0%**，而不是"没有数据"。
-        #   于是备源（`_alt_funding_rate`）**不会**被调用，调用方拿到一个看起来
-        #   完全正常的 `0.0`。这属「缺失 ≠ 0」家族：OKX 返回了空对象本该落空/落备源，
-        #   现在却报了一个确定的费率。
+    def test_a_missing_rate_field_falls_through_to_alt_source(self):
+        # A missing value is unknown, not a measured 0%; fall through to the alternate source.
         with patch.object(mds, "_public_get", return_value={"data": [{}]}), \
              patch.object(mds, "_alt_funding_rate", return_value=0.5) as af:
             out = mds.fetch_funding_rate("BTC-USDT-SWAP")
-        self.assertEqual(out, 0.0, "缺失字段被兜底成 0.0")
-        self.assertFalse(af.called, "正因为没落空，备源拿不到机会")
+        self.assertEqual(out, 0.5, "缺失字段应回退到备用数据源")
+        self.assertTrue(af.called, "缺失费率应给备用数据源读取机会")
 
     def test_an_explicit_null_rate_falls_through(self):
         # 对照：显式 `null` 会走 `float(None)` → TypeError → 落备源

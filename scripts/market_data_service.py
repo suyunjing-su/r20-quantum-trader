@@ -680,7 +680,9 @@ def fetch_funding_rate(inst_id: str, timeout: float = 3.5) -> Optional[float]:
     data = _public_get("/api/v5/public/funding-rate", params={"instId": inst_id}, timeout=timeout)
     if data and data.get("data"):
         try:
-            return round(float(data["data"][0].get("fundingRate", 0.0)) * 100, 4)
+            raw = data["data"][0].get("fundingRate")
+            if raw is not None:
+                return round(float(raw) * 100, 4)
         except (ValueError, TypeError):
             pass
     return _alt_funding_rate(inst_id)

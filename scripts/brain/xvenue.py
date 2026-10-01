@@ -133,6 +133,8 @@ def _xv_flush_health(packages: List[Dict[str, Any]], *, health, safe_float,
                     "gate_last": xv.get("gate_last"), "gate_basis_pct": _basis(xv.get("gate_last")),
                     "bin_ls": xv.get("bin_ls"), "gate_ls": xv.get("gate_ls"),
                     "bin_funding_pct": xv.get("bin_funding_pct"),
+                    "bin_oi_base": xv.get("bin_oi_base"),
+                    "gate_oi_base": xv.get("gate_oi_base"),
                     "gate_funding_pct": xv.get("gate_funding_pct"),
                 }
         except Exception:
@@ -169,12 +171,16 @@ def _xv_binance_snapshot(base: str, *, get_adapter, record):
             fund = ad.fetch_funding_rate(base)
         except Exception:
             fund = None
+        try:
+            oi_base = ad.fetch_open_interest(base)
+        except Exception:
+            oi_base = None
         if not t.get("last"):
             record("binance", base, False, (time.time() - t0) * 1000, "empty ticker (unreachable/blocked?)")
             return None
         record("binance", base, True, (time.time() - t0) * 1000)
         return {"venue": "binance", "name": base, "last": t.get("last"), "ls": ls,
-                "funding_rate": fund}
+                "funding_rate": fund, "oi_base": oi_base}
     except Exception as exc:
         record("binance", base, False, (time.time() - t0) * 1000, str(exc))
         return None
@@ -190,12 +196,16 @@ def _xv_gate_snapshot(base: str, *, get_adapter, record):
             ls = ad.fetch_top_trader_ratio(base)
         except Exception:
             ls = None
+        try:
+            oi_base = ad.fetch_open_interest(base)
+        except Exception:
+            oi_base = None
         if not t.get("last"):
             record("gate", base, False, (time.time() - t0) * 1000, "empty ticker (unreachable/blocked?)")
             return None
         record("gate", base, True, (time.time() - t0) * 1000)
         return {"venue": "gate", "name": base, "last": t.get("last"),
-                "funding_rate": t.get("funding_rate"), "ls": ls}
+                "funding_rate": t.get("funding_rate"), "ls": ls, "oi_base": oi_base}
     except Exception as exc:
         record("gate", base, False, (time.time() - t0) * 1000, str(exc))
         return None
@@ -232,6 +242,13 @@ def fetch_cross_venue_matrix(packages: List[Dict[str, Any]], *, enabled, snapsho
                 if val.get("funding_rate") is not None:
                     try:
                         xv[f"{prefix}_funding_pct"] = round(float(val["funding_rate"]) * 100, 4)
+                    except (TypeError, ValueError):
+                        pass
+                if val.get("oi_base") is not None:
+                    try:
+                        _oi = float(val["oi_base"])
+                        if _oi >= 0:
+                            xv[f"{prefix}_oi_base"] = _oi
                     except (TypeError, ValueError):
                         pass
         flush_health(packages)
@@ -288,6 +305,10 @@ def _xvenue_prompt_line(p: Dict[str, Any], *, safe_float) -> str:
         seg.append(f"币安大户比:{xv['bin_ls']}")
     if xv.get("gate_ls") is not None:
         seg.append(f"Gate大户比:{xv['gate_ls']}")
+    if xv.get("bin_oi_base") is not None:
+        seg.append(f"币安OI:{xv['bin_oi_base']}")
+    if xv.get("gate_oi_base") is not None:
+        seg.append(f"Gate OI:{xv['gate_oi_base']}")
     if xv.get("bin_funding_pct") is not None:
         seg.append(f"币安费率:{xv['bin_funding_pct']}%")
     if xv.get("gate_funding_pct") is not None:

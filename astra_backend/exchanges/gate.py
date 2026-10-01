@@ -239,6 +239,23 @@ class GateAdapter(BaseExchangeAdapter):
             return {"venue": "gate", "bids": _norm(data["bids"]), "asks": _norm(data.get("asks"))}
         return None
 
+    def fetch_open_interest(self, symbol: str) -> Optional[float]:
+        """Return Gate's current contract open interest when the stats feed provides it."""
+        data = self._public_get("/api/v4/futures/usdt/contract_stats", {
+            "contract": self.native_symbol(symbol), "interval": "1h", "limit": 1,
+        })
+        rows = data if isinstance(data, list) else []
+        if rows:
+            row = rows[-1]
+            for key in ("open_interest", "open_interest_value"):
+                try:
+                    value = float(row.get(key))
+                except (TypeError, ValueError):
+                    continue
+                if value >= 0:
+                    return value
+        return None
+
     def fetch_top_trader_ratio(self, symbol: str) -> Optional[float]:
         """大户持仓量多空比 top_lsr_size（contract_stats，口径优于全局账户数比）。"""
         data = self._public_get("/api/v4/futures/usdt/contract_stats", {
