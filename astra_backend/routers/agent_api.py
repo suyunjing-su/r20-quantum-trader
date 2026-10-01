@@ -94,6 +94,11 @@ def agent_capabilities(x_api_key: str | None = Header(default=None, alias="X-API
         "auth_header": "X-API-Key",
         "scope": "configuration-and-telemetry",
         "excluded": ["initial_capital_baseline", "venue_credentials", "capital_tiers"],
+        "session_only_routes": [
+            "POST /api/v1/admin/risk/custom-suites",
+            "PUT /api/v1/admin/risk/custom-suites/{suite_id}",
+            "DELETE /api/v1/admin/risk/custom-suites/{suite_id}",
+        ],
         "routes": {
             "council": ["/api/v1/admin/council/config", "/api/v1/admin/council/apply-suite", "/api/v1/admin/council/reset-role", "/api/v1/admin/council/import", "/api/v1/admin/council/export"],
             "prompt_workshop": ["/api/v1/admin/prompt-library", "/api/v1/admin/prompt-profiles", "/api/v1/admin/prompts"],

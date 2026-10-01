@@ -5,9 +5,14 @@
 """
 from __future__ import annotations
 
+import json
 import os
 import time
+import uuid
+from pathlib import Path
 from typing import Any, Mapping
+
+from astra_backend.file_locks import file_lock
 
 from scripts.risk_constants import (
     DEFAULTS,
@@ -224,6 +229,111 @@ def suite_values(suite_id: str) -> dict[str, float | int]:
         if s["id"] == suite_id:
             return dict(s["values"])
     raise ValueError(f"未知风控预设套件: {suite_id}")
+
+
+_CUSTOM_SUITES_FILE = Path(__file__).resolve().parents[1] / "data" / "risk_custom_suites.json"
+_MAX_CUSTOM_SUITES = 100
+
+
+def _read_custom_suites() -> list[dict[str, Any]]:
+    try:
+        with _CUSTOM_SUITES_FILE.open("r", encoding="utf-8") as f:
+            rows = json.load(f)
+    except FileNotFoundError:
+        return []
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"自定义风控方案文件不可读取: {exc}") from exc
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        raise ValueError("自定义风控方案文件格式无效")
+    return rows
+
+
+def custom_suites() -> list[dict[str, Any]]:
+    """读取用户保存的方案；values 始终为经过 schema 归一化的完整参数集。"""
+    with file_lock(_CUSTOM_SUITES_FILE):
+        return _read_custom_suites()
+
+
+def save_custom_suite(name: str, description: str, values: Mapping[str, Any],
+                      suite_id: str | None = None) -> dict[str, Any]:
+    """新建或更新一条完整的自定义方案，整个读改写过程跨进程互斥。"""
+    clean_name = str(name or "").strip()
+    clean_desc = str(description or "").strip()
+    if not clean_name or len(clean_name) > 60:
+        raise ValueError("方案名称必须为 1~60 个字符")
+    if len(clean_desc) > 240:
+        raise ValueError("方案说明最多 240 个字符")
+    if set(values) != set(_INDEX):
+        missing = sorted(set(_INDEX) - set(values))
+        unknown = sorted(set(values) - set(_INDEX))
+        details = []
+        if missing:
+            details.append(f"缺少参数: {', '.join(missing)}")
+        if unknown:
+            details.append(f"未知参数: {', '.join(unknown)}")
+        raise ValueError("自定义方案必须包含完整风控参数；" + "；".join(details))
+    normalized = normalize(values)
+    canonical_values = {
+        key: (int(float(value)) if _INDEX[key]["type"] == "int" else float(value))
+        for key, value in normalized.items()
+    }
+    with file_lock(_CUSTOM_SUITES_FILE):
+        rows = _read_custom_suites()
+        if suite_id:
+            target = next((row for row in rows if row.get("id") == suite_id), None)
+            if target is None:
+                raise KeyError(f"未知自定义风控方案: {suite_id}")
+            target.update(name=clean_name, description=clean_desc, values=canonical_values)
+            result = target
+        else:
+            if len(rows) >= _MAX_CUSTOM_SUITES:
+                raise ValueError(f"最多保存 {_MAX_CUSTOM_SUITES} 个自定义风控方案")
+            result = {"id": uuid.uuid4().hex, "name": clean_name,
+                      "description": clean_desc, "values": canonical_values}
+            rows.append(result)
+        _CUSTOM_SUITES_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _CUSTOM_SUITES_FILE.with_name(f".{_CUSTOM_SUITES_FILE.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            with tmp.open("w", encoding="utf-8") as f:
+                json.dump(rows, f, ensure_ascii=False, indent=2, allow_nan=False)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, _CUSTOM_SUITES_FILE)
+        finally:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+        return dict(result)
+
+
+def custom_suite_values(suite_id: str) -> dict[str, float | int]:
+    for suite in custom_suites():
+        if suite.get("id") == suite_id:
+            return dict(suite["values"])
+    raise ValueError(f"未知自定义风控方案: {suite_id}")
+
+
+def delete_custom_suite(suite_id: str) -> bool:
+    with file_lock(_CUSTOM_SUITES_FILE):
+        rows = _read_custom_suites()
+        kept = [row for row in rows if row.get("id") != suite_id]
+        if len(kept) == len(rows):
+            return False
+        _CUSTOM_SUITES_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _CUSTOM_SUITES_FILE.with_name(f".{_CUSTOM_SUITES_FILE.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            with tmp.open("w", encoding="utf-8") as f:
+                json.dump(kept, f, ensure_ascii=False, indent=2, allow_nan=False)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, _CUSTOM_SUITES_FILE)
+        finally:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+        return True
 
 # 一致性自检：schema 必须与执行层 DEFAULTS 一一对应，防止悄悄漂移
 assert set(_INDEX) == set(DEFAULTS), (

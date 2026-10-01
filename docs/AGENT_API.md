@@ -20,7 +20,7 @@ The Agent key can be generated, rotated, and deleted from **Admin → Agents** (
 - Prompt Workshop: `/api/v1/admin/prompt-library`, `/api/v1/admin/prompt-profiles...`, `/api/v1/admin/prompts`
   - Supports creating, editing, activating and deleting profiles, including enabled flags and pipeline module content/configuration.
 - Evolution configuration: `/api/v1/admin/evolution/config`
-- Risk: `/api/v1/admin/risk` (including reset)
+- Risk: `/api/v1/admin/risk` (including reset and applying a saved custom suite by `custom_suite_id`). Custom suite create/update/delete routes are intentionally unavailable to Agent API keys; use a superadmin session.
 - Physical interceptors: `/api/v1/admin/interceptors...`
 - Instrument pool: `POST /api/v1/admin/instruments`, `DELETE /api/v1/admin/instruments/{inst_id}`, `PUT /api/v1/admin/instruments/{inst_id}/venues`. The `GET` admin listing is intentionally unavailable to API-key callers because it includes capital-tier metadata.
 - Model connections: `/api/v1/admin/llm...`

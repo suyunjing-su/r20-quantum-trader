@@ -14,6 +14,7 @@ from astra_backend.dependencies import (
 )
 from astra_backend.schemas import (
     RiskConfigUpdate,
+    RiskCustomSuiteRequest,
     RiskResetRequest,
     InitialCapitalUpdate,
     InstrumentAddRequest,
@@ -118,6 +119,7 @@ def admin_risk_get(equity: float | None = Query(default=None, description="可�
     return {
         "schema": risk_config.schema(),
         "suites": risk_config.SUITES,
+        "custom_suites": risk_config.custom_suites(),
         "values": risk_config.current_values(),
         # 审计未完成清单#3：把"引擎此刻真正在用什么"和"下一周期会用什么"并排给出——
         # P0-2/P1-1 能长期隐身，正是因为页面上只有前者（文件值）没有后者（进程快照）。
@@ -134,7 +136,16 @@ def admin_risk_update(payload: RiskConfigUpdate, x_astra_session: str | None = H
     refresh_settings()
     actor = require_superadmin(x_astra_session)
     merged: dict[str, Any] = {}
-    if payload.suite_id:
+    if payload.suite_id and payload.custom_suite_id:
+        raise HTTPException(status_code=400, detail="内置套件与自定义方案不能同时应用")
+    if payload.custom_suite_id:
+        if payload.values:
+            raise HTTPException(status_code=400, detail="应用自定义方案时不能同时提交 values")
+        try:
+            merged.update(risk_config.custom_suite_values(payload.custom_suite_id))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    elif payload.suite_id:
         try:
             merged.update(risk_config.suite_values(payload.suite_id))
         except ValueError as exc:
@@ -159,7 +170,7 @@ def admin_risk_update(payload: RiskConfigUpdate, x_astra_session: str | None = H
     try:
         env_updates = risk_config.normalize(merged)
     except ValueError as exc:
-        audit_record("risk.config.update", "failed", {"actor": actor["username"], "suite": payload.suite_id, "reason": str(exc)})
+        audit_record("risk.config.update", "failed", {"actor": actor["username"], "suite": payload.custom_suite_id or payload.suite_id, "reason": str(exc)})
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     update_env(env_updates)
     refresh_settings()
@@ -174,16 +185,59 @@ def admin_risk_update(payload: RiskConfigUpdate, x_astra_session: str | None = H
         pass
     audit_record("risk.config.update", "success", {
         "actor": actor["username"],
-        "suite": payload.suite_id or None,
+        "suite": payload.custom_suite_id or payload.suite_id or None,
         "changed": {k: {"before": before.get(k), "after": float(v)} for k, v in env_updates.items()},
         "high_risk_confirmed": [i["key"] for i in high_risk],
     })
     return {
         "updated": sorted(env_updates.keys()),
-        "applied_suite": payload.suite_id or None,
+        "applied_suite": payload.custom_suite_id or payload.suite_id or None,
         "values": risk_config.current_values(),
         "effect": "已写入 .env；下一交易巡检周期（≤15 分钟）起对新开仓/加仓/时间止损全面生效，AI 主脑提示词中的风控口径同步对齐。",
     }
+
+
+@router.post("/api/v1/admin/risk/custom-suites")
+def admin_risk_custom_suite_create(
+    payload: RiskCustomSuiteRequest,
+    x_astra_session: str | None = Header(default=None, alias="X-Astra-Session"),
+) -> dict[str, Any]:
+    actor = require_superadmin(x_astra_session)
+    try:
+        suite = risk_config.save_custom_suite(payload.name, payload.description, payload.values)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    audit_record("risk.custom_suite.create", "success", {"actor": actor["username"], "suite_id": suite["id"]})
+    return {"suite": suite, "custom_suites": risk_config.custom_suites()}
+
+
+@router.put("/api/v1/admin/risk/custom-suites/{suite_id}")
+def admin_risk_custom_suite_update(
+    suite_id: str,
+    payload: RiskCustomSuiteRequest,
+    x_astra_session: str | None = Header(default=None, alias="X-Astra-Session"),
+) -> dict[str, Any]:
+    actor = require_superadmin(x_astra_session)
+    try:
+        suite = risk_config.save_custom_suite(payload.name, payload.description, payload.values, suite_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    audit_record("risk.custom_suite.update", "success", {"actor": actor["username"], "suite_id": suite_id})
+    return {"suite": suite, "custom_suites": risk_config.custom_suites()}
+
+
+@router.delete("/api/v1/admin/risk/custom-suites/{suite_id}")
+def admin_risk_custom_suite_delete(
+    suite_id: str,
+    x_astra_session: str | None = Header(default=None, alias="X-Astra-Session"),
+) -> dict[str, Any]:
+    actor = require_superadmin(x_astra_session)
+    if not risk_config.delete_custom_suite(suite_id):
+        raise HTTPException(status_code=404, detail="未知自定义风控方案")
+    audit_record("risk.custom_suite.delete", "success", {"actor": actor["username"], "suite_id": suite_id})
+    return {"deleted": suite_id, "custom_suites": risk_config.custom_suites()}
 
 
 @router.post("/api/v1/admin/risk/reset")

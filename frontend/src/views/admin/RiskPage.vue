@@ -34,7 +34,8 @@ import DangerZone from '../../components/admin/page-parts/DangerZone.vue';
 import BaseEmpty from '../../components/base/BaseEmpty.vue';
 import BaseSwitch from '../../components/base/BaseSwitch.vue';
 import { ShieldAlert, Save, RotateCcw, Loader2, Info, Layers,
-  Target, Flame, TrendingUp, RefreshCw, AlertTriangle, ChevronDown, ChevronRight } from 'lucide-vue-next';
+  Target, Flame, TrendingUp, RefreshCw, AlertTriangle, ChevronDown, ChevronRight,
+  Plus, Trash2, Pencil, BookmarkPlus } from 'lucide-vue-next';
 import BaseLoadingAnnounce from '../../components/base/BaseLoadingAnnounce.vue';
 
 const { api } = useApi();
@@ -56,6 +57,11 @@ const driftCount = computed(() => {
   })
 })
 const suites = ref<any[]>([]);
+const customSuites = ref<any[]>([]);
+const customEditorOpen = ref(false);
+const customSuiteId = ref('');
+const customSuiteName = ref('');
+const customSuiteDescription = ref('');
 const effectText = ref('');
 const serverValues = ref<Record<string, number>>({});
 const draft = reactive<Record<string, number>>({});       // 原生值（比例类为小数）
@@ -71,6 +77,13 @@ const activeSuiteId = computed(() => {
   return ''
 });
 
+const activeCustomSuiteId = computed(() => {
+  if (dirtyKeys.value.length) return ''
+  const match = customSuites.value.find((s: any) => Object.entries(s.values as Record<string, number>).every(
+    ([key, value]) => Math.abs((serverValues.value[key] ?? NaN) - value) < 1e-9))
+  return match?.id || ''
+})
+
 async function applySuite(s: any) {
   if (busy.value) return
   busy.value = 'save'
@@ -80,6 +93,97 @@ async function applySuite(s: any) {
     toast.ok(t('admin.risk.applyOk', undefined, { name: s.name, effect: res.effect }))
   } catch (e: any) {
     toast.err(t('admin.risk.applyFailed', undefined, { msg: e.message }))
+  } finally {
+    busy.value = ''
+  }
+}
+
+function beginCustomSuite(s?: any) {
+  customSuiteId.value = s?.id || ''
+  customSuiteName.value = s?.name || ''
+  customSuiteDescription.value = s?.description || ''
+  if (s?.values && schema.value) {
+    for (const p of schema.value.params) {
+      draft[p.key] = s.values[p.key]
+      disp[p.key] = toDisplay(p, s.values[p.key])
+    }
+  }
+  customEditorOpen.value = true
+}
+
+async function confirmCustomHighRisk(values: Record<string, number>): Promise<string | null> {
+  const extreme = schema.value!.params.filter((p: any) => p.high_risk_at != null
+    && Number(values[p.key]) >= Number(p.high_risk_at))
+  if (!extreme.length) return ''
+  const detail = extreme.map((p: any) => `${p.label} = ${values[p.key]}`).join(t('admin.risk.detailSep'))
+  const ok = await ask({
+    title: t('admin.risk.extremeTitle'),
+    desc: t('admin.risk.extremeDesc', undefined, { detail }),
+    danger: true,
+    confirmPhrase: 'HIGH RISK',
+    okText: t('common.confirmWrite'),
+  })
+  return ok ? 'HIGH RISK' : null
+}
+
+async function saveCustomSuite() {
+  if (!schema.value || busy.value) return
+  const values: Record<string, number> = {}
+  for (const p of schema.value.params) values[p.key] = draft[p.key]
+  const updating = Boolean(customSuiteId.value)
+  busy.value = 'save'
+  try {
+    const path = customSuiteId.value
+      ? `/api/v1/admin/risk/custom-suites/${encodeURIComponent(customSuiteId.value)}`
+      : '/api/v1/admin/risk/custom-suites'
+    const res = await api<any>(path, {
+      method: customSuiteId.value ? 'PUT' : 'POST',
+      body: JSON.stringify({ name: customSuiteName.value, description: customSuiteDescription.value, values }),
+    })
+    customSuites.value = res.custom_suites || [...customSuites.value, res.suite]
+    customEditorOpen.value = false
+    customSuiteId.value = ''
+    toast.ok(updating ? '自定义风控方案已更新' : '自定义风控方案已保存')
+  } catch (e: any) {
+    toast.err(`保存自定义方案失败：${e.message}`)
+  } finally {
+    busy.value = ''
+  }
+}
+
+async function applyCustomSuite(s: any) {
+  if (busy.value) return
+  const confirmation = await confirmCustomHighRisk(s.values)
+  if (confirmation === null) return
+  busy.value = 'save'
+  try {
+    const res = await api('/api/v1/admin/risk', {
+      method: 'POST', body: JSON.stringify({ custom_suite_id: s.id, confirmation }),
+    })
+    syncFromServer(res.values)
+    toast.ok(`已应用「${s.name}」；${res.effect}`)
+  } catch (e: any) {
+    toast.err(`应用自定义方案失败：${e.message}`)
+  } finally {
+    busy.value = ''
+  }
+}
+
+async function deleteCustomSuite(s: any) {
+  const ok = await ask({
+    title: '删除自定义风控方案',
+    desc: `确定删除「${s.name}」？删除不会改变当前正在生效的风控参数。`,
+    danger: true,
+    okText: '删除方案',
+  })
+  if (!ok || busy.value) return
+  busy.value = 'reset'
+  try {
+    const res = await api<any>(`/api/v1/admin/risk/custom-suites/${encodeURIComponent(s.id)}`, { method: 'DELETE' })
+    customSuites.value = res.custom_suites || customSuites.value.filter((row: any) => row.id !== s.id)
+    toast.ok('自定义风控方案已删除')
+  } catch (e: any) {
+    toast.err(`删除自定义方案失败：${e.message}`)
   } finally {
     busy.value = ''
   }
@@ -131,7 +235,7 @@ const { run: loadData, busy: loading, error: loadError } = useAsyncAction(async 
   const query = Number.isFinite(eq) && eq > 0 ? `?equity=${eq}` : ''
   const res = await api<any>(`/api/v1/admin/risk${query}`)
   schema.value = res.schema
-  suites.value = res.suites || []
+  customSuites.value = res.custom_suites || []
   effectText.value = res.effect || ''
   processValues.value = res.process_values || {}
   processFresh.value = res.process_freshness || null
@@ -451,6 +555,54 @@ onMounted(loadData)
             </button>
           </div>
         </div>
+      </section>
+
+      <!-- 自定义风控方案，与内置套件分区展示、独立持久化 -->
+      <section class="card">
+        <header class="card-head">
+          <div>
+            <h2 class="card-title"><BookmarkPlus :size="14" />自定义风控方案</h2>
+            <p class="card-sub">保存多套完整参数配置；应用时仍执行完整风控校验与 HIGH RISK 二次确认。</p>
+          </div>
+          <button type="button" class="btn btn-primary btn-sm" :disabled="busy !== ''" @click="beginCustomSuite()">
+            <Plus :size="14" /><span>保存当前参数为方案</span>
+          </button>
+        </header>
+
+        <div v-if="customEditorOpen" class="rk-custom-editor">
+          <label class="rk-custom-field">
+            <span>方案名称</span>
+            <input v-model="customSuiteName" maxlength="60" class="rk-custom-input" placeholder="例如：BTC/ETH 低波动方案" />
+          </label>
+          <label class="rk-custom-field">
+            <span>说明（可选）</span>
+            <input v-model="customSuiteDescription" maxlength="240" class="rk-custom-input" placeholder="适用账户规模、行情或风险偏好" />
+          </label>
+          <div class="rk-custom-actions">
+            <button type="button" class="btn btn-ghost btn-sm" :disabled="busy !== ''" @click="customEditorOpen = false">取消</button>
+            <button type="button" class="btn btn-primary btn-sm" :disabled="busy !== '' || !customSuiteName.trim()" @click="saveCustomSuite">
+              <Loader2 v-if="busy === 'save'" :size="14" class="animate-spin" />
+              <Save v-else :size="14" />{{ customSuiteId ? '覆盖方案' : '保存方案' }}
+            </button>
+          </div>
+        </div>
+
+        <div v-if="customSuites.length" class="rk-suites rk-custom-list">
+          <article v-for="s in customSuites" :key="s.id" class="rk-suite">
+            <div class="rk-suite-top">
+              <span class="rk-suite-name">{{ s.name }}</span>
+              <span v-if="activeCustomSuiteId === s.id" class="badge badge-up">当前生效</span>
+              <span v-else class="rk-suite-tag">{{ Object.keys(s.values || {}).length }} 项参数</span>
+            </div>
+            <p class="rk-suite-desc">{{ s.description || '未填写说明' }}</p>
+            <div class="rk-custom-actions">
+              <button type="button" class="btn btn-primary btn-sm" :disabled="busy !== ''" @click="applyCustomSuite(s)">应用方案</button>
+              <button type="button" class="btn btn-ghost btn-sm" :disabled="busy !== ''" @click="beginCustomSuite(s)"><Pencil :size="13" />编辑/覆盖</button>
+              <button type="button" class="btn btn-quiet btn-icon btn-sm" :disabled="busy !== ''" title="删除方案" @click="deleteCustomSuite(s)"><Trash2 :size="14" /></button>
+            </div>
+          </article>
+        </div>
+        <p v-else-if="!customEditorOpen" class="rk-custom-empty">尚未保存自定义方案。先调整下方参数，再保存为方案。</p>
       </section>
 
       <!-- 风控参数 -->
@@ -786,6 +938,49 @@ onMounted(loadData)
 }
 .rk-suite .btn {
   align-self: flex-start;
+}
+.rk-custom-list {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
+  border-top: 1px solid var(--ds-color-border-default);
+}
+.rk-custom-editor {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
+  gap: var(--ds-space-3);
+  padding: var(--ds-space-4);
+  border-top: 1px solid var(--ds-color-border-default);
+  background: var(--ds-color-bg-surface-inset);
+}
+.rk-custom-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: var(--ds-color-text-description);
+  font-size: var(--text-3xs);
+}
+.rk-custom-input {
+  width: 100%;
+  min-width: 0;
+  padding: 8px 10px;
+  color: var(--ds-color-text-primary);
+  background: var(--ds-color-bg-surface-card);
+  border: 1px solid var(--ds-color-border-default);
+  border-radius: var(--r-ctl);
+}
+.rk-custom-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.rk-custom-editor .rk-custom-actions {
+  grid-column: 1 / -1;
+  justify-content: flex-end;
+}
+.rk-custom-empty {
+  padding: var(--ds-space-4);
+  color: var(--ds-color-text-placeholder);
+  font-size: var(--text-3xs);
 }
 
 /* ══ 参数分组 ══ */

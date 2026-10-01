@@ -411,8 +411,28 @@ class MemoryUpdateAllRequest(BaseModel):
 class RiskConfigUpdate(BaseModel):
     values: dict[str, Any] = Field(default_factory=dict)
     suite_id: str = ""
+    custom_suite_id: str = ""
     # 审计 P2-9：越过"极端值"线时须逐字提交 HIGH RISK（前端弹逐字确认框）
     confirmation: str = ""
+
+
+class RiskCustomSuiteRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=60)
+    description: str = Field(default="", max_length=240)
+    values: dict[str, Any]
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        clean = value.strip()
+        if not clean:
+            raise ValueError("方案名称不能为空")
+        return clean
+
+    @field_validator("description")
+    @classmethod
+    def validate_description(cls, value: str) -> str:
+        return value.strip()
 
 
 class RiskResetRequest(BaseModel):

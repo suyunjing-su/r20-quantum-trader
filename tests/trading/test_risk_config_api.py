@@ -68,6 +68,10 @@ class RiskConfigApiTests(unittest.TestCase):
         import astra_backend.config as backend_config
         self.original_loader = backend_config.load_dotenv
         backend_config.load_dotenv = lambda path: None
+        # 自定义策略 JSON 隔离，测试不触碰真实 data 文件
+        import astra_backend.risk_config as risk_config
+        self.original_custom_suites_file = risk_config._CUSTOM_SUITES_FILE
+        risk_config._CUSTOM_SUITES_FILE = Path(self.temp.name) / "risk_custom_suites.json"
         # 快照并清空风控环境变量，保证断言起点干净
         self.saved_env = {k: os.environ.pop(k, None) for k in RISK_KEYS}
         self.client = TestClient(app_module.app)
@@ -81,6 +85,8 @@ class RiskConfigApiTests(unittest.TestCase):
         import astra_backend.config as backend_config
         backend_config.load_dotenv = self.original_loader
         settings_store.ENV_FILE = self.original_env_file
+        import astra_backend.risk_config as risk_config
+        risk_config._CUSTOM_SUITES_FILE = self.original_custom_suites_file
         app_module.admin_auth = self.original_auth
         self.temp.cleanup()
 
@@ -223,6 +229,54 @@ class RiskConfigApiTests(unittest.TestCase):
         res = self.client.post("/api/v1/admin/risk", headers=headers, json={"suite_id": "yolo"})
         self.assertEqual(res.status_code, 400)
         self.assertIn("未知风控预设套件", res.json()["detail"])
+
+    def test_custom_suites_crud_and_apply_requires_high_risk_confirmation(self):
+        headers = self.login("admin", "InitialAdmin123456")
+        values = dict(DEFAULTS)
+        values["ASTRA_DAILY_LOSS_EQUITY_RATIO"] = 0.25
+        created = self.client.post("/api/v1/admin/risk/custom-suites", headers=headers, json={
+            "name": "高权益策略", "description": "高波动测试", "values": values,
+        })
+        self.assertEqual(created.status_code, 200, created.text)
+        suite = created.json()["suite"]
+        self.assertEqual(suite["name"], "高权益策略")
+        self.assertEqual(set(suite["values"]), RISK_KEYS)
+        listed = self.client.get("/api/v1/admin/risk", headers=headers).json()["custom_suites"]
+        self.assertEqual([row["id"] for row in listed], [suite["id"]])
+
+        denied = self.client.post("/api/v1/admin/risk", headers=headers,
+                                  json={"custom_suite_id": suite["id"]})
+        self.assertEqual(denied.status_code, 400)
+        self.assertIn("HIGH RISK", denied.json()["detail"])
+        applied = self.client.post("/api/v1/admin/risk", headers=headers,
+                                   json={"custom_suite_id": suite["id"], "confirmation": "HIGH RISK"})
+        self.assertEqual(applied.status_code, 200, applied.text)
+        self.assertEqual(applied.json()["applied_suite"], suite["id"])
+        self.assertEqual(applied.json()["values"]["ASTRA_DAILY_LOSS_EQUITY_RATIO"], 0.25)
+
+        updated_values = dict(DEFAULTS)
+        updated = self.client.put(f"/api/v1/admin/risk/custom-suites/{suite['id']}", headers=headers, json={
+            "name": "更新方案", "description": "", "values": updated_values,
+        })
+        self.assertEqual(updated.status_code, 200, updated.text)
+        self.assertEqual(updated.json()["suite"]["name"], "更新方案")
+        deleted = self.client.delete(f"/api/v1/admin/risk/custom-suites/{suite['id']}", headers=headers)
+        self.assertEqual(deleted.status_code, 200, deleted.text)
+        self.assertEqual(deleted.json()["custom_suites"], [])
+
+    def test_custom_suite_requires_complete_valid_values_and_superadmin(self):
+        operator = self.login("operator", "OperatorPassword123", role="admin")
+        values = dict(DEFAULTS)
+        payload = {"name": "测试", "values": values}
+        self.assertEqual(self.client.post("/api/v1/admin/risk/custom-suites", headers=operator,
+                                          json=payload).status_code, 403)
+        headers = self.login("admin", "InitialAdmin123456")
+        payload["values"] = {"ASTRA_MAX_LEVERAGE": 5}
+        partial = self.client.post("/api/v1/admin/risk/custom-suites", headers=headers, json=payload)
+        self.assertEqual(partial.status_code, 400)
+        payload["values"] = values | {"ASTRA_MAX_LEVERAGE": 30}
+        invalid = self.client.post("/api/v1/admin/risk/custom-suites", headers=headers, json=payload)
+        self.assertEqual(invalid.status_code, 400)
 
     def test_pool_leverage_caps_synced_on_risk_update(self):
         """风控管理页保存杠杆区间（如 5~7x）时，标的池必须同步刷新 max_leverage（蓝筹 7x，动量 6x）。"""
