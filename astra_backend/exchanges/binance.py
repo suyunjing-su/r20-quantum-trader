@@ -202,7 +202,19 @@ class BinanceAdapter(BinanceAlgoRequestsMixin, BaseExchangeAdapter):
                 return None
         return None
 
-    def fetch_top_trader_ratio(self, symbol: str) -> Optional[float]:
+    def fetch_taker_ratio(self, symbol: str) -> Optional[float]:
+        """Return Binance taker long/short ratio from the public futures feed."""
+        data = self._public_get("/futures/data/takerlongshortRatio", {
+            "symbol": self.native_symbol(symbol), "period": "1h", "limit": 1,
+        })
+        if isinstance(data, list) and data:
+            try:
+                value = float(data[-1].get("buySellRatio"))
+                return value if value > 0 else None
+            except (TypeError, ValueError, AttributeError):
+                return None
+        return None
+
         """大户持仓量多空比 topLongShortPositionRatio（免费无 key，滚动 30 天）。"""
         data = self._public_get("/futures/data/topLongShortPositionRatio", {
             "symbol": self.native_symbol(symbol), "period": "1h", "limit": 1,

@@ -107,7 +107,7 @@
 | 资金费率（现值） | ✅ premiumIndex | ✅ ticker.funding_rate | 证据行双所费率 + 背离标注 | ✅ |
 | 资金费率（历史） | ✅ /fapi/v1/fundingRate | ✅ contract_stats 序列 | 未消费（W1 三所背离统计） | — |
 | 大户多空比 | ✅ topLongShortPositionRatio | ✅ contract_stats top_lsr_* | 证据行双所大户比 + 分歧标注 | ✅ |
-| Taker 主动比 | ✅ takerlongshortRatio | ✅ lsr_taker | 未消费（W4 候选，OKX 同项已在主链） | — |
+| Taker 主动比 | ✅ takerlongshortRatio | ✅ lsr_taker | 跨所证据行消费双所主动多空比 | — |
 | 清算数据 | ❌ 合约端点无免费等价 | ✅ liq_*（contract_stats 聚合） | 未消费（W2 清算放量雷达；逐笔流需签名——评估为不做） | — |
 | OI（现值/历史） | ✅ openInterest / openInterestHist | ✅ open_interest(_value) | 跨所证据行消费现值（主链 OI 仍用 OKX rubik） | — |
 | 新币上线公告 | ✅ CMS bapi（实测 2253 篇，免费） | ❌ 网页 403（不做抓取） | 未消费（W3 先做人工读小工具） | — |

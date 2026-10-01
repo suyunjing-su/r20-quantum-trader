@@ -239,7 +239,20 @@ class GateAdapter(BaseExchangeAdapter):
             return {"venue": "gate", "bids": _norm(data["bids"]), "asks": _norm(data.get("asks"))}
         return None
 
-    def fetch_open_interest(self, symbol: str) -> Optional[float]:
+    def fetch_taker_ratio(self, symbol: str) -> Optional[float]:
+        """Return Gate's taker long/short ratio when contract stats exposes it."""
+        data = self._public_get("/api/v4/futures/usdt/contract_stats", {
+            "contract": self.native_symbol(symbol), "interval": "1h", "limit": 1,
+        })
+        rows = data if isinstance(data, list) else []
+        if rows:
+            try:
+                value = float(rows[-1].get("lsr_taker"))
+                return value if value > 0 else None
+            except (TypeError, ValueError, AttributeError):
+                return None
+        return None
+
         """Return Gate's current contract open interest when the stats feed provides it."""
         data = self._public_get("/api/v4/futures/usdt/contract_stats", {
             "contract": self.native_symbol(symbol), "interval": "1h", "limit": 1,
