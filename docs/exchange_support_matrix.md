@@ -59,6 +59,9 @@
 | `max_open` | 该所并发持仓笔数上限 |
 | `min_confidence` | 该所入场置信度门禁（与全局 `ASTRA_MIN_ENTRY_CONFIDENCE` 取严） |
 | `margin_per_trade_usdt` | 该所每笔保证金上限（`0` = 不设） |
+| `multi_venue_routing_enabled` | `true` = 保持现有多所撮合；`false` = 三所仍可提供行情且标的池仍可多选，但真实下单最多允许一个原始执行闸开着；冲突状态全部 fail-closed |
+
+单开闸模式下，面板仍展示三所 `display_total_equity`，但风险、模型委员会和提示词的计算权益使用唯一开闸所的 `settled_equity`。读取不到结算权益时返回未知，不以 0 代替。资金区间配置分别通过 `/api/v1/admin/equity-bands/council`、`prompt`、`risk` 管理，采用半开区间 `[min_equity, max_equity)`，最后一段可用 `null` 表示无上限。
 
 > ⚠️ `data/venue_routing.json` **不入库**（`.gitignore`）。文件缺失时各所走代码内默认值
 > （`global_risk_defaults()`，`assets` = "未配置 ⇒ 不设限"）。想停发某所：

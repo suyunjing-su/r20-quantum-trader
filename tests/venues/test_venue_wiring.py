@@ -84,6 +84,9 @@ class _WiringSandbox(unittest.TestCase):
         for key in [k for k in os.environ
                     if k.startswith("ASTRA_") and ("EXECUTION" in k or "TESTNET" in k)]:
             os.environ.pop(key, None)
+        # The default auto-routing assertions model the documented legacy baseline:
+        # OKX is the sole execution venue unless a test explicitly supplies a gate map.
+        os.environ["ASTRA_OKX_EXECUTION"] = "1"
         os.environ.pop(trader.PORTFOLIO_RISK_BUDGET_ENV, None)
         # 2026-09-28 三所平权：`submit` 分发前会对直签所跑共用入场闸门
         # （池 / 跨所敞口 / 持仓模式）。闸门取适配器算 `max_open` 与体检模式，
@@ -577,7 +580,8 @@ class TestCrossVenueCap(_WiringSandbox):
     def test_closed_venues_skipped_not_counted(self):
         ok, snap, err, _ = self._fetch({}, ready={"gate": False, "binance": False})
         self.assertTrue(ok, err)
-        self.assertEqual(snap, {}, "未开闸所无仓位来源，结构性跳过")
+        self.assertEqual(snap, {"binance": [], "gate": []},
+                         "维护快照仍覆盖关闸场所；空列表不得虚构仓位计数")
 
     def test_negative_size_side_inferred(self):
         # Gate/Binance 归一化契约：side 字段随 size_signed 正负（long/short）

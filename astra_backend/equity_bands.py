@@ -1,0 +1,160 @@
+"""Independent settled-equity band mappings for council, prompts, and risk.
+
+The resolver algorithm is shared, but each domain remains independently stored and
+managed. Ranges use half-open intervals [min_equity, max_equity); max_equity=None
+means no upper bound. Unknown equity never resolves a band.
+"""
+from __future__ import annotations
+
+import json
+import os
+import tempfile
+import uuid
+from pathlib import Path
+from typing import Any
+
+from astra_backend.file_locks import file_lock
+
+ROOT = Path(__file__).resolve().parents[1]
+BANDS_FILE = ROOT / "data" / "equity_bands.json"
+DOMAINS = ("council", "prompt", "risk")
+MAX_BANDS = 100
+
+
+def _empty() -> dict[str, list[dict[str, Any]]]:
+    return {domain: [] for domain in DOMAINS}
+
+
+def _read() -> dict[str, list[dict[str, Any]]]:
+    try:
+        raw = json.loads(BANDS_FILE.read_text(encoding="utf-8")) if BANDS_FILE.exists() else {}
+    except (OSError, json.JSONDecodeError, TypeError):
+        raw = {}
+    out = _empty()
+    if isinstance(raw, dict):
+        for domain in DOMAINS:
+            rows = raw.get(domain)
+            if isinstance(rows, list):
+                out[domain] = [dict(row) for row in rows if isinstance(row, dict)]
+    return out
+
+
+def _write(data: dict[str, list[dict[str, Any]]]) -> None:
+    BANDS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    fd, path = tempfile.mkstemp(prefix=".equity-bands-", suffix=".tmp", dir=BANDS_FILE.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, ensure_ascii=False, indent=2, allow_nan=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(path, BANDS_FILE)
+    finally:
+        if os.path.exists(path):
+            os.unlink(path)
+
+
+def _domain(domain: str) -> str:
+    key = str(domain or "").strip().lower()
+    if key not in DOMAINS:
+        raise ValueError(f"未知资金区间域：{domain}")
+    return key
+
+
+def _number(value: Any, *, name: str, allow_none: bool = False) -> float | None:
+    if value is None and allow_none:
+        return None
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} 必须是数字") from exc
+    if result != result or result in (float("inf"), float("-inf")):
+        raise ValueError(f"{name} 必须是有限数字")
+    return result
+
+
+def validate_bands(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not isinstance(rows, list) or len(rows) > MAX_BANDS:
+        raise ValueError(f"资金区间数量必须在 0 到 {MAX_BANDS} 条之间")
+    normalized: list[dict[str, Any]] = []
+    ids: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError("资金区间必须是对象")
+        band_id = str(row.get("id") or uuid.uuid4().hex).strip()
+        if not band_id or band_id in ids or len(band_id) > 80:
+            raise ValueError("资金区间 id 缺失、重复或过长")
+        target_id = str(row.get("target_id") or "").strip()
+        if not target_id or len(target_id) > 120:
+            raise ValueError("资金区间必须指定 target_id")
+        minimum = _number(row.get("min_equity", 0), name="min_equity")
+        maximum = _number(row.get("max_equity"), name="max_equity", allow_none=True)
+        if minimum is None or minimum < 0:
+            raise ValueError("min_equity 必须大于等于 0")
+        if maximum is not None and maximum <= minimum:
+            raise ValueError("max_equity 必须大于 min_equity")
+        normalized.append({
+            "id": band_id,
+            "min_equity": minimum,
+            "max_equity": maximum,
+            "target_id": target_id,
+            "enabled": bool(row.get("enabled", True)),
+            "priority": int(row.get("priority", 0) or 0),
+        })
+        ids.add(band_id)
+
+    enabled = sorted((row for row in normalized if row["enabled"]),
+                     key=lambda row: (row["min_equity"], row["max_equity"] is None,
+                                      row["max_equity"] or float("inf"), row["priority"], row["id"]))
+    for left, right in zip(enabled, enabled[1:]):
+        left_max = left["max_equity"]
+        if left_max is None or right["min_equity"] < left_max:
+            raise ValueError(f"资金区间重叠：{left['id']} 与 {right['id']}")
+    return normalized
+
+
+def list_bands(domain: str) -> list[dict[str, Any]]:
+    key = _domain(domain)
+    with file_lock(BANDS_FILE):
+        return _read()[key]
+
+
+def save_bands(domain: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    key = _domain(domain)
+    normalized = validate_bands(rows)
+    with file_lock(BANDS_FILE):
+        data = _read()
+        data[key] = normalized
+        _write(data)
+    return normalized
+
+
+def resolve_band(domain: str, settled_equity: Any) -> dict[str, Any] | None:
+    key = _domain(domain)
+    if settled_equity is None:
+        return None
+    try:
+        equity = _number(settled_equity, name="settled_equity")
+    except ValueError:
+        return None
+    if equity is None or equity < 0:
+        return None
+    for row in list_bands(key):
+        if not row.get("enabled", True):
+            continue
+        minimum = float(row.get("min_equity", 0))
+        maximum = row.get("max_equity")
+        if equity >= minimum and (maximum is None or equity < float(maximum)):
+            return dict(row)
+    return None
+
+
+def resolve_council_profile(equity: Any) -> dict[str, Any] | None:
+    return resolve_band("council", equity)
+
+
+def resolve_prompt_profile(equity: Any) -> dict[str, Any] | None:
+    return resolve_band("prompt", equity)
+
+
+def resolve_risk_suite(equity: Any) -> dict[str, Any] | None:
+    return resolve_band("risk", equity)

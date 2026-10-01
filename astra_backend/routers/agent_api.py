@@ -98,9 +98,15 @@ def agent_capabilities(x_api_key: str | None = Header(default=None, alias="X-API
             "POST /api/v1/admin/risk/custom-suites",
             "PUT /api/v1/admin/risk/custom-suites/{suite_id}",
             "DELETE /api/v1/admin/risk/custom-suites/{suite_id}",
+            "POST /api/v1/admin/council/profiles",
+            "PUT /api/v1/admin/council/profiles/{profile_id}",
+            "POST /api/v1/admin/council/profiles/{profile_id}/apply",
+            "DELETE /api/v1/admin/council/profiles/{profile_id}",
+            "PUT /api/v1/admin/equity-bands/{domain}",
         ],
         "routes": {
-            "council": ["/api/v1/admin/council/config", "/api/v1/admin/council/apply-suite", "/api/v1/admin/council/reset-role", "/api/v1/admin/council/import", "/api/v1/admin/council/export"],
+            "council": ["/api/v1/admin/council/config", "/api/v1/admin/council/profiles", "/api/v1/admin/council/apply-suite", "/api/v1/admin/council/reset-role", "/api/v1/admin/council/import", "/api/v1/admin/council/export"],
+            "equity_bands": ["/api/v1/admin/equity-bands/{domain}"],
             "prompt_workshop": ["/api/v1/admin/prompt-library", "/api/v1/admin/prompt-profiles", "/api/v1/admin/prompts"],
             "evolution": ["/api/v1/admin/evolution/config"],
             "risk_and_interceptors": ["/api/v1/admin/risk", "/api/v1/admin/interceptors"],
@@ -128,6 +134,7 @@ def get_agent_exchange_config(x_api_key: str | None = Header(default=None, alias
     return {
         "preferred_venue": routing_policy.load_preferred_venue(),
         "routing_mode": routing_policy.load_routing_mode(),
+        "multi_venue_routing_enabled": routing_policy.load_multi_venue_routing_enabled(),
         "okx_environment": __import__("astra_backend.config", fromlist=["settings"]).settings.okx_environment,
         "execution_enabled": {
             "okx": os.getenv("ASTRA_OKX_EXECUTION", "0") == "1",

@@ -56,6 +56,7 @@ class MultiExchangeUpdate(BaseModel):
     okx_environment: str | None = None     # OKX 资金环境：demo|live
     preferred_venue: str | None = None  # 全局路由首选：okx|binance|gate|auto
     routing_mode: str | None = None     # 选所路由模式：auto|balanced|split
+    multi_venue_routing_enabled: bool | None = None  # 关闭后最多一个交易所参与下单
     # 三所独立 USDT 永续合约池；允许同一合约同时出现在多个池，由撮合路由策略选所。
     okx_instruments: list[str] | None = None
     binance_instruments: list[str] | None = None
@@ -183,6 +184,23 @@ class CouncilImportRequest(BaseModel):
 
 class CouncilTestRequest(BaseModel):
     mock_market_prompt: str | None = None
+
+
+class EquityBandsUpdateRequest(BaseModel):
+    bands: list[dict[str, Any]] = Field(default_factory=list, max_length=100)
+
+
+class CouncilProfileCreateRequest(BaseModel):
+    profile_id: str = Field(min_length=1, max_length=80)
+    name: str = Field(min_length=1, max_length=80)
+    description: str = Field(default="", max_length=240)
+    config: dict[str, Any]
+
+
+class CouncilProfileUpdateRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    description: str | None = Field(default=None, max_length=240)
+    config: dict[str, Any] | None = None
 
 
 class InitialCapitalUpdate(BaseModel):

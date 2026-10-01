@@ -115,7 +115,7 @@ def _atomic_write_json(file_path: Path, data: Any) -> None:
 
 
 @_locked_council
-def load_council_config() -> Dict[str, Any]:
+def load_council_config(equity: float | None = None) -> Dict[str, Any]:
     """读取委员会配置；**绝不**用工厂默认覆盖可解析的用户文件。
 
     审计 P1-4a：旧实现两道静默覆盖（读闸白名单不匹配 / JSON 损坏）都是
@@ -123,6 +123,21 @@ def load_council_config() -> Dict[str, Any]:
     现在：可解析 → 原样返回（结构问题只打警告标记，由写闸/UI 提示）；
     损坏 → 先备份成 `council_config_corrupt_*.json` 再重建默认（留痕可恢复）。
     """
+    if equity is not None:
+        try:
+            from astra_backend.equity_bands import resolve_council_profile
+            band = resolve_council_profile(equity)
+            if band:
+                profile = get_council_profile(str(band.get("target_id") or ""))
+                if profile and isinstance(profile.get("config"), dict):
+                    selected = json.loads(json.dumps(profile["config"], ensure_ascii=False))
+                    selected["active_profile_id"] = profile.get("id")
+                    selected["equity_band_id"] = band.get("id")
+                    selected["calculation_equity"] = float(equity)
+                    return selected
+        except Exception:
+            pass
+
     if COUNCIL_CONFIG_FILE.is_file():
         try:
             with open(COUNCIL_CONFIG_FILE, "r", encoding="utf-8") as f:
@@ -358,6 +373,111 @@ def import_council_config(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 
+
+
+COUNCIL_PROFILES_FILE = DATA_DIR / "council_profiles.json"
+MAX_COUNCIL_PROFILES = 100
+
+
+def _read_council_profiles() -> list[Dict[str, Any]]:
+    try:
+        raw = json.loads(COUNCIL_PROFILES_FILE.read_text(encoding="utf-8")) if COUNCIL_PROFILES_FILE.exists() else []
+    except (OSError, json.JSONDecodeError, TypeError):
+        raw = []
+    if isinstance(raw, dict):
+        raw = raw.get("profiles", [])
+    return [dict(row) for row in raw if isinstance(row, dict)] if isinstance(raw, list) else []
+
+
+def _write_council_profiles(rows: list[Dict[str, Any]]) -> None:
+    _atomic_write_json(COUNCIL_PROFILES_FILE, {"profiles": rows})
+
+
+def _validate_council_profile_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(config, dict):
+        raise ValueError("委员会方案 config 必须是对象")
+    roles = config.get("roles")
+    if not isinstance(roles, dict) or not roles:
+        raise ValueError("委员会方案至少需要包含角色配置")
+    problem = validate_council_roles(roles)
+    if problem:
+        raise ValueError(f"委员会方案不合法：{problem}")
+    current = load_council_config()
+    model_problems = validate_seat_model_bindings(roles, current.get("roles") or {})
+    if model_problems:
+        raise ValueError("；".join(model_problems))
+    mode = str(config.get("consensus_mode", DEFAULT_CONSENSUS_MODE)).strip().lower()
+    if mode not in VALID_CONSENSUS_MODES:
+        raise ValueError(f"非法 consensus_mode：{mode}")
+    return {
+        "enabled": bool(config.get("enabled", False)),
+        "consensus_mode": mode,
+        "timeout_seconds": clamp_council_timeout(config.get("timeout_seconds", DEFAULT_COUNCIL_TIMEOUT)),
+        "roles": json.loads(json.dumps(roles, ensure_ascii=False)),
+    }
+
+
+def list_council_profiles() -> list[Dict[str, Any]]:
+    with file_lock(COUNCIL_PROFILES_FILE):
+        return _read_council_profiles()
+
+
+def save_council_profile(profile_id: str, name: str, description: str,
+                         config: Dict[str, Any], *, update: bool = False) -> Dict[str, Any]:
+    key = str(profile_id or "").strip()
+    if not key or len(key) > 80:
+        raise ValueError("委员会方案 ID 不合法")
+    clean_name = str(name or "").strip()
+    if not clean_name or len(clean_name) > 80:
+        raise ValueError("委员会方案名称不合法")
+    normalized = _validate_council_profile_config(config)
+    with file_lock(COUNCIL_PROFILES_FILE):
+        rows = _read_council_profiles()
+        index = next((i for i, row in enumerate(rows) if row.get("id") == key), None)
+        if index is not None and not update:
+            raise ValueError("委员会方案 ID 已存在")
+        item = {
+            "id": key,
+            "name": clean_name,
+            "description": str(description or "").strip(),
+            "config": normalized,
+            "updated_at": datetime.now(_BJ).isoformat(sep=" ", timespec="seconds"),
+        }
+        if index is None:
+            if len(rows) >= MAX_COUNCIL_PROFILES:
+                raise ValueError(f"委员会方案最多保存 {MAX_COUNCIL_PROFILES} 条")
+            rows.append(item)
+        else:
+            rows[index] = item
+        _write_council_profiles(rows)
+        return item
+
+
+def get_council_profile(profile_id: str) -> Dict[str, Any] | None:
+    key = str(profile_id or "").strip()
+    return next((row for row in list_council_profiles() if row.get("id") == key), None)
+
+
+def delete_council_profile(profile_id: str) -> bool:
+    key = str(profile_id or "").strip()
+    with file_lock(COUNCIL_PROFILES_FILE):
+        rows = _read_council_profiles()
+        kept = [row for row in rows if row.get("id") != key]
+        if len(kept) == len(rows):
+            return False
+        _write_council_profiles(kept)
+        return True
+
+
+def apply_council_profile(profile_id: str) -> Dict[str, Any]:
+    profile = get_council_profile(profile_id)
+    if profile is None:
+        raise ValueError("委员会方案不存在")
+    config = dict(profile.get("config") or {})
+    config["profile_id"] = profile.get("id")
+    saved = save_council_config(config)
+    saved["active_profile_id"] = profile.get("id")
+    return saved
 
 
 @_locked_council

@@ -47,17 +47,8 @@ def _env_on(name: str) -> bool:
     return str(os.environ.get(name, "0")).strip().lower() in _TRUE_VALUES
 
 
-def execution_open(venue: str, environment: str = "live") -> bool:
-    """场所执行开闸的统一判定（运行时读 env，支持热切换无需改码）。
-
-    G9 单源判定 = 能力表 ``adapter_execution_flag`` 声明 AND 环境双轴旗标：
-    - OKX 与 Binance/Gate 均声明独立执行旗标；OKX 的直签链路只使用同一把
-      ASTRA_OKX_EXECUTION，不复制 DEMO_EXECUTION 变体；
-    - 已声明（gate/binance）：live 档读声明旗标原样，沙盒档（sandbox/demo/testnet）
-      读 ``<前缀>DEMO_EXECUTION`` 变体（ASTRA_GATE_EXECUTION→ASTRA_GATE_DEMO_
-      EXECUTION）——打开只放行**模拟盘真实发送**，绝不标示/充当 LIVE 实盘。
-    单参调用 ``execution_open(venue)`` = live 档语义，逐字节兼容旧判定。
-    """
+def execution_open_raw(venue: str, environment: str = "live") -> bool:
+    """Return the venue's own environment execution flag without global routing policy."""
     key = str(venue or "").strip().lower()
     cls = _ADAPTERS.get(key)
     base_flag = getattr(getattr(cls, "capabilities", None), "adapter_execution_flag", "")
@@ -70,6 +61,27 @@ def execution_open(venue: str, environment: str = "live") -> bool:
     if is_sandbox_environment(environment):
         return _env_on(base_flag.replace("EXECUTION", "DEMO_EXECUTION"))
     return _env_on(base_flag)
+
+
+def execution_open(venue: str, environment: str = "live") -> bool:
+    """场所执行开闸的统一判定（运行时读 env，支持热切换无需改码）。
+
+    先执行单所能力表与环境开关判定，再叠加 data/venue_routing.json 中的
+    multi_venue_routing_enabled 全局策略。多所路由关闭时，只有在全局恰好
+    一个 venue 原始开闸的情况下才允许该 venue；冲突状态全部 fail-closed。
+    """
+    key = str(venue or "").strip().lower()
+    if not execution_open_raw(key, environment):
+        return False
+    try:
+        from . import routing_policy
+        if routing_policy.load_multi_venue_routing_enabled():
+            return True
+        return routing_policy.active_execution_venue(
+            environment, open_checker=execution_open_raw) == key
+    except Exception:
+        # 路由策略不可读时不扩大权限；单所执行门禁保守关闭。
+        return False
 
 
 def _derive_adapter_execution_enabled() -> Dict[str, bool]:
@@ -235,6 +247,18 @@ def require_execution(venue: str, environment: Optional[str] = None,
     cap = adapter.capabilities
     env = str(getattr(adapter, "environment", "live") or "live")
     if not execution_open(cap.venue, env) and not maintenance:
+        conflict = False
+        try:
+            from . import routing_policy
+            conflict = (not routing_policy.load_multi_venue_routing_enabled()
+                        and routing_policy.execution_open_conflict(env))
+        except Exception:
+            pass
+        if conflict:
+            raise ExchangeCapabilityError(
+                f"{cap.display_name}: 撮合路由策略关闭时检测到多个交易所同时开闸，"
+                "为安全起见本次新开仓已 fail-closed；请只保留一个执行开关。"
+            )
         if cap.venue == "gate":
             needed = ("ASTRA_GATE_DEMO_EXECUTION" if is_sandbox_environment(env)
                       else "ASTRA_GATE_EXECUTION")

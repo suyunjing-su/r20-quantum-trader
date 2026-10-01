@@ -51,6 +51,7 @@ def _venue_account_unknown(status: str, reason: str) -> dict[str, Any]:
     out: dict[str, Any] = {"status": status, "reason": reason}
     for f in _VENUE_ACCOUNT_FIELDS:
         out[f] = None
+    out["_settled_equity"] = None
     # 第一百六十九刀：`last_sync_ts` → **`last_sync_ms`**（值一直是毫秒，名字在说谎）。
     # 本字段只出现在本接口的响应里（不落盘），仓库内无旧名读者；前端 store 已同步改名。
     out["last_sync_ms"] = None
@@ -96,12 +97,15 @@ def _venue_accounts_okx(environment: str) -> dict[str, Any]:
 
         if usdt_detail and (usdt_detail.get("eq") not in (None, "") or usdt_detail.get("cashBal") not in (None, "")):
             eq_val = float(usdt_detail.get("eq") or usdt_detail.get("cashBal") or 0.0)
+            settled_val = float(usdt_detail.get("cashBal") or eq_val)
             avail_val = float(usdt_detail.get("availEq") or usdt_detail.get("availBal") or eq_val)
         else:
             eq_val = float(row.get("totalEq") or row.get("eq") or 0.0)
+            settled_val = float(row.get("adjEq") or row.get("totalEq") or row.get("eq") or 0.0)
             avail_val = float(usdt_detail.get("availEq") or usdt_detail.get("availBal") or eq_val) if usdt_detail else eq_val
 
         out["equity"] = eq_val if eq_val > 0 else None
+        out["_settled_equity"] = settled_val if settled_val >= 0 else None
         out["available"] = avail_val
         out["positions_count"] = sum(1 for p in (pos or []) if abs(float(p.get("pos") or 0)) > 1e-12)
         out["open_orders_count"] = len(pend or [])
@@ -142,6 +146,7 @@ def _venue_accounts_gate(environment: str) -> dict[str, Any]:
         return {
             "status": "ready",
             "equity": float(acct.get("equity_usdt") or 0),
+            "_settled_equity": float(acct.get("settled_equity_usdt") if acct.get("settled_equity_usdt") is not None else acct.get("equity_usdt") or 0),
             "available": float(acct.get("available_usdt") or 0),
             "positions_count": len(positions),
             "open_orders_count": len(open_rows if isinstance(open_rows, list) else []),
@@ -192,6 +197,7 @@ def _venue_accounts_binance(environment: str = "demo") -> dict[str, Any]:
         return {
             "status": "ready",
             "equity": float(acct.get("equity_usdt") or 0.0),
+            "_settled_equity": float(acct.get("settled_equity_usdt") if acct.get("settled_equity_usdt") is not None else acct.get("equity_usdt") or 0.0),
             "available": float(acct.get("available_usdt") or 0.0),
             "positions_count": len(positions),
             "open_orders_count": len(open_rows if isinstance(open_rows, list) else []),
@@ -319,8 +325,15 @@ def admin_multi_exchange_status(x_astra_admin_token: str | None = Header(default
 
     from astra_backend.exchanges import routing_policy
     pref = routing_policy.load_preferred_venue()
+    routing_enabled = routing_policy.load_multi_venue_routing_enabled()
+    routing_environment = okx_env.mode
+    active_execution_venue = routing_policy.active_execution_venue(routing_environment)
+    execution_conflict = routing_policy.execution_open_conflict(routing_environment)
     return {"venues": venues, "health": health, "preferred_venue": pref,
             "routing_mode": routing_policy.load_routing_mode(),
+            "multi_venue_routing_enabled": routing_enabled,
+            "active_execution_venue": active_execution_venue,
+            "execution_conflict": execution_conflict,
             "accounts_status": accounts_status,
             # OKX 仍不进入旧版通用 venues/账户字段，但暴露统一执行总闸状态。
             "okx_execution_open": _execution_open_for_status("okx", okx_env.mode),
@@ -358,8 +371,6 @@ def admin_multi_exchange_update(payload: MultiExchangeUpdate,
     fn_update_env = app_attr("update_env", update_env)
     fn_refresh_settings = app_attr("refresh_settings", refresh_settings)
     rec_audit = app_attr("audit_record", audit_record)
-    if secret_values:
-        fn_save_secrets(secret_values)
     env_values: dict[str, Any] = {}
     if payload.binance_testnet is not None:
         env_values["ASTRA_BINANCE_TESTNET"] = "1" if payload.binance_testnet else "0"
@@ -384,9 +395,50 @@ def admin_multi_exchange_update(payload: MultiExchangeUpdate,
         env_values["ASTRA_OKX_EXECUTION"] = "1" if payload.okx_execution else "0"
     if payload.okx_environment is not None:
         env_values["ASTRA_OKX_ENV"] = "demo" if payload.okx_environment.lower() == "demo" else "live"
+    # 单开闸模式在写入环境变量前预检投影状态，避免先落盘再发现冲突而留下
+    # 「管理页保存失败但闸已改变」的半成功状态。
+    from astra_backend.exchanges import execution_open_raw, routing_policy
+    projected_routing_enabled = (
+        routing_policy.load_multi_venue_routing_enabled()
+        if payload.multi_venue_routing_enabled is None
+        else bool(payload.multi_venue_routing_enabled)
+    )
+    if not projected_routing_enabled:
+        projected_open: list[str] = []
+        for venue in ("okx", "binance", "gate"):
+            if venue == "okx":
+                env = str(payload.okx_environment or "").strip().lower() or "live"
+            elif venue == "binance":
+                env = "demo" if (payload.binance_testnet if payload.binance_testnet is not None
+                                   else _venue_execution_environment(venue) == "demo") else "live"
+            else:
+                env = "demo" if (payload.gate_testnet if payload.gate_testnet is not None
+                                   else _venue_execution_environment(venue) == "demo") else "live"
+            is_open = execution_open_raw(venue, env)
+            if venue == "okx" and payload.okx_execution is not None:
+                is_open = bool(payload.okx_execution)
+            elif venue == "binance" and payload.binance_execution is not None:
+                is_open = bool(payload.binance_execution)
+            elif venue == "gate" and payload.gate_execution is not None:
+                is_open = bool(payload.gate_execution)
+            if is_open:
+                projected_open.append(venue)
+        if len(projected_open) > 1:
+            raise HTTPException(
+                status_code=409,
+                detail=("撮合路由策略已关闭时最多只能有一个交易所开闸；"
+                        f"当前/拟开闸交易所：{', '.join(projected_open)}。"
+                        "请先关闭其它交易所的执行开关。"),
+            )
+
+    if secret_values:
+        fn_save_secrets(secret_values)
     if env_values:
         fn_update_env(env_values)
     fn_refresh_settings()
+    if payload.multi_venue_routing_enabled is not None:
+        if not routing_policy.save_multi_venue_routing_enabled(payload.multi_venue_routing_enabled):
+            raise HTTPException(status_code=500, detail="撮合路由策略开关写入失败")
     if payload.preferred_venue is not None:
         from astra_backend.exchanges import routing_policy
         routing_policy.save_preferred_venue(payload.preferred_venue)
@@ -428,6 +480,7 @@ def admin_multi_exchange_update(payload: MultiExchangeUpdate,
         "env_updated": sorted(env_values.keys()),
         "preferred_venue": payload.preferred_venue,
         "routing_mode": payload.routing_mode,
+        "multi_venue_routing_enabled": payload.multi_venue_routing_enabled,
         "pool_updates": sorted(venue for venue, items in pool_updates.items() if items is not None),
     })
     refresh_settings()
@@ -597,10 +650,21 @@ def venue_accounts(environment: str = Query(default="demo"),
         "binance": _venue_accounts_binance(env_key),
     }
     from astra_backend.portfolio_aggregator import aggregate_venue_accounts
-    summary = aggregate_venue_accounts(venues_map, env_key)
+    from astra_backend.exchanges import routing_policy
+    routing_enabled = routing_policy.load_multi_venue_routing_enabled()
+    active_venue = routing_policy.active_execution_venue(env_key)
+    summary = aggregate_venue_accounts(
+        venues_map, env_key,
+        routing_enabled=routing_enabled,
+        calculation_venue=active_venue,
+    )
+    public_venues = {
+        venue: {key: value for key, value in card.items() if not str(key).startswith("_")}
+        for venue, card in venues_map.items()
+    }
     return {
         "environment": env_key,
-        "venues": venues_map,
+        "venues": public_venues,
         "portfolio_summary": summary,
         "captured_at_ms": int(time.time() * 1000),
     }

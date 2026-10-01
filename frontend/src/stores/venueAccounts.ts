@@ -12,6 +12,16 @@ export type VenueKey = 'okx' | 'gate' | 'binance'
 export interface PortfolioSummary {
   environment: VenueEnv
   total_equity: number
+  display_total_equity?: number
+  calculation_equity?: number | null
+  calculation_venue?: VenueKey | null
+  calculation_basis?: string
+  calculation_status?: string
+  calculation_available?: number | null
+  calculation_margin_used?: number | null
+  calculation_utilization_pct?: number | null
+  calculation_risk_level?: string | null
+  routing_enabled?: boolean
   total_available: number
   margin_used: number
   utilization_pct: number

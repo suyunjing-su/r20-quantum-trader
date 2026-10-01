@@ -112,7 +112,7 @@ def _holdings_report(inst_id: str, trackers: dict[str, Any]) -> dict[str, Any]:
 
 
 @router.get("/api/v1/admin/risk")
-def admin_risk_get(equity: float | None = Query(default=None, description="可用权益（USDT），用于派生引擎当前口径"),
+def admin_risk_get(equity: float | None = Query(default=None, description="已结算资金权益（USDT），用于派生引擎当前口径"),
                    x_astra_session: str | None = Header(default=None, alias="X-Astra-Session")) -> dict[str, Any]:
     refresh_settings()
     require_admin_header(x_astra_session=x_astra_session)
@@ -121,6 +121,8 @@ def admin_risk_get(equity: float | None = Query(default=None, description="可�
         "suites": risk_config.SUITES,
         "custom_suites": risk_config.custom_suites(),
         "values": risk_config.current_values(),
+        "equity_band": __import__("astra_backend.equity_bands", fromlist=["resolve_risk_suite"]).resolve_risk_suite(equity),
+        "resolved_values": risk_config.current_values(equity),
         # 审计未完成清单#3：把"引擎此刻真正在用什么"和"下一周期会用什么"并排给出——
         # P0-2/P1-1 能长期隐身，正是因为页面上只有前者（文件值）没有后者（进程快照）。
         "process_values": risk_config.process_values(),

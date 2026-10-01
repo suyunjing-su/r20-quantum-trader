@@ -10,7 +10,7 @@ from typing import Any
 from fastapi import Header, HTTPException
 from astra_backend.audit import record as audit_record
 from astra_backend.dependencies import ROOT, require_admin_header, require_superadmin
-from astra_backend.schemas import CouncilConfigUpdateRequest, CouncilApplySuiteRequest, CouncilResetRoleRequest, CouncilImportRequest, CouncilTestRequest
+from astra_backend.schemas import CouncilConfigUpdateRequest, CouncilApplySuiteRequest, CouncilResetRoleRequest, CouncilImportRequest, CouncilTestRequest, CouncilProfileCreateRequest, CouncilProfileUpdateRequest, EquityBandsUpdateRequest
 from scripts.prompt_library import active_profile, apply_module_layout
 
 from fastapi import APIRouter
@@ -30,6 +30,10 @@ def admin_get_council_config(x_astra_session: str | None = Header(default=None, 
     cfg["model_health_note"] = (
         "席位绑定未登记模型时，该席位由主脑模型代答（载荷带 model_fallback 标记）"
     )
+    from astra_backend.council_manager import list_council_profiles
+    from astra_backend.equity_bands import list_bands
+    cfg["profiles"] = list_council_profiles()
+    cfg["equity_bands"] = list_bands("council")
     return cfg
 
 
@@ -52,7 +56,87 @@ def admin_update_council_config(payload: CouncilConfigUpdateRequest, x_astra_ses
     return {"status": "ok", "config": saved}
 
 
-@router.post("/api/v1/admin/council/apply-suite")
+
+
+@router.get("/api/v1/admin/council/profiles")
+def admin_list_council_profiles(x_astra_session: str | None = Header(default=None, alias="X-Astra-Session")) -> dict[str, Any]:
+    require_admin_header(x_astra_session=x_astra_session)
+    from astra_backend.council_manager import list_council_profiles
+    return {"profiles": list_council_profiles()}
+
+
+@router.post("/api/v1/admin/council/profiles")
+def admin_create_council_profile(payload: CouncilProfileCreateRequest, x_astra_session: str | None = Header(default=None, alias="X-Astra-Session")) -> dict[str, Any]:
+    actor = require_superadmin(x_astra_session)
+    from astra_backend.council_manager import save_council_profile
+    try:
+        profile = save_council_profile(payload.profile_id, payload.name, payload.description, payload.config)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    audit_record("council.profile.create", "success", {"actor": actor["username"], "profile_id": profile["id"]})
+    return {"status": "ok", "profile": profile}
+
+
+@router.put("/api/v1/admin/council/profiles/{profile_id}")
+def admin_update_council_profile(profile_id: str, payload: CouncilProfileUpdateRequest, x_astra_session: str | None = Header(default=None, alias="X-Astra-Session")) -> dict[str, Any]:
+    actor = require_superadmin(x_astra_session)
+    from astra_backend.council_manager import get_council_profile, save_council_profile
+    current = get_council_profile(profile_id)
+    if current is None:
+        raise HTTPException(status_code=404, detail="委员会方案不存在")
+    try:
+        profile = save_council_profile(
+            profile_id,
+            payload.name if payload.name is not None else current.get("name", profile_id),
+            payload.description if payload.description is not None else current.get("description", ""),
+            payload.config if payload.config is not None else current.get("config", {}),
+            update=True,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    audit_record("council.profile.update", "success", {"actor": actor["username"], "profile_id": profile_id})
+    return {"status": "ok", "profile": profile}
+
+
+@router.post("/api/v1/admin/council/profiles/{profile_id}/apply")
+def admin_apply_council_profile(profile_id: str, x_astra_session: str | None = Header(default=None, alias="X-Astra-Session")) -> dict[str, Any]:
+    actor = require_superadmin(x_astra_session)
+    from astra_backend.council_manager import apply_council_profile
+    try:
+        saved = apply_council_profile(profile_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    audit_record("council.profile.apply", "success", {"actor": actor["username"], "profile_id": profile_id})
+    return {"status": "ok", "profile_id": profile_id, "config": saved}
+
+
+@router.delete("/api/v1/admin/council/profiles/{profile_id}")
+def admin_delete_council_profile(profile_id: str, x_astra_session: str | None = Header(default=None, alias="X-Astra-Session")) -> dict[str, Any]:
+    actor = require_superadmin(x_astra_session)
+    from astra_backend.council_manager import delete_council_profile
+    if not delete_council_profile(profile_id):
+        raise HTTPException(status_code=404, detail="委员会方案不存在")
+    audit_record("council.profile.delete", "success", {"actor": actor["username"], "profile_id": profile_id})
+    return {"status": "ok", "deleted": profile_id}
+
+
+@router.get("/api/v1/admin/council/equity-bands")
+def admin_get_council_equity_bands(x_astra_session: str | None = Header(default=None, alias="X-Astra-Session")) -> dict[str, Any]:
+    require_admin_header(x_astra_session=x_astra_session)
+    from astra_backend.equity_bands import list_bands
+    return {"domain": "council", "bands": list_bands("council")}
+
+
+@router.put("/api/v1/admin/council/equity-bands")
+def admin_put_council_equity_bands(payload: EquityBandsUpdateRequest, x_astra_session: str | None = Header(default=None, alias="X-Astra-Session")) -> dict[str, Any]:
+    actor = require_superadmin(x_astra_session)
+    from astra_backend.equity_bands import save_bands
+    try:
+        bands = save_bands("council", payload.bands)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    audit_record("council.equity_bands.update", "success", {"actor": actor["username"], "count": len(bands)})
+    return {"domain": "council", "bands": bands}
 def admin_apply_council_suite(payload: CouncilApplySuiteRequest, x_astra_session: str | None = Header(default=None, alias="X-Astra-Session")) -> dict[str, Any]:
     actor = require_superadmin(x_astra_session)
     from astra_backend.council_manager import apply_preset_suite

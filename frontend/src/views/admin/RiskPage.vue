@@ -28,8 +28,10 @@ import { useI18n } from '../../composables/useI18n';
 const { t } = useI18n();
 import { useApi } from '../../composables/useApi';
 import { useAsyncAction } from '../../composables/useAsyncAction';
-import { useDashboardStore } from '../../stores/dashboard';
+import { useVenueAccountsStore } from '../../stores/venueAccounts';
 import PageHeader from '../../components/admin/PageHeader.vue';
+import EquityBandsEditor from '../../components/admin/EquityBandsEditor.vue';
+import { useAuthStore } from '../../stores/auth';
 import DangerZone from '../../components/admin/page-parts/DangerZone.vue';
 import BaseEmpty from '../../components/base/BaseEmpty.vue';
 import BaseSwitch from '../../components/base/BaseSwitch.vue';
@@ -39,7 +41,8 @@ import { ShieldAlert, Save, RotateCcw, Loader2, Info, Layers,
 import BaseLoadingAnnounce from '../../components/base/BaseLoadingAnnounce.vue';
 
 const { api } = useApi();
-const store = useDashboardStore();
+const auth = useAuthStore();
+const venueAccounts = useVenueAccountsStore();
 
 const busy = ref<'save' | 'reset' | ''>('');
 
@@ -58,6 +61,10 @@ const driftCount = computed(() => {
 })
 const suites = ref<any[]>([]);
 const customSuites = ref<any[]>([]);
+const riskBandTargets = computed(() => [
+  ...suites.value.map((row: any) => ({ id: row.id, name: row.name })),
+  ...customSuites.value.map((row: any) => ({ id: row.id, name: row.name })),
+]);
 const customEditorOpen = ref(false);
 const customSuiteId = ref('');
 const customSuiteName = ref('');
@@ -230,11 +237,13 @@ function syncFromServer(values: Record<string, number>) {
 // F2：动作类样板（busy + 统一错误出口）。error → toast 与原实现一致；
 // initialBusy: true 保持"首帧即加载态"（原为 loading = ref(true)）。
 const { run: loadData, busy: loading, error: loadError } = useAsyncAction(async () => {
-  // 带上页面上展示的可用权益，让后端派生"引擎此刻的口径"（权益未知时后端会如实标 None）
-  const eq = Number((store as any)?.data?.account?.avail_eq)
-  const query = Number.isFinite(eq) && eq > 0 ? `?equity=${eq}` : ''
+  // 资金区间基于账户面板的结算权益口径；未知权益不伪造成 0。
+  await venueAccounts.refresh()
+  const eq = venueAccounts.portfolioSummary?.calculation_equity
+  const query = typeof eq === 'number' && Number.isFinite(eq) && eq >= 0 ? `?equity=${encodeURIComponent(eq)}` : ''
   const res = await api<any>(`/api/v1/admin/risk${query}`)
   schema.value = res.schema
+  suites.value = res.suites || []
   customSuites.value = res.custom_suites || []
   effectText.value = res.effect || ''
   processValues.value = res.process_values || {}
@@ -479,6 +488,8 @@ onMounted(loadData)
         </button>
       </template>
     </PageHeader>
+
+    <EquityBandsEditor domain="risk" :targets="riskBandTargets" />
 
     <!-- 生效说明条 -->
     <div class="rk-note" :class="{ 'is-warn': driftCount.length || processFresh?.stale }">

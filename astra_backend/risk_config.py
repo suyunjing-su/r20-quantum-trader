@@ -383,8 +383,8 @@ def schema() -> dict[str, Any]:
     return {"groups": GROUPS, "params": params, "high_risk_phrase": HIGH_RISK_PHRASE}
 
 
-def current_values() -> dict[str, float | int]:
-    """当前生效值（原生单位）：读进程环境变量（update_env 会同步刷新），缺省回退默认值。"""
+def current_values(equity: float | None = None) -> dict[str, float | int]:
+    """当前生效值；传入结算权益时按独立风险资金区间选择方案。"""
     out: dict[str, float | int] = {}
     for p in _PARAMS:
         raw = os.environ.get(p["key"], "")
@@ -392,6 +392,16 @@ def current_values() -> dict[str, float | int]:
             out[p["key"]] = int(float(raw)) if p["type"] == "int" else float(raw)
         except (TypeError, ValueError):
             out[p["key"]] = DEFAULTS[p["key"]]
+    if equity is not None:
+        try:
+            from astra_backend.equity_bands import resolve_risk_suite
+            band = resolve_risk_suite(equity)
+            if band and band.get("target_id"):
+                target = str(band["target_id"])
+                out.update(suite_values(target) if target in SUITES else custom_suite_values(target))
+        except (KeyError, ValueError, TypeError):
+            # Invalid target never replaces the validated process values.
+            pass
     return out
 
 

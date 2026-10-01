@@ -391,6 +391,8 @@ class BinanceAdapter(BinanceAlgoRequestsMixin, BaseExchangeAdapter):
             "venue": "binance",
             "currency": "USDT",
             "equity_usdt": equity,
+            # totalWalletBalance excludes unrealized PnL and is the settled wallet basis.
+            "settled_equity_usdt": float(data.get("totalWalletBalance") or 0.0),
             "available_usdt": avail,
             "position_margin": pos_m,
             "order_margin": ord_m,

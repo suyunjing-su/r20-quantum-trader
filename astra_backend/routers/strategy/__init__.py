@@ -24,11 +24,11 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from astra_backend.routers.strategy import council, interceptors, policy, prompts
+from astra_backend.routers.strategy import council, equity_bands, interceptors, policy, prompts
 
 router = APIRouter()
 
-for _sub in (council, interceptors, policy, prompts):
+for _sub in (council, equity_bands, interceptors, policy, prompts):
     router.include_router(_sub.router)
 
 __all__ = ["router"]

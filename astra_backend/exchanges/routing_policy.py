@@ -414,6 +414,57 @@ def load_routing_mode(raw: Dict[str, Any] = None) -> str:
     return "balanced"
 
 
+
+
+def load_multi_venue_routing_enabled(raw: Dict[str, Any] = None) -> bool:
+    """读取撮合多所开关；缺失时兼容旧配置并保持原多所行为。"""
+    data = _read_raw_routing() if raw is None else raw
+    value = data.get("multi_venue_routing_enabled", True)
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    print(f"[venue_routing] warn: multi_venue_routing_enabled 非法值 {value!r}，回退 true")
+    return True
+
+
+def save_multi_venue_routing_enabled(enabled: bool) -> bool:
+    """原子保存撮合多所开关，不修改其它路由配置。"""
+    data = _read_raw_routing()
+    data["multi_venue_routing_enabled"] = bool(enabled)
+    try:
+        _write_raw_routing(data)
+        return True
+    except Exception as exc:
+        print(f"[venue_routing] 写入 multi_venue_routing_enabled 失败: {exc}")
+        return False
+
+
+def active_execution_venue(environment: str = "live", *, open_checker=None) -> str | None:
+    """返回单开闸模式下唯一原始开闸交易所，冲突或全关均返回 None。
+
+    该函数只负责读取执行旗标，不读取标的池；标的池可以继续多选，
+    由上层在实际下单时再做合约准入过滤。
+    """
+    if open_checker is None:
+        from .registry import execution_open_raw
+        open_checker = execution_open_raw
+    opened = [venue for venue in POOL_VENUES if open_checker(venue, environment)]
+    return opened[0] if len(opened) == 1 else None
+
+
+def execution_open_conflict(environment: str = "live", *, open_checker=None) -> bool:
+    """是否检测到多个交易所同时原始开闸。"""
+    if open_checker is None:
+        from .registry import execution_open_raw
+        open_checker = execution_open_raw
+    opened = [venue for venue in POOL_VENUES if open_checker(venue, environment)]
+    return len(opened) > 1
+
+
 def save_routing_mode(mode: str) -> bool:
     """写顶层 routing_mode（读-改-写原子替换，其余键原样保留）。"""
     key = str(mode or "").strip().lower()

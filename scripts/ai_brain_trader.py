@@ -730,6 +730,7 @@ def construct_full_market_prompt(
     usdt_available: float = None,
     runtime_context_out: Dict[str, Any] = None,
     policy_snapshot: Dict[str, Any] = None,
+    calculation_equity: float | None = None,
 ) -> str:
     """把本轮全市场数据渲染成用户提示词。实现见 scripts/brain/prompt.py。
 
@@ -747,7 +748,7 @@ def construct_full_market_prompt(
         sl_atr_mult_for=_sl_atr_mult_for,
         xvenue_prompt_line=_xvenue_prompt_line,
         build_risk_budget_text=build_risk_budget_text,
-        active_profile=active_profile,
+        active_profile=lambda: active_profile(equity=(calculation_equity if calculation_equity is not None else usdt_available)),
         apply_module_layout=apply_module_layout,
         system_version=__version__,
         ai_memory_md_file=AI_MEMORY_MD_FILE,
@@ -892,6 +893,60 @@ def execute_brain_pending_cancels(pending_mgmt_list: List[Any]) -> List[Dict[str
     return log
 
 
+def _resolve_calculation_equity() -> tuple[float | None, str | None, str]:
+    """Resolve settled equity from the configured execution policy, fail-closed."""
+    try:
+        from astra_backend.exchanges import get_adapter, routing_policy
+        from math import isfinite
+        from scripts.okx_runtime import current_environment
+
+        environment = str(current_environment().mode or "live").lower()
+        routing_enabled = routing_policy.load_multi_venue_routing_enabled()
+        venues = ("okx", "binance", "gate")
+        if routing_enabled:
+            values = []
+            for venue in venues:
+                try:
+                    if venue == "okx":
+                        from scripts import okx_rest
+                        rows = okx_rest.balances()
+                        row = (rows or [{}])[0]
+                        details = row.get("details") or []
+                        usdt = next((d for d in details if str(d.get("ccy", "")).upper() == "USDT"), None)
+                        value = float((usdt or {}).get("eq") or (usdt or {}).get("cashBal") or 0.0)
+                    else:
+                        adapter_env = ("sandbox" if venue == "gate" else "demo") if environment == "demo" else "live"
+                        snapshot = get_adapter(venue, environment=adapter_env).account_snapshot()
+                        value = float(snapshot.get("equity_usdt"))
+                    if isfinite(value) and value >= 0:
+                        values.append(value)
+                except Exception:
+                    continue
+            return (round(sum(values), 2), None, "multi_venue_display_equity") if values else (None, None, "unknown_display_equity")
+
+        venue = routing_policy.active_execution_venue(environment)
+        if venue is None:
+            return None, None, "unknown_active_venue"
+        if venue == "okx":
+            from scripts import okx_rest
+            rows = okx_rest.balances()
+            row = (rows or [{}])[0]
+            details = row.get("details") or []
+            usdt = next((d for d in details if str(d.get("ccy", "")).upper() == "USDT"), None)
+            raw = (usdt or {}).get("cashBal")
+            if raw in (None, ""):
+                raw = (usdt or {}).get("eq")
+        else:
+            adapter_env = ("sandbox" if venue == "gate" else "demo") if environment == "demo" else "live"
+            snapshot = get_adapter(venue, environment=adapter_env).account_snapshot()
+            raw = snapshot.get("settled_equity_usdt")
+        value = float(raw)
+        return (round(value, 2), venue, "single_open_venue_settled_equity") if isfinite(value) and value >= 0 else (None, venue, "unknown_settled_equity")
+    except Exception as exc:
+        print(f"[AI Brain Batch] calculation equity unavailable: {type(exc).__name__}: {exc}")
+        return None, None, "unknown_calculation_equity"
+
+
 def execute_batch_ai_brain_cycle(
     pos_summary: str = "[MISSING_CONTEXT:account_positions]",
     active_positions_detail: List[Dict[str, Any]] = None,
@@ -983,10 +1038,20 @@ def execute_batch_ai_brain_cycle(
         packages=packages,
         time_str=time_str    )
 
-    runtime_context = {}
-    prompt = construct_full_market_prompt(packages, pos_summary, positions_context, pending_orders_detail=pending_orders_list, current_time_str=time_str, usdt_available=usdt_available, runtime_context_out=runtime_context, policy_snapshot=policy_snapshot)
+    calculation_equity, calculation_venue, calculation_basis = _resolve_calculation_equity()
+    runtime_context = {
+        "calculation_equity": calculation_equity,
+        "calculation_venue": calculation_venue,
+        "calculation_basis": calculation_basis,
+    }
+    prompt = construct_full_market_prompt(
+        packages, pos_summary, positions_context,
+        pending_orders_detail=pending_orders_list,
+        current_time_str=time_str, usdt_available=usdt_available,
+        runtime_context_out=runtime_context, policy_snapshot=policy_snapshot,
+        calculation_equity=calculation_equity)
 
-    profile = active_profile()
+    profile = active_profile(equity=calculation_equity)
     # 审计 P1-3：覆盖层由 get_effective_system_prompt 在布局**之后**追加（此前被布局丢弃）
     effective_system_prompt = get_effective_system_prompt(profile=profile, context=runtime_context)
 

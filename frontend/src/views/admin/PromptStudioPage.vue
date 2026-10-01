@@ -41,6 +41,7 @@ import { ref, computed, onMounted } from 'vue';
 import { useI18n } from '../../composables/useI18n';
 import { useRovingTabs } from '../../composables/useRovingTabs';
 import PageHeader from '../../components/admin/PageHeader.vue';
+import EquityBandsEditor from '../../components/admin/EquityBandsEditor.vue';
 import BaseDialog from '../../components/base/BaseDialog.vue';
 import BaseSwitch from '../../components/base/BaseSwitch.vue';
 import BaseEmpty from '../../components/base/BaseEmpty.vue';
@@ -497,6 +498,8 @@ onMounted(loadLib)
         </button>
       </template>
     </PageHeader>
+
+    <EquityBandsEditor domain="prompt" :targets="lib?.profiles || []" />
 
     <!-- 载入失败 -->
     <div v-if="loadError" role="alert" class="state-block is-error">

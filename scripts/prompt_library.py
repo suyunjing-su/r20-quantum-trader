@@ -1098,7 +1098,19 @@ def _import_with_templates(source: dict[str, Any], name_override: str) -> dict[s
     return import_profile({"format": EXPORT_FORMAT, "version": EXPORT_VERSION, "profile": source}, name_override)
 
 
-def active_profile() -> dict[str, Any]:
+def active_profile(equity: float | None = None) -> dict[str, Any]:
+    """Return the active profile, optionally resolved from the independent equity bands."""
+    if equity is not None:
+        try:
+            from astra_backend.equity_bands import resolve_prompt_profile
+            band = resolve_prompt_profile(equity)
+            if band:
+                target = str(band.get("target_id") or "").strip()
+                if target:
+                    return resolve_profile(get_profile(target))
+        except Exception:
+            # A malformed optional band must not break the normal active profile path.
+            pass
     return resolve_profile(get_profile(load_library()["active_profile_id"]))
 
 

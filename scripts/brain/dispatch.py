@@ -76,7 +76,10 @@ def dispatch_llm_and_persist_decisions(*,
         council_enabled = False
         try:
             from astra_backend.council_manager import load_council_config, execute_council_debate
-            c_cfg = load_council_config()
+            c_cfg = load_council_config(
+                equity=(runtime_context or {}).get("calculation_equity")
+                if isinstance(runtime_context, dict) else None
+            )
             council_enabled = bool(c_cfg.get("enabled"))
         except Exception:
             council_enabled = False

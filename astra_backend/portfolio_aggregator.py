@@ -13,12 +13,13 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 
-def aggregate_venue_accounts(venues_dict: Dict[str, Any], environment: str) -> Dict[str, Any]:
-    """按资金环境聚合 OKX / Binance / Gate 权益与组合风险。
+def aggregate_venue_accounts(venues_dict: Dict[str, Any], environment: str,
+                             *, routing_enabled: bool = True,
+                             calculation_venue: str | None = None) -> Dict[str, Any]:
+    """按资金环境聚合三所展示权益，并计算实际风险使用权益。
 
-    入参：
-    - venues_dict: {"okx": {...}, "binance": {...}, "gate": {...}} 各所只读卡片
-    - environment: "demo" | "live"
+    ``total_equity`` 始终是三所展示聚合；当多所撮合关闭时，
+    ``calculation_equity`` 只取唯一开闸所的 settled_equity，未知不会降级为 0。
     """
     env = str(environment or "").strip().lower()
     if env not in ("demo", "live"):
@@ -82,10 +83,65 @@ def aggregate_venue_accounts(venues_dict: Dict[str, Any], environment: str) -> D
             "share_pct": share,
         }
 
+    calc_equity = None
+    calc_status = "multi_venue_display_equity"
+    calc_basis = "multi_venue_display_equity"
+    if not routing_enabled:
+        calc_basis = "single_open_venue_settled_equity"
+        calc_status = "unknown_active_venue"
+        if calculation_venue in target_venues:
+            card = venues_dict.get(calculation_venue)
+            settled = (card.get("settled_equity") if isinstance(card, dict)
+                       else None)
+            if settled is None and isinstance(card, dict):
+                settled = card.get("_settled_equity")
+            if isinstance(settled, (int, float)) and settled >= 0:
+                calc_equity = round(float(settled), 2)
+                calc_status = "ok"
+            else:
+                calc_status = "unknown_settled_equity"
+    else:
+        calc_equity = total_equity
+        calc_status = "ok" if active_venues else "unknown_display_equity"
+
+    calculation_available = None
+    calculation_margin_used = None
+    calculation_utilization_pct = None
+    calculation_risk_level = None
+    if routing_enabled:
+        if calc_equity is not None:
+            calculation_available = total_available
+    elif calculation_venue in target_venues:
+        calc_card = venues_dict.get(calculation_venue)
+        raw_available = calc_card.get("available") if isinstance(calc_card, dict) else None
+        if isinstance(raw_available, (int, float)) and raw_available >= 0:
+            calculation_available = round(float(raw_available), 2)
+
+    if calc_equity is not None and calculation_available is not None:
+        calculation_margin_used = round(max(0.0, calc_equity - calculation_available), 2)
+        calculation_utilization_pct = round(
+            calculation_margin_used / calc_equity * 100.0, 2) if calc_equity > 0 else 0.0
+        if calculation_utilization_pct > 70.0:
+            calculation_risk_level = "HIGH"
+        elif calculation_utilization_pct > 30.0:
+            calculation_risk_level = "MEDIUM"
+        else:
+            calculation_risk_level = "LOW"
+
     return {
         "environment": env,
         "total_equity": total_equity,
+        "display_total_equity": total_equity,
         "total_available": total_available,
+        "calculation_equity": calc_equity,
+        "calculation_venue": calculation_venue if not routing_enabled else None,
+        "calculation_basis": calc_basis,
+        "calculation_status": calc_status,
+        "routing_enabled": bool(routing_enabled),
+        "calculation_available": calculation_available,
+        "calculation_margin_used": calculation_margin_used,
+        "calculation_utilization_pct": calculation_utilization_pct,
+        "calculation_risk_level": calculation_risk_level,
         "margin_used": margin_used,
         "utilization_pct": utilization_pct,
         "risk_level": risk_level,

@@ -35,6 +35,7 @@ const toast = useToast();
 const { ask } = useConfirm();
 import { computed, ref, onMounted } from 'vue';
 import PageHeader from '../../components/admin/PageHeader.vue';
+import EquityBandsEditor from '../../components/admin/EquityBandsEditor.vue';
 import BaseSwitch from '../../components/base/BaseSwitch.vue';
 import BaseDialog from '../../components/base/BaseDialog.vue';
 import { useI18n } from '../../composables/useI18n';
@@ -91,6 +92,9 @@ const councilConfig = ref<any>({
 });
 
 const availableSuites = ref<any[]>([]);
+const councilProfiles = ref<any[]>([]);
+const councilProfileName = ref('');
+const councilProfileDescription = ref('');
 const availableModels = ref<any[]>([]);
 /** 审计 P1-4b：席位绑定的 model_id 不在模型库 → 后端会静默回落主脑，UI 必须说出来 */
 function modelMissing(role: any): boolean {
@@ -185,6 +189,7 @@ async function loadData() {
     ]);
     councilConfig.value = cRes;
     availableSuites.value = cRes.available_suites || [];
+    councilProfiles.value = cRes.profiles || [];
     availableModels.value = mRes.models || [];
     expandedRole.value = nextExpandedRole(Object.keys(cRes.roles || {}), expandedRole.value);
   } catch (e: any) {
@@ -287,6 +292,72 @@ async function doImportConfig() {
     importFileError.value = t('admin.council.importFailed', undefined, { msg: e.message });
   } finally {
     importing.value = false;
+  }
+}
+
+async function saveCouncilProfile() {
+  if (!auth.isSuperadmin || !councilProfileName.value.trim()) return;
+  const profileId = `council-${Date.now().toString(36)}`;
+  try {
+    const res = await api('/api/v1/admin/council/profiles', {
+      method: 'POST',
+      body: JSON.stringify({
+        profile_id: profileId,
+        name: councilProfileName.value.trim(),
+        description: councilProfileDescription.value.trim(),
+        config: buildCouncilSavePayload(councilConfig.value),
+      }),
+    });
+    councilProfiles.value = [...councilProfiles.value, res.profile];
+    councilProfileName.value = '';
+    councilProfileDescription.value = '';
+    toast.ok('委员会方案已保存');
+  } catch (e: any) {
+    toast.err(`保存委员会方案失败：${e.message}`);
+  }
+}
+
+async function updateCouncilProfile(profile: any) {
+  if (!auth.isSuperadmin) return;
+  const ok = await ask({ title: '覆盖委员会方案', desc: `使用当前委员会配置覆盖「${profile.name}」？`, danger: true, okText: '覆盖方案' });
+  if (!ok) return;
+  try {
+    const res = await api(`/api/v1/admin/council/profiles/${encodeURIComponent(profile.id)}`, {
+      method: 'PUT',
+      body: JSON.stringify({
+        name: profile.name,
+        description: profile.description || '',
+        config: buildCouncilSavePayload(councilConfig.value),
+      }),
+    });
+    councilProfiles.value = councilProfiles.value.map((row: any) => row.id === profile.id ? res.profile : row);
+    toast.ok(`委员会方案「${profile.name}」已更新`);
+  } catch (e: any) {
+    toast.err(`更新委员会方案失败：${e.message}`);
+  }
+}
+
+async function applyCouncilProfile(profile: any) {
+  if (!auth.isSuperadmin) return;
+  try {
+    const res = await api(`/api/v1/admin/council/profiles/${encodeURIComponent(profile.id)}/apply`, { method: 'POST' });
+    councilConfig.value = res.config;
+    toast.ok(`已应用委员会方案「${profile.name}」`);
+  } catch (e: any) {
+    toast.err(`应用委员会方案失败：${e.message}`);
+  }
+}
+
+async function deleteCouncilProfile(profile: any) {
+  if (!auth.isSuperadmin) return;
+  const ok = await ask({ title: '删除委员会方案', desc: `确定删除「${profile.name}」？`, danger: true, okText: '删除方案' });
+  if (!ok) return;
+  try {
+    await api(`/api/v1/admin/council/profiles/${encodeURIComponent(profile.id)}`, { method: 'DELETE' });
+    councilProfiles.value = councilProfiles.value.filter((row: any) => row.id !== profile.id);
+    toast.ok('委员会方案已删除');
+  } catch (e: any) {
+    toast.err(`删除委员会方案失败：${e.message}`);
   }
 }
 
@@ -431,6 +502,8 @@ onMounted(loadData);
       </template>
     </PageHeader>
 
+    <EquityBandsEditor domain="council" :targets="councilProfiles" />
+
     <!-- 载入失败 -->
     <div v-if="loadError" role="alert" class="state-block is-error">
       <span class="state-icon"><AlertTriangle :size="17" /></span>
@@ -546,6 +619,20 @@ onMounted(loadData);
             <span class="cn-unit">s</span>
           </label>
           <span class="cn-foot-hint">{{ t('admin.council.unsavedHint') }}</span>
+        </div>
+
+        <div class="cn-rules-foot" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+          <input v-model="councilProfileName" class="field" maxlength="80" placeholder="保存当前委员会方案名称" :disabled="!auth.isSuperadmin" />
+          <input v-model="councilProfileDescription" class="field" maxlength="240" placeholder="说明（可选）" :disabled="!auth.isSuperadmin" />
+          <button type="button" class="btn btn-ghost btn-sm" :disabled="!auth.isSuperadmin || !councilProfileName.trim()" @click="saveCouncilProfile">
+            <Save :size="13" /> 保存方案
+          </button>
+          <span v-for="profile in councilProfiles" :key="profile.id" class="badge" style="display:inline-flex;align-items:center;gap:5px">
+            {{ profile.name }}
+            <button type="button" class="btn btn-ghost btn-xs" :disabled="!auth.isSuperadmin" @click="applyCouncilProfile(profile)">应用</button>
+            <button type="button" class="btn btn-ghost btn-xs" :disabled="!auth.isSuperadmin" title="用当前配置覆盖该方案" @click="updateCouncilProfile(profile)">更新</button>
+            <button type="button" class="btn btn-ghost btn-xs" :disabled="!auth.isSuperadmin" @click="deleteCouncilProfile(profile)">×</button>
+          </span>
         </div>
       </section>
 

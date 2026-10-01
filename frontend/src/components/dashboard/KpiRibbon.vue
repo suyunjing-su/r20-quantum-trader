@@ -78,6 +78,15 @@ const totalAggregatedEquity = computed(() =>
   totalEquityNum.value === null ? t('dash.venueAccounts.unknown') : fmtNum(totalEquityNum.value, 2),
 );
 
+const calculationEquityText = computed(() => {
+  const summary = portfolioSummary.value;
+  if (!summary || summary.routing_enabled !== false) return '';
+  const equity = summary.calculation_equity;
+  return typeof equity === 'number' && Number.isFinite(equity)
+    ? `风险计算权益 ${fmtNum(equity, 2)} U${summary.calculation_venue ? ` · ${summary.calculation_venue.toUpperCase()}` : ''}`
+    : '风险计算权益未知';
+});
+
 const distOkx = computed(() => Number(portfolioSummary.value?.asset_distribution?.okx?.share_pct || 0));
 const distBinance = computed(() => Number(portfolioSummary.value?.asset_distribution?.binance?.share_pct || 0));
 const distGate = computed(() => Number(portfolioSummary.value?.asset_distribution?.gate?.share_pct || 0));
@@ -102,13 +111,23 @@ const longCount = computed(() => store.positions.filter((p) => p.side === 'long'
 const shortCount = computed(() => store.positions.filter((p) => p.side === 'short').length);
 
 const actualMarginUsed = computed(() => {
-  if (posMargin.value > 0) return posMargin.value;
   const sum = portfolioSummary.value;
+  if (sum?.routing_enabled === false) {
+    const calculationMargin = sum.calculation_margin_used;
+    return typeof calculationMargin === 'number' && Number.isFinite(calculationMargin)
+      ? calculationMargin : 0;
+  }
+  if (posMargin.value > 0) return posMargin.value;
   if (sum && typeof sum.margin_used === 'number') return Number(sum.margin_used);
   return Number(account.value.total_pos_margin || 0);
 });
 
 const marginUsage = computed(() => {
+  const summary = portfolioSummary.value;
+  if (summary?.routing_enabled === false) {
+    return typeof summary.calculation_utilization_pct === 'number'
+      ? summary.calculation_utilization_pct : 0;
+  }
   const eq = totalEquityNum.value;
   if (eq !== null && eq > 0) {
     return Math.round((actualMarginUsed.value / eq) * 1000) / 10;
@@ -154,6 +173,9 @@ onMounted(async () => {
           style="background-color: var(--surface-2); border-color: var(--line-1); color: var(--ink-2)"
         >
           {{ t('dash.matrix.kpi.venuesConnected', undefined, { n: portfolioSummary?.active_venues_count }) }}
+        </span>
+        <span v-if="calculationEquityText" class="rounded px-1.5 py-0.5 border text-3xs font-mono" style="background-color:var(--surface-2);border-color:var(--line-1);color:var(--ink-2)">
+          {{ calculationEquityText }}
         </span>
       </div>
 

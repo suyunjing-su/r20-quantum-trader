@@ -364,6 +364,9 @@ class GateAdapter(BaseExchangeAdapter):
         return {
             "venue": "gate", "currency": str(data.get("currency") or "USDT"),
             "equity_usdt": float(data.get("total") or 0),
+            # Gate total account balance is the wallet/settled balance; unrealised PnL
+            # is exposed separately and must not silently become calculation equity.
+            "settled_equity_usdt": float(data.get("total") or 0),
             "available_usdt": float(data.get("available") or 0),
             "position_margin": float(data.get("position_margin") or 0),
             "order_margin": float(data.get("order_margin") or 0),

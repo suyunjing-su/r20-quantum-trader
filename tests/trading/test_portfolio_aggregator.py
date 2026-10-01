@@ -122,6 +122,33 @@ class PortfolioAggregatorTests(unittest.TestCase):
         self.assertEqual(res["risk_level"], "LOW")
         self.assertEqual(res["asset_distribution"]["okx"]["share_pct"], 0.0)
 
+    def test_single_venue_calculation_keeps_display_aggregate(self):
+        venues = {
+            "okx": {"status": "ready", "equity": 1000.0, "settled_equity": 900.0, "available": 700.0},
+            "binance": {"status": "ready", "equity": 2500.0, "settled_equity": 2300.0, "available": 2000.0},
+            "gate": {"status": "ready", "equity": 500.0, "settled_equity": 450.0, "available": 300.0},
+        }
+        res = aggregate_venue_accounts(venues, "live", routing_enabled=False,
+                                       calculation_venue="binance")
+        self.assertEqual(res["display_total_equity"], 4000.0)
+        self.assertEqual(res["calculation_equity"], 2300.0)
+        self.assertEqual(res["calculation_available"], 2000.0)
+        self.assertEqual(res["calculation_margin_used"], 300.0)
+        self.assertEqual(res["calculation_utilization_pct"], round(300 / 2300 * 100, 2))
+        self.assertEqual(res["calculation_risk_level"], "LOW")
+
+    def test_single_venue_missing_settled_equity_stays_unknown(self):
+        venues = {
+            "okx": {"status": "ready", "equity": 1000.0, "available": 800.0},
+            "binance": {"status": "ready", "equity": 500.0, "available": 300.0},
+        }
+        res = aggregate_venue_accounts(venues, "live", routing_enabled=False,
+                                       calculation_venue="binance")
+        self.assertEqual(res["display_total_equity"], 1500.0)
+        self.assertIsNone(res["calculation_equity"])
+        self.assertIsNone(res["calculation_margin_used"])
+        self.assertEqual(res["calculation_status"], "unknown_settled_equity")
+
     def test_risk_level_thresholds(self):
         # Medium: >30% and <= 70%
         venues_med = {

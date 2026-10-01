@@ -148,6 +148,7 @@ const mxForm = ref({ binance_api_key: '', binance_secret_key: '', gate_api_key: 
 const mxTestnet = ref({ binance: false, gate: false })
 const preferredVenue = ref('auto')
 const routingMode = ref('auto')
+const multiVenueRoutingEnabled = ref(true)
 const gateExec = ref(false)
 const gateExecPhrase = ref('')
 const binanceExec = ref(false)
@@ -453,6 +454,9 @@ async function loadMx() {
     if (mx.value?.routing_mode) {
       routingMode.value = mx.value.routing_mode
     }
+    if (typeof mx.value?.multi_venue_routing_enabled === 'boolean') {
+      multiVenueRoutingEnabled.value = mx.value.multi_venue_routing_enabled
+    }
   } catch { mx.value = null }
 }
 
@@ -520,7 +524,11 @@ async function saveRouting() {
   try {
     await api('/api/v1/admin/multi-exchange', {
       method: 'PUT',
-      body: JSON.stringify({ preferred_venue: preferredVenue.value, routing_mode: routingMode.value }),
+      body: JSON.stringify({
+        preferred_venue: preferredVenue.value,
+        routing_mode: routingMode.value,
+        multi_venue_routing_enabled: multiVenueRoutingEnabled.value,
+      }),
     })
     toast.ok(t('admin.security.toastRoutingSaved', undefined, { venue: preferredVenue.value.toUpperCase(), mode: routingMode.value.toUpperCase() }))
     await loadMx()
@@ -957,6 +965,16 @@ onMounted(() => { loadAll(); loadMx(); loadChannels(); loadPlazaSettings() })
               <span>{{ savingMx ? t('admin.security.saving') : t('admin.security.saveRouting') }}</span>
             </button>
           </template>
+
+          <div class="sc-group">
+            <div class="sc-group-header">
+              <span class="form-label">撮合路由总开关</span>
+              <BaseSwitch v-model="multiVenueRoutingEnabled" label="允许多所同时参与真实交易" />
+            </div>
+            <p class="sc-hint">
+              关闭后保留三所行情与标的池多选，但实际下单最多使用唯一开闸交易所；若检测到多个执行闸同时打开，系统将拒绝新开仓。
+            </p>
+          </div>
 
           <div class="sc-group">
             <span class="form-label">{{ t('admin.security.routingModeLabel') }}</span>
