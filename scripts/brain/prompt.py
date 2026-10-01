@@ -178,7 +178,7 @@ def construct_full_market_prompt(packages: List[Dict[str, Any]], pos_summary: st
             min_order_line = "各所合约规格暂不可用（不得臆测门槛；开仓前必须核验）"
         info = f"""---------------------------------------------------------
 【{p['name']} ({p['instId']})】| 数据质量: {quality} | 现价: {p['price']} | 24H涨跌: {p['chg24h']}% | 盘口买/卖: {p['bidPx']}/{p['askPx']}
-- 🧾 交易所合约最小开仓名义价值（按当前价从公共合约规格预取）: {min_order_line}。实际限价成交名义额必须不低于所选交易所门槛；按本单杠杆折算最低保证金=门槛÷杠杆，若本周期允许保证金或止损/R:R无法满足则输出 WAIT，严禁低于门槛下单。
+- 🧾 交易所合约最小开仓名义价值（按当前价从公共合约规格预取）: {min_order_line}。实际限价单必须先按交易所步进/价格刻度量化，再用将实际提交的数量 × 实际限价计算名义额，且不得低于所选交易所门槛（Binance 常见最低 5 USDT，以当前合约规格返回值为准）；不得用未量化的原始数量或参考市价代替。若低于门槛，或规格/门槛不可得，必须输出 WAIT；不得为凑最低额擅自增大保证金、杠杆或下单数量，执行层将本地拒单并记录原因。
 - 🏛️ 三重滤网宏观结构: 4H宏观大势={p.get('macro_4h', '4H_MACRO_RANGE')} | 1H波段结构={p.get('structure_1h', '1H_SWING_CHOP')}
 - 👑 顶级聪明钱 (SmartMoney Top100): {("加权做多占比=" + str(sm.get('weighted_long_pct')) + "% | 24H净流入=" + str(sm.get('net_flow_usdt', '--')) + " | 多头均价=" + str(sm.get('avg_long_entry', '--')) + " | 空头均价=" + str(sm.get('avg_short_entry', '--')) + " | " + str(sm.get('top_win_rate', ''))) if sm.get('available') else "数据源缺失（OKX CLI 已移除，暂无公开 V5 等价接口；本项不构成任何方向的证据，禁止臆测填充）"}
 - 📐 1H核心波段指标: 1H ATR(14)={p.get('atr_1h', p.get('atr', '--'))} (止损基准: {sl_atr_desc}) | 1H RSI(14)={p.get('rsi_1h', '--')} | 1H ADX趋势强度={adx_val} (注:<20无趋势垃圾市, ≥22强单边)

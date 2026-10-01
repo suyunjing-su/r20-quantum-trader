@@ -21,6 +21,51 @@ from decimal import ROUND_DOWN, Decimal
 from typing import Any, Dict
 
 
+def validate_entry_limit_notional(*, params: Dict[str, Any], spec) -> Dict[str, Decimal]:
+    """Reject Binance opening limit orders below the current contract minimum.
+
+    Uses the quantity and price strings that will actually be sent after step/tick
+    quantisation. Missing contract threshold metadata fails closed; reduce-only and
+    non-limit orders are outside this guard.
+    """
+    if params.get("type") != "LIMIT" or str(params.get("reduceOnly", "")).lower() == "true":
+        return {"notional": Decimal("0"), "minimum": Decimal("0")}
+    if spec is None:
+        raise ValueError("无法读取 Binance 合约规格，不能核验限价开仓最小名义额；本地拒单")
+
+    try:
+        quantity = Decimal(str(params["quantity"]))
+        price = Decimal(str(params["price"]))
+    except Exception as exc:
+        raise ValueError("实际下单数量/限价无效，无法核验最小名义额；本地拒单") from exc
+    if (not quantity.is_finite() or not price.is_finite()
+            or quantity <= 0 or price <= 0):
+        raise ValueError("实际下单数量/限价必须为有效正数；本地拒单")
+
+    try:
+        raw = getattr(spec, "raw", {}) or {}
+        minimum = Decimal("0")
+        for item in raw.get("filters", []):
+            if item.get("filterType") in {"MIN_NOTIONAL", "NOTIONAL"}:
+                value = item.get("notional") or item.get("minNotional")
+                if value:
+                    minimum = max(minimum, Decimal(str(value)))
+        min_qty = Decimal(str(getattr(spec, "min_size", 0) or 0))
+        minimum = max(minimum, min_qty * price)
+    except Exception as exc:
+        raise ValueError("Binance 合约最小名义额规格无效，无法核验；本地拒单") from exc
+    if not minimum.is_finite() or minimum <= 0:
+        raise ValueError("Binance 合约规格未提供有效最小名义额/最小数量，无法核验；本地拒单")
+
+    notional = quantity * price
+    if notional < minimum:
+        raise ValueError(
+            f"Binance 限价开仓本地拒单：实际数量 {quantity} × 实际限价 {price} "
+            f"= {notional} USDT，小于合约最低名义额 {minimum} USDT"
+        )
+    return {"notional": notional, "minimum": minimum}
+
+
 def build_order_params(*,
         inst,
         position_side,

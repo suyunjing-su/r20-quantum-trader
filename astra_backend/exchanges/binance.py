@@ -58,6 +58,7 @@ from .base import (BaseExchangeAdapter, ExchangeCapabilities,
 from .binance_orders import (
     build_order_params,
     send_protective_order,
+    validate_entry_limit_notional,
 )
 from .binance_signing import build_signed_query
 from .binance_algo import BinanceAlgoRequestsMixin
@@ -493,6 +494,16 @@ class BinanceAdapter(BinanceAlgoRequestsMixin, BaseExchangeAdapter):
             spec=spec,
             text=text,
             tif=tif        )
+        try:
+            checked = validate_entry_limit_notional(params=params, spec=spec)
+        except ValueError as exc:
+            warnings.warn(f"[binance] {exc}", RuntimeWarning)
+            raise BinanceAPIError("local_min_notional", str(exc)) from exc
+        if checked["minimum"] > 0:
+            print(
+                f"[binance] 限价开仓名义额预检通过：{checked['notional']} USDT "
+                f"≥ 最低门槛 {checked['minimum']} USDT"
+            )
 
         data = self.signed_request("POST", "/fapi/v1/order", params=params)
         if not isinstance(data, dict):

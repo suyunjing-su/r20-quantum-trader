@@ -23,7 +23,8 @@ class _Base(unittest.TestCase):
         self.ad.environment = "demo"
         self.ad.native_symbol = lambda s: f"{s}USDT"
         self.ad.fetch_instrument_spec = lambda s: SimpleNamespace(
-            tick_size=0.1, step_size=0.001, min_size=0.001, ct_val=1.0)
+            tick_size=0.1, step_size=0.001, min_size=0.001, ct_val=1.0,
+            raw={"filters": [{"filterType": "MIN_NOTIONAL", "notional": "5"}]})
         self.sent = []
 
     def _signed(self, result):
@@ -42,6 +43,22 @@ class PlaceOrderTest(_Base):
                 with self.assertRaises(ValueError) as ctx:
                     self.ad.place_order("BTC", "long", bad)
                 self.assertIn("必须为正数", str(ctx.exception))
+
+    def test_limit_entry_below_exchange_minimum_is_rejected_before_send(self):
+        """Compare the quantised quantity and limit price, not the caller's raw values."""
+        self._signed({"orderId": 1})
+        with self.assertRaises(BinanceAPIError) as ctx:
+            self.ad.place_order("BTC", "long", 0.0019, price=4999.99)
+        self.assertEqual(ctx.exception.code, "local_min_notional")
+        self.assertIn("4.9", str(ctx.exception))
+        self.assertEqual(self.sent, [], "below-minimum entry must not reach Binance")
+
+    def test_limit_entry_at_exchange_minimum_is_allowed(self):
+        self._signed({"orderId": 1, "clientOrderId": "entry", "status": "NEW",
+                      "price": "5000", "origQty": "0.001", "executedQty": "0"})
+        self.ad.place_order("BTC", "long", 0.0019, price=5000)
+        self.assertEqual(self.sent[-1][2]["quantity"], "0.001")
+        self.assertEqual(self.sent[-1][2]["price"], "5000")
 
     def test_non_dict_response_is_a_bad_response_not_a_success(self):
         """★ 响应不是 dict ⇒ 抛 `bad_response`：**不能确认受理就不许假装成功**。"""

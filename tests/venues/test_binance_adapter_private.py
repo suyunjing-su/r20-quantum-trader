@@ -15,6 +15,7 @@ import io
 import json
 import unittest
 import warnings
+from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlparse
@@ -301,6 +302,9 @@ class BinanceExecutionAndProtectionTests(unittest.TestCase):
         with patch("astra_backend.exchanges.registry.venue_credentials", return_value=(api_key, secret_key)), \
              patch("astra_backend.exchanges.binance.urlopen", mock_urlopen), \
              patch.object(self.adapter, "server_time_offset_ms", lambda **k: 0.0), \
+             patch.object(self.adapter, "fetch_instrument_spec", return_value=SimpleNamespace(
+                 tick_size=0.01, step_size=0.001, min_size=0.001, ct_val=1.0,
+                 raw={"filters": [{"filterType": "MIN_NOTIONAL", "notional": "5"}]})), \
              patch.object(type(self.adapter), "_public_get", lambda *a, **k: None):
              # 第七十九刀：spec 路径走 requests.Session 不是 urlopen，
              # 探针实测非离线时**真打 fapi.binance.com**；离线时它被拦后
