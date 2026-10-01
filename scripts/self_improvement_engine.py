@@ -498,22 +498,30 @@ def compose_evolution_prompts(closed_trades: List[Dict[str, Any]], existing_memo
         closed_trades=closed_trades,
         render_observability_brief=render_observability_brief    )
 
-    execution_rows = [t.get("execution_quality") for t in closed_trades
-                      if str(t.get("venue") or "").lower() == "binance"]
-    if execution_rows:
-        def _observed(key):
-            return sum(1 for row in execution_rows
-                       if isinstance(row, dict) and row.get(key) is not None
+    execution_rows_by_venue = {}
+    for trade in closed_trades:
+        venue_name = str(trade.get("venue") or "").lower()
+        if venue_name not in ("binance", "gate"):
+            continue
+        row = trade.get("execution_quality")
+        execution_rows_by_venue.setdefault(venue_name, []).append(
+            row if isinstance(row, dict) else {})
+    if execution_rows_by_venue:
+        def _observed(rows, key):
+            return sum(1 for row in rows if row.get(key) is not None
                        and str(row.get(key)).upper() != "UNOBSERVED")
-        execution_quality_brief = (
-            f"Binance {len(execution_rows)} 笔；有盘口快照 {_observed('entry_spread_bps')} 笔，"
-            f"有预估滑点 {_observed('estimated_entry_slippage_bps')} 笔，"
-            f"有实际入场滑点 {_observed('entry_slippage_bps')} 笔，"
-            f"保护腿状态可核验 {_observed('protection_status')} 笔，"
-            f"平仓滑点可核验 {_observed('close_slippage_bps')} 笔。"
-        )
+        venue_summaries = []
+        for venue_name, rows in sorted(execution_rows_by_venue.items()):
+            venue_summaries.append(
+                f"{venue_name.upper()} {len(rows)} 笔：盘口 {_observed(rows, 'entry_spread_bps')}，"
+                f"预估滑点 {_observed(rows, 'estimated_entry_slippage_bps')}，"
+                f"实际入场滑点 {_observed(rows, 'entry_slippage_bps')}，"
+                f"保护腿状态 {_observed(rows, 'protection_status')}，"
+                f"平仓滑点 {_observed(rows, 'close_slippage_bps')}"
+            )
+        execution_quality_brief = "；".join(venue_summaries)
     else:
-        execution_quality_brief = "本批无 Binance 执行质量样本"
+        execution_quality_brief = "本批无 Binance/Gate 执行质量样本"
 
     v_counts: Dict[str, int] = {}
     for t in closed_trades:
