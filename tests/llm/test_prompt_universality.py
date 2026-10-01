@@ -142,6 +142,14 @@ class AdaptiveRiskLimitTests(unittest.TestCase):
         self.assertAlmostEqual(aft.effective_daily_loss_limit(80.0), 4.0, places=2)
         self.assertAlmostEqual(aft.effective_single_asset_margin(80.0), 24.0, places=2)
 
+    def test_configured_fractional_daily_loss_scales_from_ten_to_five_thousand(self):
+        import risk_constants as rc
+        from unittest.mock import patch
+        with patch.object(rc, "DAILY_LOSS_EQUITY_RATIO", 0.005), \
+             patch.object(rc, "MAX_DAILY_LOSS_USDT", 25.0):
+            self.assertAlmostEqual(rc.effective_daily_loss_limit(10.0), 0.05, places=2)
+            self.assertAlmostEqual(rc.effective_daily_loss_limit(5000.0), 25.0, places=2)
+
     def test_large_account_keeps_legacy_absolute_caps(self):
         import ai_factor_trader as aft
         self.assertEqual(aft.effective_daily_loss_limit(4000.0), aft.MAX_DAILY_LOSS_USDT)

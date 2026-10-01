@@ -173,10 +173,10 @@ def effective_max_positions(pool_size: int) -> int:
 # 而 SYSTEM PROMPT 却要求模型"一切金额以【本周期风险预算】小节为准"。
 # 现收敛到此：引擎、执行面、提示词共用同一函数，任何一处改动全链路同步。
 def effective_daily_loss_limit(usdt_available: float = None) -> float:
-    """单日亏损熔断线 = min(绝对封顶, 可用余额 5%)，小资金账户自动收紧。"""
+    """单日亏损熔断线 = min(绝对封顶, 可用余额×比例)，保留分级账户的分币精度。"""
     cap = MAX_DAILY_LOSS_USDT
     if usdt_available and usdt_available > 0:
-        cap = min(cap, max(round(float(usdt_available) * DAILY_LOSS_EQUITY_RATIO, 2), 1.0))
+        cap = min(cap, max(round(float(usdt_available) * DAILY_LOSS_EQUITY_RATIO, 2), 0.01))
     return cap
 
 
