@@ -96,7 +96,7 @@ def build_default_factors(inst_id: str, name: str) -> Dict[str, Any]:
             "reason": "OKX CLI 已移除，smartmoney 无公开 V5 等价接口（待接新数据源）",
             "weighted_long_pct": "--",
             "smart_money_flow_usd": "--",
-            "funding_rate_pct": 0.0,
+            "funding_rate_pct": "--",
             "oi_usd": "--",
             "long_short_ratio": "--",
             "avg_long_entry": "--",

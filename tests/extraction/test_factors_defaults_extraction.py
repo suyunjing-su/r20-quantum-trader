@@ -130,7 +130,7 @@ class SemanticsTest(unittest.TestCase):
                   "long_short_ratio", "avg_long_entry", "avg_short_entry",
                   "top_win_rate"):
             self.assertEqual(sm[k], "--", f"{k} 应为占位符 --，而不是中性值")
-        self.assertEqual(sm["funding_rate_pct"], 0.0, "资金费是唯一的真实数值字段")
+        self.assertEqual(sm["funding_rate_pct"], "--", "缺失资金费率应为未知占位符")
 
     def test_regime_defaults(self):
         self.assertEqual(self.f["trend_momentum"]["trend_regime"], "NEUTRAL")

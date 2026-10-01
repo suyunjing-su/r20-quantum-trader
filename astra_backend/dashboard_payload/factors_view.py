@@ -65,7 +65,9 @@ def build_factors_list(decisions_file, state_file, factor_file, positions, times
         rr_ratio = ai_thought.get("risk_reward_evaluation", "盈亏比评估中")
 
         raw_t = ai_info.get("raw_ticker", {})
-        funding_r = ai_info.get("raw_funding_rate") or (f"{lib_item.get('smart_money_derivatives', {}).get('funding_rate_pct', 0.0):.4f}%" if "funding_rate_pct" in lib_item.get("smart_money_derivatives", {}) else "--")
+        _funding = lib_item.get("smart_money_derivatives", {}).get("funding_rate_pct", "--")
+        _funding_text = f"{_funding:.4f}%" if isinstance(_funding, (int, float)) else str(_funding or "--")
+        funding_r = ai_info.get("raw_funding_rate") or _funding_text
         oi_str = ai_info.get("raw_oi") or lib_item.get("smart_money_derivatives", {}).get("oi_usd", "--")
         taker_str = ai_info.get("raw_taker_vol") or lib_item.get("volume_money_flow", {}).get("taker_net_usd", "--")
         ls_str = ai_info.get("raw_ls_ratio") or lib_item.get("smart_money_derivatives", {}).get("long_short_ratio", "--")

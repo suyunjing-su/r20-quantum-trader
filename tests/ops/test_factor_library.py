@@ -189,7 +189,7 @@ class SourceIsolationTests(_Base):
         self._route({"market/ticker": self._ticker(),
                      "funding-rate": OSError("资金费率挂了")})
         self.assertEqual(
-            self._compute()["smart_money_derivatives"]["funding_rate_pct"], 0.0)
+            self._compute()["smart_money_derivatives"]["funding_rate_pct"], "--")
 
     def test_an_open_interest_failure_is_swallowed(self):
         self._route({"market/ticker": self._ticker(),

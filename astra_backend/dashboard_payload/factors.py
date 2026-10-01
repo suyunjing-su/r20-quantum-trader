@@ -159,6 +159,8 @@ def _build_factors_from_local_files(factor_file: str | os.PathLike[str], decisio
         rsi_val = ins.get("rsi") if ins.get("rsi") is not None else lib_item.get("trend_momentum", {}).get("rsi_14", 50.0)
         adx_val = ai_info.get("adx_1h") if ai_info.get("adx_1h") not in (None, "--") else lib_item.get("trend_momentum", {}).get("adx_1h", "--")
         sm_val = ai_info.get("smart_money") or lib_item.get("smart_money_derivatives", {})
+        _funding = lib_item.get("smart_money_derivatives", {}).get("funding_rate_pct", "--")
+        _funding_text = f"{_funding:.4f}%" if isinstance(_funding, (int, float)) else str(_funding or "--")
         factors_list.append({
             "name": target.get("name") or ins.get("name"),
             "instId": inst_id,
@@ -169,7 +171,8 @@ def _build_factors_from_local_files(factor_file: str | os.PathLike[str], decisio
             "chg24h": chg_val,
             "bidPx": raw_t.get("bidPx", ins.get("price", lib_item.get("microstructure", {}).get("bid_px", "--"))),
             "askPx": raw_t.get("askPx", ins.get("price", lib_item.get("microstructure", {}).get("ask_px", "--"))),
-            "fundingRate": ai_info.get("raw_funding_rate") or (f"{lib_item.get('smart_money_derivatives', {}).get('funding_rate_pct', 0.0):.4f}%" if "funding_rate_pct" in lib_item.get("smart_money_derivatives", {}) else "--"),
+            "fundingRate": ai_info.get("raw_funding_rate") or _funding_text,
+
             "oiUsd": ai_info.get("raw_oi") or lib_item.get("smart_money_derivatives", {}).get("oi_usd", "--"),
             "takerNetUsd": ai_info.get("raw_taker_vol") or lib_item.get("volume_money_flow", {}).get("taker_net_usd", "--"),
             "lsRatio": ai_info.get("raw_ls_ratio") or lib_item.get("smart_money_derivatives", {}).get("long_short_ratio", "--"),
