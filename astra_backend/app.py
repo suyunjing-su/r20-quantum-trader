@@ -183,9 +183,14 @@ async def _env_value_error_handler(_request, exc: EnvValueError):
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 
-def _agent_api_key_scope_allows(method: str, path: str) -> bool:
-    """Agent keys can manage trading configuration, never account baselines or venue credentials."""
+def _agent_api_key_scope_allows(method: str, path: str, actor: dict[str, Any] | None = None) -> bool:
+    """Allow only explicitly granted machine-key scopes for sensitive routes."""
     import re
+    method = method.upper()
+    if re.fullmatch(r"^/api/v1/admin/equity-bands/(council|prompt|risk)$", path):
+        if method == "GET":
+            return True
+        return method == "PUT" and "equity_bands:write" in set((actor or {}).get("scopes") or ())
     route_rules = (
         (r"^/api/v1/admin/(council(?:/.*)?|interceptors(?:/.*)?|policy(?:/.*)?|prompt-library|prompt-profiles(?:/.*)?|prompts|evolution/config)$", {"GET", "POST", "PUT", "DELETE"}),
         (r"^/api/v1/admin/risk$", {"GET", "POST"}),
@@ -207,9 +212,9 @@ async def admin_session_context(request: Request, call_next):
     api_actor = authenticate_agent_api_key(request.headers.get("X-API-Key"))
     api_token = REQUEST_API_KEY_ACTOR.set(api_actor)
     try:
-        if api_actor and not _agent_api_key_scope_allows(request.method.upper(), request.url.path):
+        if api_actor and not _agent_api_key_scope_allows(request.method.upper(), request.url.path, api_actor):
             from fastapi.responses import JSONResponse
-            return JSONResponse(status_code=403, content={"detail": "Agent API Key 无权访问此接口；交易所凭证、初始本金基线与资金档位仅可由管理员会话配置"})
+            return JSONResponse(status_code=403, content={"detail": "Agent API Key 无权访问此接口；资金档位写入需要管理员授予 equity_bands:write scope，其他敏感配置仍仅可由管理员会话配置"})
         response = await call_next(request)
         path = request.url.path
         if path.startswith("/api/v1/admin") or path.startswith("/admin") or path.startswith("/api/v1/account"):

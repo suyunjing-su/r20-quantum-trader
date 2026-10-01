@@ -17,6 +17,7 @@ The Agent key can be generated, rotated, and deleted from **Admin → Agents** (
 `GET /api/v1/agent/capabilities` returns the supported resource groups. Existing configuration endpoints retain their HTTP methods and schemas; their administrator-session authentication also accepts this scoped key.
 
 - Council: `/api/v1/admin/council/...`
+- Equity bands: `GET /api/v1/admin/equity-bands/{domain}` is available to every Agent key for inspection; `PUT` requires the explicit `equity_bands:write` Agent scope.
 - Prompt Workshop: `/api/v1/admin/prompt-library`, `/api/v1/admin/prompt-profiles...`, `/api/v1/admin/prompts`
   - Supports creating, editing, activating and deleting profiles, including enabled flags and pipeline module content/configuration.
 - Evolution configuration: `/api/v1/admin/evolution/config`
@@ -27,7 +28,20 @@ The Agent key can be generated, rotated, and deleted from **Admin → Agents** (
 - Venue routing: `GET|PUT /api/v1/agent/exchanges/config`
 - Execution/model telemetry: `GET /api/v1/agent/telemetry`; execution-unit status is also available from `GET /api/v1/admin/agents`.
 
-For example, update risk configuration using the same payload contract as the admin UI:
+## Granting optional scopes
+
+Agent keys start without sensitive optional scopes. A superadmin session can explicitly grant or revoke the equity-band write scope without rotating the secret:
+
+```http
+PUT /api/v1/admin/agent-api-key/scopes
+X-Astra-Session: <superadmin-session>
+Content-Type: application/json
+
+{"scopes":["equity_bands:write"]}
+```
+
+The scope grant is persisted as `ASTRA_AGENT_API_KEY_SCOPES`. `GET /api/v1/agent/capabilities` reports the scopes granted to the calling Agent key. The scopes-management endpoint itself is never available to Agent API keys, preventing a machine key from self-escalating.
+
 
 ```bash
 curl -X POST http://localhost:8080/api/v1/admin/risk \
@@ -39,6 +53,6 @@ The venue-routing endpoint only accepts non-secret environment/routing values, p
 
 ## Deliberate exclusions
 
-Agent keys cannot access `/api/v1/admin/account-baseline`, manual-close/account execution endpoints, exchange credential updates/tests, account snapshots or other admin resources outside the explicit allowlist. In particular, initial capital baselines, the three exchanges' access credentials, and funding/capital tiers remain administrator-session-only. The exchange status read and safe routing endpoint do not reveal credential values.
+Agent keys cannot access `/api/v1/admin/account-baseline`, manual-close/account execution endpoints, exchange credential updates/tests, account snapshots or other admin resources outside the explicit allowlist. In particular, initial capital baselines, the three exchanges' access credentials, and scope administration remain administrator-session-only. Equity-band writes are separately protected by the `equity_bands:write` grant; without it, the key can read bands but receives 403 on writes.
 
 All writes performed through the API remain subject to the existing validation, confirmation phrases, and audit logging. Telemetry contains model call metadata only; prompts and responses are not persisted or returned.

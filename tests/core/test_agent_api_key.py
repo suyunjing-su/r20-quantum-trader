@@ -32,10 +32,43 @@ class AgentApiKeyRoutesTest(unittest.TestCase):
             _agent_api_key_scope_allows("GET", "/api/v1/agent/capabilities")
         )
 
+    def test_equity_band_read_is_available_but_write_requires_explicit_scope(self):
+        from astra_backend.app import _agent_api_key_scope_allows
+
+        path = "/api/v1/admin/equity-bands/prompt"
+        actor = {"auth_method": "api_key", "scopes": []}
+        self.assertTrue(_agent_api_key_scope_allows("GET", path, actor))
+        self.assertFalse(_agent_api_key_scope_allows("PUT", path, actor))
+        actor["scopes"] = ["equity_bands:write"]
+        self.assertTrue(_agent_api_key_scope_allows("PUT", path, actor))
+
+    def test_agent_authentication_reads_scopes_without_self_escalation(self):
+        from astra_backend.dependencies import authenticate_agent_api_key
+
+        with mock.patch.dict(A.os.environ, {
+            "ASTRA_AGENT_API_KEY": "secret",
+            "ASTRA_AGENT_API_KEY_SCOPES": "equity_bands:write",
+        }, clear=False):
+            actor = authenticate_agent_api_key("secret")
+        self.assertEqual(actor["scopes"], ["equity_bands:write"])
+
     def test_status_only_exposes_presence(self):
         with mock.patch.dict(A.os.environ, {"ASTRA_AGENT_API_KEY": "secret"}, clear=False):
             self.assertEqual(A.get_agent_api_key_status(), {"configured": True})
         self.superadmin.assert_called_once_with()
+
+    def test_superadmin_can_grant_equity_band_scope(self):
+        result = A.put_agent_api_key_scopes(A.AgentApiScopesUpdate(scopes=["equity_bands:write"]))
+        self.assertEqual(result["scopes"], ["equity_bands:write"])
+        self.update_env.assert_called_once_with({"ASTRA_AGENT_API_KEY_SCOPES": "equity_bands:write"})
+        self.audit.assert_called_once_with(
+            "agent_api_key.scopes.update", "success",
+            {"actor": "root", "scopes": ["equity_bands:write"]},
+        )
+
+    def test_scope_update_rejects_unknown_scope(self):
+        with self.assertRaises(ValueError):
+            A.AgentApiScopesUpdate(scopes=["admin:everything"])
 
     def test_generate_persists_and_returns_secret_once(self):
         result = A.generate_agent_api_key()

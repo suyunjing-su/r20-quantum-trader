@@ -28,12 +28,28 @@ REQUEST_SESSION: ContextVar[str] = ContextVar("astra_admin_session", default="")
 REQUEST_API_KEY_ACTOR: ContextVar[dict[str, Any] | None] = ContextVar("astra_api_key_actor", default=None)
 
 
+AGENT_SCOPE_EQUITY_BANDS_WRITE = "equity_bands:write"
+
+
+def agent_api_key_scopes() -> set[str]:
+    """Return explicitly granted machine-key scopes; absence is least privilege."""
+    raw = os.getenv("ASTRA_AGENT_API_KEY_SCOPES", "")
+    return {item.strip() for item in raw.split(",") if item.strip()}
+
+
 def authenticate_agent_api_key(candidate: str | None) -> dict[str, Any] | None:
     """Validate the separately provisioned, least-scope Agent API key."""
     expected = os.getenv("ASTRA_AGENT_API_KEY", "").strip()
     if not candidate or not expected or not hmac.compare_digest(candidate, expected):
         return None
-    return {"id": -1, "username": "agent-api-key", "role": "superadmin", "enabled": 1, "auth_method": "api_key"}
+    return {
+        "id": -1,
+        "username": "agent-api-key",
+        "role": "superadmin",
+        "enabled": 1,
+        "auth_method": "api_key",
+        "scopes": sorted(agent_api_key_scopes()),
+    }
 
 okx = OKXClient()
 admin_auth = AdminAuthStore()

@@ -10,11 +10,54 @@ from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field, model_validator
 
 from astra_backend.audit import record as audit_record
-from astra_backend.dependencies import require_admin_header, require_superadmin
+from astra_backend.dependencies import (
+    AGENT_SCOPE_EQUITY_BANDS_WRITE,
+    agent_api_key_scopes,
+    require_admin_header,
+    require_superadmin,
+)
 from astra_backend.settings_store import update_env
 
-agent_router = APIRouter(tags=["agent-api"])
+AGENT_SCOPES = {AGENT_SCOPE_EQUITY_BANDS_WRITE}
 VENUES = ("okx", "binance", "gate")
+agent_router = APIRouter(tags=["agent-api"])
+
+
+class AgentApiScopesUpdate(BaseModel):
+    """Explicit administrator grant list for the single machine API key."""
+    scopes: list[str] = Field(default_factory=list, max_length=8)
+
+    @model_validator(mode="after")
+    def validate_scopes(self):
+        unknown = set(self.scopes) - AGENT_SCOPES
+        if unknown:
+            raise ValueError(f"未知 Agent API scope: {', '.join(sorted(unknown))}")
+        if len(set(self.scopes)) != len(self.scopes):
+            raise ValueError("Agent API scopes 不得重复")
+        return self
+
+
+@agent_router.get("/api/v1/admin/agent-api-key/scopes")
+def get_agent_api_key_scopes() -> dict[str, Any]:
+    """Read the non-secret scope grant; only an administrator may change it."""
+    require_superadmin()
+    return {
+        "configured": bool(os.getenv("ASTRA_AGENT_API_KEY", "").strip()),
+        "scopes": sorted(agent_api_key_scopes()),
+        "available_scopes": sorted(AGENT_SCOPES),
+    }
+
+
+@agent_router.put("/api/v1/admin/agent-api-key/scopes")
+def put_agent_api_key_scopes(payload: AgentApiScopesUpdate) -> dict[str, Any]:
+    """Grant/revoke optional Agent capabilities without rotating the secret."""
+    actor = require_superadmin()
+    scopes = sorted(set(payload.scopes))
+    update_env({"ASTRA_AGENT_API_KEY_SCOPES": ",".join(scopes)})
+    audit_record("agent_api_key.scopes.update", "success", {
+        "actor": actor.get("username", "admin"), "scopes": scopes,
+    })
+    return {"configured": bool(os.getenv("ASTRA_AGENT_API_KEY", "").strip()), "scopes": scopes}
 
 
 @agent_router.get("/api/v1/admin/agent-api-key")
@@ -89,10 +132,11 @@ class AgentExchangeConfigUpdate(BaseModel):
 
 @agent_router.get("/api/v1/agent/capabilities")
 def agent_capabilities(x_api_key: str | None = Header(default=None, alias="X-API-Key")) -> dict[str, Any]:
-    require_admin_header()
+    actor = require_admin_header()
     return {
         "auth_header": "X-API-Key",
         "scope": "configuration-and-telemetry",
+        "granted_scopes": sorted(actor.get("scopes") or []) if actor.get("auth_method") == "api_key" else [],
         "excluded": ["initial_capital_baseline", "venue_credentials", "capital_tiers"],
         "session_only_routes": [
             "POST /api/v1/admin/risk/custom-suites",
@@ -102,8 +146,11 @@ def agent_capabilities(x_api_key: str | None = Header(default=None, alias="X-API
             "PUT /api/v1/admin/council/profiles/{profile_id}",
             "POST /api/v1/admin/council/profiles/{profile_id}/apply",
             "DELETE /api/v1/admin/council/profiles/{profile_id}",
-            "PUT /api/v1/admin/equity-bands/{domain}",
+            "PUT /api/v1/admin/agent-api-key/scopes",
         ],
+        "scoped_routes": {
+            "equity_bands:write": ["PUT /api/v1/admin/equity-bands/{domain}"],
+        },
         "routes": {
             "council": ["/api/v1/admin/council/config", "/api/v1/admin/council/profiles", "/api/v1/admin/council/apply-suite", "/api/v1/admin/council/reset-role", "/api/v1/admin/council/import", "/api/v1/admin/council/export"],
             "equity_bands": ["/api/v1/admin/equity-bands/{domain}"],
