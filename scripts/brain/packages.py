@@ -25,6 +25,7 @@
 正因如此，本模块**不 import 门面的任何东西**，只在调用期接收依赖。
 """
 import json
+import math
 import time
 import urllib.request
 
@@ -94,7 +95,7 @@ def fetch_single_instrument_package(item: Dict[str, Any], *,
     if fetch_market_bundle is not None:
         try:
             market_bundle = fetch_market_bundle(
-                inst_id, item.get("venues"), {"15m": 24, "1H": 24, "4H": 16})
+                inst_id, item.get("venues"), {"15m": 24, "1H": 60, "4H": 16})
         except Exception as exc:
             note_failure("venue_market_bundle", exc)
 
@@ -341,14 +342,37 @@ def fetch_single_instrument_package(item: Dict[str, Any], *,
             except Exception as exc:
                 note_failure("okx_taker_volume", exc)
 
-        # 6. OKX ADX Trend Strength Indicator (1H) via direct REST (zero Node CLI fork)
-        if market_bundle is None or market_bundle.get("venue") == "okx":
-            try:
+        # 6. ADX Trend Strength (1H). Non-OKX fallback data is calculated from the
+        # selected venue's own candle history rather than remaining at default zero.
+        try:
+            adx_rows = (market_bundle or {}).get("candles", {}).get("1H", [])
+            if market_bundle is None or market_bundle.get("venue") == "okx":
                 adx_data = fetch_single_indicator(inst_id, "ADX", bar="1H")
-                if adx_data and "adx" in adx_data:
-                    pkg["adx_1h"] = float(adx_data.get("adx", 0.0) or 0.0)
-            except Exception as exc:
-                note_failure("okx_adx_1h", exc)
+                if adx_data and "adx" in adx_data and adx_data.get("adx") is not None:
+                    adx_value = float(adx_data["adx"])
+                    if math.isfinite(adx_value):
+                        pkg["adx_1h"] = adx_value
+            if pkg["adx_1h"] == 0.0 and adx_rows:
+                from scripts.market_data_service import calculate_adx_from_candles
+                adx_value = calculate_adx_from_candles(adx_rows, newest_first=True)
+                if adx_value is not None:
+                    pkg["adx_1h"] = round(adx_value, 2)
+        except Exception as exc:
+            note_failure("okx_adx_1h", exc)
+
+    # Funding/OI endpoints above are OKX-specific; ADX is venue-neutral math and
+    # must still be populated when the same-source market bundle selected Binance/Gate.
+    if (item["type"] == "crypto" and market_bundle is not None
+            and market_bundle.get("venue") != "okx"):
+        try:
+            adx_rows = market_bundle.get("candles", {}).get("1H", [])
+            if adx_rows:
+                from scripts.market_data_service import calculate_adx_from_candles
+                adx_value = calculate_adx_from_candles(adx_rows, newest_first=True)
+                if adx_value is not None:
+                    pkg["adx_1h"] = round(adx_value, 2)
+        except Exception as exc:
+            note_failure("venue_adx_1h", exc)
 
     required_market_data = (
         pkg["price"] > 0

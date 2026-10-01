@@ -125,6 +125,39 @@ class _Base(unittest.TestCase):
                 fetch_single_indicator=self._fetch_indicator)
 
 
+class MultiVenueAdxTests(_Base, unittest.TestCase):
+    def test_binance_or_gate_bundle_calculates_adx_from_its_own_history(self):
+        from unittest.mock import patch
+
+        candles = _candles(60, step=2.0)
+        bundle = {
+            "venue": "binance",
+            "ticker": {"last": 200.0, "bid": 199.0, "ask": 201.0,
+                       "chg_24h_pct": 1.0, "vol_24h_base": 123.0},
+            "candles": {"15m": _candles(24), "1H": candles, "4H": _candles(16)},
+            "funding_rate": 0.0001,
+        }
+        requested = {}
+
+        def fetch_bundle(inst_id, venues, limits):
+            requested.update(limits)
+            return bundle
+
+        with patch.object(bp.urllib.request, "urlopen", side_effect=OSError("offline")):
+            pkg = bp.fetch_single_instrument_package(
+                self._item(venues=["binance", "gate"]),
+                fetch_candles=self._fetch_candles,
+                fetch_single_indicator=self._fetch_indicator,
+                fetch_market_bundle=fetch_bundle,
+            )
+
+        self.assertEqual(pkg["market_data_venue"], "binance")
+        self.assertEqual(requested["1H"], 60)
+        self.assertEqual(self.indicator_calls, [], "非 OKX 场所不可调用 OKX 指标接口")
+        self.assertGreater(pkg["adx_1h"], 0.0)
+        self.assertAlmostEqual(pkg["adx_1h"], 100.0, places=2)
+
+
 class DefaultShapeTests(_Base, unittest.TestCase):
     """HTTP 与行情全部拿不到时，包仍必须是一个**形状完整**的字典。"""
 

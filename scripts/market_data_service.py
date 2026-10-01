@@ -439,6 +439,53 @@ def _indicator_key(name: Any) -> str:
     return str(name or "").upper().replace("-", "").replace("_", "")
 
 
+def calculate_adx_from_candles(rows: List[List[Any]], *, newest_first: bool = False,
+                               period: int = 14) -> Optional[float]:
+    """Calculate Wilder ADX from normalized OHLCV candles without venue-specific calls.
+
+    ``rows`` use the shared adapter shape [timestamp, open, high, low, close, volume].
+    At least 2*period+2 candles are required to seed both DX and ADX smoothing.
+    """
+    if not rows or period < 2:
+        return None
+    chron = list(reversed(rows)) if newest_first else list(rows)
+    try:
+        highs = [float(row[2]) for row in chron]
+        lows = [float(row[3]) for row in chron]
+        closes = [float(row[4]) for row in chron]
+    except (TypeError, ValueError, IndexError):
+        return None
+    if len(closes) < 2 * period + 2:
+        return None
+    if not all(math.isfinite(v) for values in (highs, lows, closes) for v in values):
+        return None
+
+    trs, pdms, ndms = [], [], []
+    for i in range(1, len(closes)):
+        tr = max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
+        up, dn = highs[i] - highs[i - 1], lows[i - 1] - lows[i]
+        trs.append(tr)
+        pdms.append(up if (up > dn and up > 0) else 0.0)
+        ndms.append(dn if (dn > up and dn > 0) else 0.0)
+
+    atr, pdm, ndm = sum(trs[:period]), sum(pdms[:period]), sum(ndms[:period])
+    dxs = []
+    for i in range(period, len(trs)):
+        atr = atr - atr / period + trs[i]
+        pdm = pdm - pdm / period + pdms[i]
+        ndm = ndm - ndm / period + ndms[i]
+        pdi = 100.0 * pdm / atr if atr > 0 else 0.0
+        ndi = 100.0 * ndm / atr if atr > 0 else 0.0
+        denom = pdi + ndi
+        dxs.append(100.0 * abs(pdi - ndi) / denom if denom > 0 else 0.0)
+    if len(dxs) < period:
+        return None
+    adx = sum(dxs[:period]) / period
+    for dx in dxs[period:]:
+        adx = (adx * (period - 1) + dx) / period
+    return adx if math.isfinite(adx) else None
+
+
 def _local_math_indicators(
     inst_id: str,
     indicators: List[str],

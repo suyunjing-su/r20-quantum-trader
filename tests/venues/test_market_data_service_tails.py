@@ -434,6 +434,16 @@ class FetchOrderbookDepthTests(unittest.TestCase):
 
 
 class LocalMathIndicatorsTests(unittest.TestCase):
+    def test_shared_adx_calculator_handles_newest_first_adapter_rows(self):
+        rows = _candles(60)
+        forward = mds.calculate_adx_from_candles(rows)
+        reverse = mds.calculate_adx_from_candles(list(reversed(rows)), newest_first=True)
+        self.assertIsNotNone(forward)
+        self.assertAlmostEqual(forward, reverse, places=9)
+
+    def test_shared_adx_calculator_reports_insufficient_history_as_unknown(self):
+        self.assertIsNone(mds.calculate_adx_from_candles(_candles(24)))
+
     def test_no_candles_yields_an_empty_dict(self):
         # ★ 第 399/400 行
         with patch.object(mds, "fetch_candles", return_value=[]):

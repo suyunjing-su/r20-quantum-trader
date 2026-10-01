@@ -72,8 +72,21 @@ class MoveIsLosslessTest(unittest.TestCase):
         靠打印真实 diff 才发现）。延时观测则是**净增行**，故这里必须整行丢弃。
         """
         out = []
+        in_adx_block = False
         for ln in lines:
             stripped = ln.strip()
+            if stripped.startswith("# 6."):
+                in_adx_block = True
+                continue
+            if in_adx_block:
+                if stripped == "required_market_data = (":
+                    in_adx_block = False
+                else:
+                    continue
+            # The venue bundle now asks for 60 hourly candles so non-OKX ADX
+            # can use the same-source data; canonicalize this bounded request delta.
+            if stripped == 'inst_id, item.get("venues"), {"15m": 24, "1H": 60, "4H": 16})':
+                ln = ln.replace('"1H": 60', '"1H": 24')
             # v8.4.1: 每轮包新增一次动态交易所最小名义规格采集，不属于原始行情迁移体。
             if stripped in {
                 '"minimum_order_requirements": {},',
@@ -98,17 +111,22 @@ class MoveIsLosslessTest(unittest.TestCase):
         self.assertIn('"market_data_venue"', src)
         self.assertIn('pkg["data_quality"] = "valid" if required_market_data else "invalid"', src)
 
+    def test_adx_uses_selected_venue_candles_and_extended_history(self):
+        src = "\n".join(_submodule_function_lines())
+        self.assertIn('"1H": 60', src, "ADX 需要足够历史 K 线，不能只请求 24 根")
+        self.assertIn('calculate_adx_from_candles(adx_rows, newest_first=True)', src)
+        self.assertIn('market_bundle.get("venue") != "okx"', src)
+
     def test_failure_counters_are_actually_wired(self):
         """正向断言：行情取数 except 必须各自接上失败计数（防止白名单被滥用）。"""
         src = "\n".join(_submodule_function_lines())
         kinds = sorted(re.findall(r'note_failure\("([a-z_0-9]+)", exc\)', src))
         self.assertEqual(kinds, ["okx_adx_1h", "okx_funding_rate", "okx_ls_ratio",
                                  "okx_open_interest", "okx_taker_volume", "okx_ticker",
-                                 "venue_market_bundle"],
+                                 "venue_adx_1h", "venue_market_bundle"],
                          "行情取数的可观测性接线缺失或被改名")
-        # 6 处原有取数失败 + 1 处按池行情 bundle + 4 处搬运时就带 as exc 的
-        # （K线 15m/1H/4H 与 calculus）。
-        self.assertEqual(src.count("except Exception as exc:"), 11)
+        # 6 处原有取数失败 + 1 处按池行情 bundle + 1 处多所 ADX + 4 处原有 as exc。
+        self.assertEqual(src.count("except Exception as exc:"), 12)
 
     def test_okx_latency_instrumentation_is_actually_wired(self):
         """正向断言：v8.1.0 的 OKX 取数延时观测必须真的在算（防止上一条的
