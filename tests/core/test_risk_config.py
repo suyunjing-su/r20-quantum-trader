@@ -100,6 +100,43 @@ class CurrentValuesTests(unittest.TestCase):
             self.assertEqual(RC.current_values()["ASTRA_MAX_LEVERAGE"],
                              DEFAULTS["ASTRA_MAX_LEVERAGE"])
 
+    def test_equity_band_selects_each_builtin_suite_by_id(self):
+        # Regression for comparing a string target id directly with SUITES,
+        # whose elements are dictionaries.
+        with (
+            mock.patch.dict(os.environ, {}, clear=False),
+            mock.patch("astra_backend.equity_bands.resolve_risk_suite") as resolve,
+        ):
+            for suite in RC.SUITES:
+                with self.subTest(suite=suite["id"]):
+                    resolve.return_value = {"target_id": suite["id"]}
+                    values = RC.current_values(equity=1000.0)
+                    self.assertEqual(values, suite["values"])
+
+    def test_equity_band_selects_custom_suite_and_ignores_unknown_targets(self):
+        custom = {"ASTRA_MAX_LEVERAGE": 7.0}
+        def custom_values_for(target):
+            if target == "custom-1":
+                return custom
+            raise ValueError("unknown custom suite")
+        with (
+            mock.patch.dict(os.environ, {}, clear=True),
+            mock.patch("astra_backend.equity_bands.resolve_risk_suite") as resolve,
+            mock.patch.object(RC, "custom_suite_values", side_effect=custom_values_for) as custom_values,
+        ):
+            resolve.return_value = {"target_id": "custom-1"}
+            self.assertEqual(RC.current_values(equity=1000.0)["ASTRA_MAX_LEVERAGE"], 7.0)
+            custom_values.assert_called_once_with("custom-1")
+
+            custom_values.reset_mock()
+            resolve.return_value = {"target_id": "does-not-exist"}
+            baseline = RC.current_values()
+            self.assertEqual(RC.current_values(equity=1000.0), baseline)
+            custom_values.assert_called_once_with("does-not-exist")
+
+            resolve.side_effect = ValueError("invalid equity")
+            self.assertEqual(RC.current_values(equity=float("nan")), baseline)
+
     def test_reset_keys_are_exactly_the_managed_env_keys(self):
         self.assertEqual(RC.reset_keys(), list(RISK_ENV_KEYS))
 

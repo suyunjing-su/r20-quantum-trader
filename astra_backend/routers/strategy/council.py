@@ -114,7 +114,11 @@ def admin_apply_council_profile(profile_id: str, x_astra_session: str | None = H
 def admin_delete_council_profile(profile_id: str, x_astra_session: str | None = Header(default=None, alias="X-Astra-Session")) -> dict[str, Any]:
     actor = require_superadmin(x_astra_session)
     from astra_backend.council_manager import delete_council_profile
-    if not delete_council_profile(profile_id):
+    try:
+        deleted = delete_council_profile(profile_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not deleted:
         raise HTTPException(status_code=404, detail="委员会方案不存在")
     audit_record("council.profile.delete", "success", {"actor": actor["username"], "profile_id": profile_id})
     return {"status": "ok", "deleted": profile_id}
@@ -130,8 +134,9 @@ def admin_get_council_equity_bands(x_astra_session: str | None = Header(default=
 @router.put("/api/v1/admin/council/equity-bands")
 def admin_put_council_equity_bands(payload: EquityBandsUpdateRequest, x_astra_session: str | None = Header(default=None, alias="X-Astra-Session")) -> dict[str, Any]:
     actor = require_superadmin(x_astra_session)
-    from astra_backend.equity_bands import save_bands
+    from astra_backend.equity_bands import save_bands, validate_band_targets
     try:
+        validate_band_targets("council", payload.bands)
         bands = save_bands("council", payload.bands)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

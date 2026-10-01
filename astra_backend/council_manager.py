@@ -465,6 +465,16 @@ def delete_council_profile(profile_id: str) -> bool:
         kept = [row for row in rows if row.get("id") != key]
         if len(kept) == len(rows):
             return False
+        # A profile id is a stable target of the council equity-band mapping.
+        # Refuse deletion rather than leaving a dangling reference that silently
+        # falls back to the global council configuration.
+        from astra_backend.equity_bands import list_bands
+        referenced = any(
+            str(row.get("target_id") or "") == key
+            for row in list_bands("council")
+        )
+        if referenced:
+            raise ValueError("委员会方案已被资金区间引用，请先移除对应区间后再删除")
         _write_council_profiles(kept)
         return True
 

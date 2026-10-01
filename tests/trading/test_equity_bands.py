@@ -39,3 +39,17 @@ def test_unknown_equity_does_not_resolve_band(tmp_path, monkeypatch):
     ])
     assert equity_bands.resolve_risk_suite(None) is None
     assert equity_bands.resolve_risk_suite(float("nan")) is None
+
+
+def test_band_targets_are_validated_per_domain(monkeypatch):
+    from unittest import mock
+
+    with mock.patch("astra_backend.council_manager.list_council_profiles",
+                    return_value=[{"id": "consensus-v1"}]):
+        equity_bands.validate_band_targets("council", [
+            {"target_id": "consensus-v1"},
+        ])
+        with pytest.raises(ValueError, match="不存在"):
+            equity_bands.validate_band_targets("council", [
+                {"target_id": "deleted-profile"},
+            ])

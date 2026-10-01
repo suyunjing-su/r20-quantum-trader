@@ -222,6 +222,13 @@ for _s in SUITES:
     _total, _same = _s["values"].get("ASTRA_MAX_CONCURRENT_POSITIONS", 0), _s["values"].get("ASTRA_MAX_SAME_DIRECTION_POSITIONS", 3)
     assert _total <= 0 or _same <= _total, f"suite {_s['id']} 同向>总仓"
 assert {s["id"] for s in SUITES} == {"conservative", "balanced", "aggressive"}
+# Keep the dispatch check separate from the value records: ``target`` is a
+# string id, while ``SUITES`` is a list of dictionaries.
+SUITE_IDS = {
+    str(suite.get("id"))
+    for suite in SUITES
+    if isinstance(suite, dict) and suite.get("id")
+}
 
 
 def suite_values(suite_id: str) -> dict[str, float | int]:
@@ -398,7 +405,7 @@ def current_values(equity: float | None = None) -> dict[str, float | int]:
             band = resolve_risk_suite(equity)
             if band and band.get("target_id"):
                 target = str(band["target_id"])
-                out.update(suite_values(target) if target in SUITES else custom_suite_values(target))
+                out.update(suite_values(target) if target in SUITE_IDS else custom_suite_values(target))
         except (KeyError, ValueError, TypeError):
             # Invalid target never replaces the validated process values.
             pass

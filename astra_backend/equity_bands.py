@@ -128,6 +128,24 @@ def save_bands(domain: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return normalized
 
 
+def validate_band_targets(domain: str, rows: list[dict[str, Any]]) -> None:
+    """Reject dangling band references before persisting a domain mapping."""
+    key = _domain(domain)
+    if key == "council":
+        from astra_backend.council_manager import list_council_profiles
+        targets = {str(row.get("id")) for row in list_council_profiles()}
+    elif key == "prompt":
+        from scripts.prompt_library import all_profiles
+        targets = {str(row.get("id")) for row in all_profiles()}
+    else:
+        from astra_backend import risk_config
+        targets = {str(row.get("id")) for row in risk_config.SUITES}
+        targets.update(str(row.get("id")) for row in risk_config.custom_suites())
+    invalid = sorted({str(row.get("target_id") or "") for row in rows} - targets)
+    if invalid:
+        raise ValueError(f"资金区间引用了不存在的方案：{', '.join(invalid)}")
+
+
 def resolve_band(domain: str, settled_equity: Any) -> dict[str, Any] | None:
     key = _domain(domain)
     if settled_equity is None:
