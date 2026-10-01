@@ -91,27 +91,24 @@ class MoveIsLosslessTest(unittest.TestCase):
             out.append(ln)
         return out
 
-    def test_body_is_line_identical_to_pre_move_source(self):
-        original = PRE_MOVE_SOURCE.read_text(encoding="utf-8").splitlines()
-        moved = _submodule_function_lines()
-        # 允许的差异只有两处：签名展开（1 行 → 3 行）与新增 docstring（1 行）
-        original_body = [ln for ln in original if not ln.startswith("def fetch_single_instrument_package")]
-        moved_body = moved[4:]
-        a_norm, b_norm = self._normalise(original_body), self._normalise(moved_body)
-        self.assertEqual(len(a_norm), len(b_norm),
-                         "函数体行数变了（除已记录的 6 行接线外）—— 搬运过程中漏行或多行")
-        for i, (a, b) in enumerate(zip(a_norm, b_norm)):
-            self.assertEqual(a, b, f"函数体第 {i + 1} 行不一致（搬运被改动）")
+    def test_package_uses_pool_limited_market_bundle(self):
+        src = "\n".join(_submodule_function_lines())
+        self.assertIn('item.get("venues")', src)
+        self.assertIn('fetch_market_bundle(', src)
+        self.assertIn('"market_data_venue"', src)
+        self.assertIn('pkg["data_quality"] = "valid" if required_market_data else "invalid"', src)
 
     def test_failure_counters_are_actually_wired(self):
-        """正向断言：6 处静默 except 必须各自接上失败计数（防止上一条的白名单被滥用）。"""
+        """正向断言：行情取数 except 必须各自接上失败计数（防止白名单被滥用）。"""
         src = "\n".join(_submodule_function_lines())
         kinds = sorted(re.findall(r'note_failure\("([a-z_0-9]+)", exc\)', src))
         self.assertEqual(kinds, ["okx_adx_1h", "okx_funding_rate", "okx_ls_ratio",
-                                 "okx_open_interest", "okx_taker_volume", "okx_ticker"],
-                         "6 处取数失败的可观测性接线缺失或被改名")
-        # 6 处新接入 + 4 处搬运时就带 `as exc` 的（K线 15m/1H/4H 与 calculus）
-        self.assertEqual(src.count("except Exception as exc:"), 10)
+                                 "okx_open_interest", "okx_taker_volume", "okx_ticker",
+                                 "venue_market_bundle"],
+                         "行情取数的可观测性接线缺失或被改名")
+        # 6 处原有取数失败 + 1 处按池行情 bundle + 4 处搬运时就带 as exc 的
+        # （K线 15m/1H/4H 与 calculus）。
+        self.assertEqual(src.count("except Exception as exc:"), 11)
 
     def test_okx_latency_instrumentation_is_actually_wired(self):
         """正向断言：v8.1.0 的 OKX 取数延时观测必须真的在算（防止上一条的
@@ -130,13 +127,13 @@ class MoveIsLosslessTest(unittest.TestCase):
         self.assertIn('pkg["okx_latency_ms"]', targets,
                       "okx_latency_ms 不是对 pkg 的落包赋值")
 
-    def test_submodule_takes_the_two_market_functions_as_parameters(self):
+    def test_submodule_takes_market_functions_as_parameters(self):
         fn = next(n for n in ast.parse(SUBMODULE.read_text(encoding="utf-8")).body
                   if isinstance(n, ast.FunctionDef)
                   and n.name == "fetch_single_instrument_package")
         kwonly = [a.arg for a in fn.args.kwonlyargs]
-        self.assertEqual(kwonly, ["fetch_candles", "fetch_single_indicator"],
-                         "两个行情函数必须走调用期注入")
+        self.assertEqual(kwonly, ["fetch_candles", "fetch_single_indicator", "fetch_market_bundle"],
+                         "行情依赖必须走调用期注入")
         # 反向哨：子模块不得在 import 期绑定它们
         self.assertNotIn("from market_data_service import", SUBMODULE.read_text(encoding="utf-8"))
 
@@ -147,6 +144,7 @@ class FacadeDelegationTest(unittest.TestCase):
         self.assertIn("from scripts.brain.packages import fetch_single_instrument_package as _fetch_single_instrument_package", src)
         self.assertIn("fetch_candles=fetch_candles,", src)
         self.assertIn("fetch_single_indicator=fetch_single_indicator,", src)
+        self.assertIn("fetch_market_bundle=fetch_market_bundle,", src)
 
     def test_facade_shell_actually_calls_submodule(self):
         """打桩子模块，确认门面壳真的走它（而不是偷偷留了旧实现）。"""

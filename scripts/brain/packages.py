@@ -37,8 +37,8 @@ except ImportError:       # 以 scripts.brain.* 包被导入（PROJECT_ROOT 在 
     from scripts.market_data_health import note_failure
 
 
-def _minimum_order_requirements(base: str, price: float) -> Dict[str, Any]:
-    """从三所公共合约规格计算当前价格下的最小开仓名义价值。"""
+def _minimum_order_requirements(base: str, price: float, allowed_venues=None) -> Dict[str, Any]:
+    """从标的池允许的交易所公共合约规格计算当前价格下的最小开仓名义价值。"""
     requirements: Dict[str, Any] = {
         venue: {"minimum_notional_usdt": None, "source": "unavailable"}
         for venue in ("okx", "binance", "gate")
@@ -48,7 +48,11 @@ def _minimum_order_requirements(base: str, price: float) -> Dict[str, Any]:
     except Exception:
         return requirements
 
+    venues = ({str(v).strip().lower() for v in allowed_venues}
+              if isinstance(allowed_venues, (list, tuple, set)) else {"okx", "binance", "gate"})
     for venue in ("okx", "binance", "gate"):
+        if venue not in venues:
+            continue
         try:
             adapter = get_adapter(venue, environment=adapter_environment(venue))
             spec = adapter.fetch_instrument_spec(base)
@@ -79,12 +83,25 @@ def _minimum_order_requirements(base: str, price: float) -> Dict[str, Any]:
 
 def fetch_single_instrument_package(item: Dict[str, Any], *,
                                    fetch_candles,
-                                   fetch_single_indicator) -> Dict[str, Any]:
-    """装配单标的数据包；两个行情函数由门面在**调用时**注入（理由见模块 docstring）。"""
+                                   fetch_single_indicator,
+                                   fetch_market_bundle=None) -> Dict[str, Any]:
+    """装配单标的数据包；行情优先使用按标的池 venue 选择的同源数据包。"""
     inst_id = item["instId"]
     name = item["name"]
     ccy = item.get("ccy", "")
     headers = {"User-Agent": "Mozilla/5.0"}
+    market_bundle = None
+    if fetch_market_bundle is not None:
+        try:
+            market_bundle = fetch_market_bundle(
+                inst_id, item.get("venues"), {"15m": 24, "1H": 24, "4H": 16})
+        except Exception as exc:
+            note_failure("venue_market_bundle", exc)
+
+    def _candles(bar: str, limit: int):
+        if fetch_market_bundle is not None:
+            return (market_bundle or {}).get("candles", {}).get(bar, [])
+        return fetch_candles(inst_id, bar=bar, limit=limit)
 
     pkg = {
         "instId": inst_id,
@@ -121,31 +138,45 @@ def fetch_single_instrument_package(item: Dict[str, Any], *,
         "recent_1h": [],
         "recent_4h": [],
         "minimum_order_requirements": {},
+        "market_data_venue": "",
         "calculus": {"valid": False, "regime": "DATA_UNRELIABLE", "quality": 0.0},
         "data_quality": "invalid"
     }
 
-    # 1. Ticker
+    # 1. Ticker: production supplies a venue-constrained bundle; legacy test callers retain the OKX path.
     t_okx0 = time.time()
-    try:
-        req = urllib.request.Request(f"https://www.okx.com/api/v5/market/ticker?instId={inst_id}", headers=headers)
-        with urllib.request.urlopen(req, timeout=3) as resp:
-            d = json.loads(resp.read().decode("utf-8"))
-            if d.get("code") == "0" and d.get("data"):
-                t = d["data"][0]
-                pkg["price"] = float(t.get("last", 0))
-                pkg["bidPx"] = float(t.get("bidPx", pkg["price"]) or pkg["price"])
-                pkg["askPx"] = float(t.get("askPx", pkg["price"]) or pkg["price"])
-                op = float(t.get("open24h", 0) or 0)
-                pkg["chg24h"] = round(((pkg["price"] - op) / op * 100) if op > 0 else 0, 2)
-                pkg["vol24h"] = round(float(t.get("vol24h", 0) or 0), 2)
-                pkg["okx_latency_ms"] = max(1, int(round((time.time() - t_okx0) * 1000)))
-    except Exception as exc:
-        note_failure("okx_ticker", exc)
+    if market_bundle is not None:
+        t = market_bundle.get("ticker") or {}
+        pkg["price"] = float(t.get("last") or 0)
+        pkg["bidPx"] = float(t.get("bid") or 0)
+        pkg["askPx"] = float(t.get("ask") or 0)
+        pkg["chg24h"] = round(float(t.get("chg_24h_pct") or 0), 2)
+        pkg["vol24h"] = round(float(t.get("vol_24h_base") or 0), 2)
+        pkg["market_data_venue"] = str(market_bundle.get("venue") or "")
+        pkg["market_data_latency_ms"] = max(1, int(round((time.time() - t_okx0) * 1000)))
+        funding = market_bundle.get("funding_rate")
+        if funding is not None:
+            pkg["fundingRate"] = round(float(funding) * 100, 4)
+    elif fetch_market_bundle is None:
+        try:
+            req = urllib.request.Request(f"https://www.okx.com/api/v5/market/ticker?instId={inst_id}", headers=headers)
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                d = json.loads(resp.read().decode("utf-8"))
+                if d.get("code") == "0" and d.get("data"):
+                    t = d["data"][0]
+                    pkg["price"] = float(t.get("last", 0))
+                    pkg["bidPx"] = float(t.get("bidPx", pkg["price"]) or pkg["price"])
+                    pkg["askPx"] = float(t.get("askPx", pkg["price"]) or pkg["price"])
+                    op = float(t.get("open24h", 0) or 0)
+                    pkg["chg24h"] = round(((pkg["price"] - op) / op * 100) if op > 0 else 0, 2)
+                    pkg["vol24h"] = round(float(t.get("vol24h", 0) or 0), 2)
+                    pkg["okx_latency_ms"] = max(1, int(round((time.time() - t_okx0) * 1000)))
+        except Exception as exc:
+            note_failure("okx_ticker", exc)
 
     # 2. 15M Candles (recent 24, about 6 hours) & Technical Indicators Calculation
     try:
-        d = {"data": fetch_candles(inst_id, bar="15m", limit=24)}
+        d = {"data": _candles("15m", 24)}
         if d["data"]:
             raw_candles = d["data"]
             pkg["recent_15m"] = [[float(c[1]), float(c[2]), float(c[3]), float(c[4]), round(float(c[5]), 1)] for c in raw_candles[:12]]
@@ -205,7 +236,7 @@ def fetch_single_instrument_package(item: Dict[str, Any], *,
 
     # 3. 1H Candles (recent 24, about 24 hours) & 1H ATR / 1H RSI
     try:
-        d = {"data": fetch_candles(inst_id, bar="1H", limit=24)}
+        d = {"data": _candles("1H", 24)}
         if d["data"]:
             raw_1h = d["data"]
             pkg["recent_1h"] = [[float(c[1]), float(c[2]), float(c[3]), float(c[4]), round(float(c[5]), 1)] for c in raw_1h[:12]]
@@ -248,7 +279,7 @@ def fetch_single_instrument_package(item: Dict[str, Any], *,
 
     # 4. 4H Candles (recent 16, about 64 hours) & 4H Macro Structure
     try:
-        d = {"data": fetch_candles(inst_id, bar="4H", limit=16)}
+        d = {"data": _candles("4H", 16)}
         if d["data"]:
             raw_4h = d["data"]
             pkg["recent_4h"] = [[float(c[1]), float(c[2]), float(c[3]), float(c[4]), round(float(c[5]), 1)] for c in raw_4h[:8]]
@@ -268,7 +299,7 @@ def fetch_single_instrument_package(item: Dict[str, Any], *,
         print(f"[AI Brain] ⚠️ {inst_id} 4H K线处理异常: {exc}")
 
     # 5. Funding Rate & OI
-    if item["type"] == "crypto":
+    if item["type"] == "crypto" and (market_bundle is None or market_bundle.get("venue") == "okx"):
         try:
             req = urllib.request.Request(f"https://www.okx.com/api/v5/public/funding-rate?instId={inst_id}", headers=headers)
             with urllib.request.urlopen(req, timeout=3) as resp:
@@ -311,12 +342,13 @@ def fetch_single_instrument_package(item: Dict[str, Any], *,
                 note_failure("okx_taker_volume", exc)
 
         # 6. OKX ADX Trend Strength Indicator (1H) via direct REST (zero Node CLI fork)
-        try:
-            adx_data = fetch_single_indicator(inst_id, "ADX", bar="1H")
-            if adx_data and "adx" in adx_data:
-                pkg["adx_1h"] = float(adx_data.get("adx", 0.0) or 0.0)
-        except Exception as exc:
-            note_failure("okx_adx_1h", exc)
+        if market_bundle is None or market_bundle.get("venue") == "okx":
+            try:
+                adx_data = fetch_single_indicator(inst_id, "ADX", bar="1H")
+                if adx_data and "adx" in adx_data:
+                    pkg["adx_1h"] = float(adx_data.get("adx", 0.0) or 0.0)
+            except Exception as exc:
+                note_failure("okx_adx_1h", exc)
 
     required_market_data = (
         pkg["price"] > 0
@@ -337,5 +369,6 @@ def fetch_single_instrument_package(item: Dict[str, Any], *,
         pkg["calculus"] = {"valid": False, "regime": "DATA_UNRELIABLE", "quality": 0.0, "error": str(exc)}
     pkg["data_quality"] = "valid" if required_market_data else "invalid"
     if pkg["price"] > 0:
-        pkg["minimum_order_requirements"] = _minimum_order_requirements(name, pkg["price"])
+        pkg["minimum_order_requirements"] = _minimum_order_requirements(
+            name, pkg["price"], item.get("venues"))
     return pkg

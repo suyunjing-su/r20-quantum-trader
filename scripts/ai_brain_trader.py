@@ -70,7 +70,7 @@ def _get_system_version_tag() -> str:
 
 WORKSPACE_DIR = PROJECT_ROOT
 DATA_DIR = os.path.join(WORKSPACE_DIR, "data")
-from market_data_service import fetch_single_indicator, fetch_ticker, fetch_candles
+from market_data_service import fetch_single_indicator, fetch_ticker, fetch_candles, fetch_market_bundle
 # 结构优化阶段4·B3：单标的数据包装配已搬入 scripts/brain/packages.py（门面保留薄壳）
 from scripts.brain.packages import fetch_single_instrument_package as _fetch_single_instrument_package
 # 结构优化阶段4·B3 第二块：跨所采集/健康度/提示词组装已搬入 scripts/brain/xvenue.py。
@@ -378,14 +378,13 @@ def fetch_single_instrument_package(item: Dict[str, Any]) -> Dict[str, Any]:
 
     门面保留同名壳：调用点（`execute_batch_ai_brain_cycle` 里的线程池提交）
     与其他模块的引用都按全局名查找，故调用点无需改动。
-    两个行情函数在**调用时**注入，而不是被子模块 import 期烘焙 ——
-    `pin_baseline_risk_env()` 的重载名单不含子模块，import 期绑定会让
-    `patch.object(门面, "fetch_candles")` 失效。详见该模块 docstring。
+    两个原有行情函数与按池准入选择多所同源行情的函数均在调用时注入，避免子模块 import 期绑定。
     """
     return _fetch_single_instrument_package(
         item,
         fetch_candles=fetch_candles,
         fetch_single_indicator=fetch_single_indicator,
+        fetch_market_bundle=fetch_market_bundle,
     )
 
 # ── SYSTEM_PROMPT · v7.6 优质预设基线 ──────────────────────────────────────

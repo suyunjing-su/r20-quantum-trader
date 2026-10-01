@@ -338,6 +338,58 @@ def _alt_funding_rate(inst_id: str) -> Optional[float]:
 # 1. Ticker & Bulk Tickers
 # ---------------------------------------------------------------------------
 
+def fetch_market_bundle(inst_id: str, allowed_venues: Any,
+                        candle_limits: Optional[Dict[str, int]] = None) -> Optional[Dict[str, Any]]:
+    """按标的池准入及 OKX→Binance→Gate 顺序取同一场所的 ticker 与 K 线。"""
+    from astra_backend.exchanges.base import canonical_base
+
+    if not isinstance(allowed_venues, (list, tuple, set)):
+        return None
+    allowed = {str(v).strip().lower() for v in allowed_venues}
+    order = [v for v in ("okx", "binance", "gate") if v in allowed]
+    if not order:
+        return None
+
+    limits = candle_limits or {"15m": 24, "1H": 24, "4H": 16}
+    base = canonical_base(inst_id)
+    for venue in order:
+        try:
+            adapter = _get_venue_adapter(venue)
+            ticker = adapter.fetch_ticker(base)
+            if not isinstance(ticker, dict):
+                continue
+            last = float(ticker.get("last") or 0)
+            bid = float(ticker.get("bid") or 0)
+            ask = float(ticker.get("ask") or 0)
+            if (not math.isfinite(last) or not math.isfinite(bid) or not math.isfinite(ask)
+                    or last <= 0 or bid <= 0 or ask <= 0 or ask < bid):
+                continue
+
+            candles: Dict[str, List[List[Any]]] = {}
+            complete = True
+            for bar, limit in limits.items():
+                rows = adapter.fetch_candles(base, bar=bar, limit=int(limit))
+                if not rows or len(rows) < min(int(limit), {"15m": 12, "1H": 8, "4H": 6}.get(bar, int(limit))):
+                    complete = False
+                    break
+                # Adapter contract is oldest→newest; package assembly expects newest→oldest.
+                candles[bar] = list(reversed(rows[-int(limit):]))
+            if not complete:
+                continue
+
+            funding_rate = None
+            try:
+                funding_rate = adapter.fetch_funding_rate(base)
+            except Exception:
+                pass
+            logger.info("Market bundle %s served by %s", inst_id, venue)
+            return {"venue": venue, "ticker": ticker, "candles": candles,
+                    "funding_rate": funding_rate}
+        except Exception as exc:
+            logger.warning("Market bundle %s failed on %s: %s", inst_id, venue, exc)
+    return None
+
+
 def fetch_ticker(inst_id: str, timeout: float = 3.5) -> Optional[Dict[str, Any]]:
     """Fetch one instrument ticker: www→aws 双域 REST 直连，失败落异所备源。"""
     data = _public_get("/api/v5/market/ticker", params={"instId": inst_id}, timeout=timeout)
