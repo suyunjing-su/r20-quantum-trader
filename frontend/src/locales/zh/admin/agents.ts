@@ -59,6 +59,13 @@ export const zhAdminAgents = {
   keyActionFailed: 'Agent API Key 操作失败',
   keyRotateConfirm: '轮换会立即撤销当前密钥，并且无法再次查看旧密钥。继续吗？',
   keyDeleteConfirm: '删除后所有使用此密钥的 Agent 将立即失去访问权限。确定删除？',
+  equityBandsScopeTitle: '资金档位写入权限',
+  equityBandsScopeDesc: '允许此 Agent API Key 写入委员会、Prompt 和风险资金区间。仅在确认自动化流程需要时开启。',
+  scopeGranted: '已授权写入',
+  scopeNotGranted: '未授权写入',
+  scopeLoadFailed: '无法读取 Agent 权限范围',
+  scopeSaved: 'Agent 资金档位权限已更新',
+  scopeSaveFailed: 'Agent 权限更新失败',
 
   // 批 27：健康 / 运行状态 / 调用状态此前都是原样印后端枚举
   // （healthy、success、not-run），而同页 KPI 带写的是「健康 / 异常」。查表本地化。

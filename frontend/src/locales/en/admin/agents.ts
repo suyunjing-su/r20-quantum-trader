@@ -58,6 +58,13 @@ export const enAdminAgents = {
   keyActionFailed: 'Agent API key operation failed',
   keyRotateConfirm: 'Rotation immediately revokes the current key, which cannot be viewed again. Continue?',
   keyDeleteConfirm: 'Deleting this key immediately removes access for every agent using it. Delete it?',
+  equityBandsScopeTitle: 'Equity-band write permission',
+  equityBandsScopeDesc: 'Allow this Agent API key to write council, prompt and risk equity bands. Enable only when the automation workflow needs it.',
+  scopeGranted: 'Write access granted',
+  scopeNotGranted: 'Write access not granted',
+  scopeLoadFailed: 'Could not load Agent scopes',
+  scopeSaved: 'Agent equity-band permission updated',
+  scopeSaveFailed: 'Could not update Agent permission',
 
   status: {
     healthy: 'Healthy',

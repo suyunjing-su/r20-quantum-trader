@@ -40,7 +40,40 @@ const agentKeyConfigured = ref(false);
 const agentKeyLoading = ref(false);
 const agentKeyBusy = ref(false);
 const generatedAgentKey = ref('');
+const equityBandsWriteGranted = ref(false);
+const scopeLoading = ref(false);
+const scopeBusy = ref(false);
 
+async function loadAgentScopes() {
+  if (!auth.isSuperadmin) return;
+  scopeLoading.value = true;
+  try {
+    const result = await api<{ scopes: string[] }>('/api/v1/admin/agent-api-key/scopes');
+    equityBandsWriteGranted.value = (result.scopes || []).includes('equity_bands:write');
+  } catch (e: any) {
+    toast.err(t('admin.agents.scopeLoadFailed'), e?.message || String(e));
+  } finally {
+    scopeLoading.value = false;
+  }
+}
+
+async function saveAgentScopes() {
+  scopeBusy.value = true;
+  try {
+    const scopes = equityBandsWriteGranted.value ? ['equity_bands:write'] : [];
+    await api('/api/v1/admin/agent-api-key/scopes', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scopes }),
+    });
+    toast.ok(t('admin.agents.scopeSaved'));
+  } catch (e: any) {
+    equityBandsWriteGranted.value = !equityBandsWriteGranted.value;
+    toast.err(t('admin.agents.scopeSaveFailed'), e?.message || String(e));
+  } finally {
+    scopeBusy.value = false;
+  }
+}
 async function loadAgentKeyStatus() {
   if (!auth.isSuperadmin) return;
   agentKeyLoading.value = true;
@@ -97,7 +130,10 @@ async function copyAgentKey() {
   }
 }
 
-onMounted(() => { void loadAgentKeyStatus(); });
+onMounted(() => {
+  void loadAgentKeyStatus();
+  void loadAgentScopes();
+});
 
 const { data, loading, error, loaded, reload: load } = useResource<any>('/api/v1/admin/agents', {
   immediate: true,
@@ -201,6 +237,22 @@ function ageText(a: any): string {
               <Trash2 :size="14" />
               <span>{{ t('admin.agents.keyDelete') }}</span>
             </button>
+          </div>
+
+          <div class="agent-scope-row">
+            <div>
+              <strong class="agent-scope-title">{{ t('admin.agents.equityBandsScopeTitle') }}</strong>
+              <p class="agent-scope-desc">{{ t('admin.agents.equityBandsScopeDesc') }}</p>
+            </div>
+            <label class="agent-scope-toggle">
+              <input
+                v-model="equityBandsWriteGranted"
+                type="checkbox"
+                :disabled="scopeLoading || scopeBusy || !agentKeyConfigured"
+                @change="saveAgentScopes"
+              />
+              <span>{{ equityBandsWriteGranted ? t('admin.agents.scopeGranted') : t('admin.agents.scopeNotGranted') }}</span>
+            </label>
           </div>
 
           <div v-if="generatedAgentKey" class="agent-key-once" role="status">
@@ -444,7 +496,41 @@ function ageText(a: any): string {
   font-size: var(--text-3xs);
 }
 
-/* ══ 状态带 ══ */
+.agent-scope-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ds-space-3);
+  padding: var(--ds-space-3);
+  border: 1px solid var(--ds-color-border-default);
+  border-radius: var(--ds-radius-md);
+  background: var(--ds-color-bg-surface-inset);
+}
+.agent-scope-title {
+  display: block;
+  color: var(--ds-color-text-primary);
+  font-size: var(--text-3xs);
+}
+.agent-scope-desc {
+  max-width: 46rem;
+  margin: 0.25rem 0 0;
+  color: var(--ds-color-text-secondary);
+  font-size: var(--text-3xs);
+  line-height: var(--leading-body);
+}
+.agent-scope-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex: 0 0 auto;
+  color: var(--ds-color-text-primary);
+  font-size: var(--text-3xs);
+  white-space: nowrap;
+}
+.agent-scope-toggle input {
+  accent-color: var(--accent);
+}
+
 
 
 
