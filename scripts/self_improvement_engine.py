@@ -498,6 +498,23 @@ def compose_evolution_prompts(closed_trades: List[Dict[str, Any]], existing_memo
         closed_trades=closed_trades,
         render_observability_brief=render_observability_brief    )
 
+    execution_rows = [t.get("execution_quality") for t in closed_trades
+                      if str(t.get("venue") or "").lower() == "binance"]
+    if execution_rows:
+        def _observed(key):
+            return sum(1 for row in execution_rows
+                       if isinstance(row, dict) and row.get(key) is not None
+                       and str(row.get(key)).upper() != "UNOBSERVED")
+        execution_quality_brief = (
+            f"Binance {len(execution_rows)} 笔；有盘口快照 {_observed('entry_spread_bps')} 笔，"
+            f"有预估滑点 {_observed('estimated_entry_slippage_bps')} 笔，"
+            f"有实际入场滑点 {_observed('entry_slippage_bps')} 笔，"
+            f"保护腿状态可核验 {_observed('protection_status')} 笔，"
+            f"平仓滑点可核验 {_observed('close_slippage_bps')} 笔。"
+        )
+    else:
+        execution_quality_brief = "本批无 Binance 执行质量样本"
+
     v_counts: Dict[str, int] = {}
     for t in closed_trades:
         v = str(t.get("venue") or "okx").upper()
@@ -523,6 +540,10 @@ def compose_evolution_prompts(closed_trades: List[Dict[str, Any]], existing_memo
 - 当前聚焦标的池: {TARGET_INSTRUMENTS}
 
 {breakdown_text}
+
+【执行质量可观测性】:
+- {execution_quality_brief}
+- null / UNOBSERVED 表示未采集或不可观测，不是零；旧交易没有的价差、深度、预估滑点、真实成交均价偏离、保护腿或平仓滑点不得补造，也不得据此归因低流动性/成交失败。仅将可观测字段作为事实；数据采集建议限于未来交易。
 
 【逐笔历史交易明细 (按时间排序)】:
 {json.dumps(closed_trades, indent=2, ensure_ascii=False)}
@@ -560,6 +581,7 @@ def compose_evolution_prompts(closed_trades: List[Dict[str, Any]], existing_memo
         "closed_trades_json": json.dumps(closed_trades, indent=2, ensure_ascii=False),
         "active_instruments": ",".join(TARGET_INSTRUMENTS),
         "snapshot_observability_summary": observability_brief,
+        "execution_quality_observability_summary": execution_quality_brief,
         "dynamics_observable_trades": snapshot_audit["math_observable"],
         "unobservable_trades": snapshot_audit["PRICE_ONLY"] + snapshot_audit["NONE"],
         "profile_name": profile.get("name", ""), "timezone": "Asia/Shanghai",
@@ -570,7 +592,8 @@ def compose_evolution_prompts(closed_trades: List[Dict[str, Any]], existing_memo
     # 宿主宪章：代码层硬约束，在风格档案 layout 之后强制追加——profile 只能调整
     # 措辞风格，永远无法删改证据纪律与基准心法保护（Code is Law，2026-09-10）。
     host_constitution = build_host_constitution(
-        observability_brief=observability_brief    )
+        observability_brief=observability_brief,
+        execution_quality_brief=execution_quality_brief    )
     effective_evolution_system = effective_evolution_system.rstrip() + host_constitution
     effective_evolution_user = effective_evolution_user.rstrip() + host_constitution
     return effective_evolution_system, effective_evolution_user, now_bj_str, snapshot_audit

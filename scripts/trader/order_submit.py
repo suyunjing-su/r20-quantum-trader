@@ -471,8 +471,16 @@ def submit_protected_limit_order(inst_id: str, side: str, pos_side: str, size: f
                     venue_ctx["venue_exec_sz"] = float(res.get("contracts") or 0.0)
                     venue_ctx["venue_exec_margin"] = float(res.get("margin_usdt") or 0.0)
                     venue_ctx["venue_exec_notional"] = float(res.get("notional_usdt") or 0.0)
+                    if target_venue == "binance" and isinstance(res.get("execution_evidence"), dict):
+                        venue_ctx["execution_evidence"] = res["execution_evidence"]
                 except (TypeError, ValueError):
                     pass
+            if target_venue == "binance" and isinstance(res.get("execution_evidence"), dict):
+                try:
+                    from scripts.trader.execution_evidence import persist_binance_execution_evidence
+                    persist_binance_execution_evidence(res["execution_evidence"])
+                except Exception as evidence_exc:
+                    print(f"[binance execution evidence] warn persist skipped: {evidence_exc}")
             record_open_intent(inst_id, side)
             confirm_signal_reservation(_reservation)
             return True, order_id

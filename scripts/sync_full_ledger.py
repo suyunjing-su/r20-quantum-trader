@@ -409,6 +409,54 @@ def fetch_binance_closed_trades(environment: str = "demo", tz_bj=None) -> list:
             except Exception:
                 pass
 
+            # 执行质量证据只使用入场时落盘的盘口快照与 Binance userTrades 实际成交；
+            # 历史没有的订单簿/触发参考价明确记为 UNOBSERVED，不用 0 或信号价补造。
+            execution_quality = {
+                "schema_version": 1,
+                "entry_book_status": "UNOBSERVED",
+                "entry_spread_bps": None,
+                "entry_bid_depth_5_usdt": None,
+                "entry_ask_depth_5_usdt": None,
+                "estimated_entry_slippage_bps": None,
+                "actual_entry_vwap": None,
+                "entry_slippage_bps": None,
+                "protection_status": "UNOBSERVED",
+                "protection_leg_ids": None,
+                "actual_close_vwap": None,
+                "close_slippage_bps": None,
+                "close_slippage_status": "UNOBSERVED_NO_TRIGGER_REFERENCE",
+            }
+            try:
+                from scripts.trader.execution_evidence import (
+                    directional_slippage_bps, load_binance_execution_evidence, measure_fill_vwap)
+                evidence_file = os.path.join(DATA_DIR, "binance_execution_evidence.json")
+                evidence_by_order = load_binance_execution_evidence(evidence_file)
+                matched_entry = open_candidates[-1] if open_candidates else {}
+                entry_order_id = str(matched_entry.get("orderId") or "")
+                entry_evidence = evidence_by_order.get(entry_order_id, {}) if entry_order_id else {}
+                if entry_evidence:
+                    execution_quality.update({
+                        "entry_book_status": entry_evidence.get("book_status", "UNOBSERVED"),
+                        "entry_spread_bps": entry_evidence.get("spread_bps"),
+                        "entry_bid_depth_5_usdt": entry_evidence.get("bid_depth_5_usdt"),
+                        "entry_ask_depth_5_usdt": entry_evidence.get("ask_depth_5_usdt"),
+                        "estimated_entry_slippage_bps": entry_evidence.get("estimated_slippage_bps"),
+                        "protection_status": entry_evidence.get("protection_status", "UNOBSERVED"),
+                        "protection_leg_ids": entry_evidence.get("protection_leg_ids"),
+                    })
+                entry_fills = [t for t in sym_trades
+                               if entry_order_id and str(t.get("orderId") or "") == entry_order_id]
+                entry_fill = measure_fill_vwap(entry_fills)
+                execution_quality["actual_entry_vwap"] = entry_fill["vwap"]
+                execution_quality["entry_slippage_bps"] = directional_slippage_bps(
+                    matched_entry.get("side"), entry_evidence.get("signal_price"), entry_fill["vwap"])
+                close_order_id = str(matched.get("orderId") or "")
+                close_fills = [t for t in sym_trades
+                               if close_order_id and str(t.get("orderId") or "") == close_order_id]
+                execution_quality["actual_close_vwap"] = measure_fill_vwap(close_fills)["vwap"]
+            except Exception:
+                pass
+
             out.append({
                 "id": f"binance_closed_{t_id}_{time_ms}",
                 "inst": base,
@@ -437,6 +485,7 @@ def fetch_binance_closed_trades(environment: str = "demo", tz_bj=None) -> list:
                 "status": "closed",
                 "exit_reason": "🎯 目标止盈达成" if net_pnl > 0 else "🛑 触发云端止损",
                 "signal_snapshot": bn_snap,
+                "execution_quality": execution_quality,
             })
     except Exception as exc:
         _mark("binance", "failed", reason=str(exc)[:200])

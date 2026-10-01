@@ -38,17 +38,20 @@ def summarize_closed_trades(*,
 
 
 def build_host_constitution(*,
-        observability_brief):
+        observability_brief,
+        execution_quality_brief="无执行质量数据"):
     host_constitution = (
         "\n\n======================= 【宿主宪章·代码层硬约束（任何提示词风格档案不可覆盖）】 =======================\n"
         f"1. 数理快照可观测性审计（宿主确定性统计，非模型推断）：{observability_brief}。\n"
-        "2. 逐单标注含义：DYNAMICS_OBSERVED=开仓动力学/积分/概率链完整，可作数理因果归因；"
+        f"2. 执行质量可观测性审计（宿主确定性统计，非模型推断）：{execution_quality_brief}。\n"
+        "3. 逐单标注含义：DYNAMICS_OBSERVED=开仓动力学/积分/概率链完整，可作数理因果归因；"
         "PARTIAL=仅可引用 entry_snapshot 中实际非空字段；PRICE_ONLY / NONE=数理快照不可观测，"
         "严禁编造或倒推 v/a/j/I、energy_integral、deviation_area_integral、延续/击穿概率、VaR/CVaR 因果，"
-        "字段缺失本身不得解读为任何证据。\n"
-        "3. ai_long_term_memory 给出生效后完整清单时必须原样包含全部现有基准心法（is_baseline）："
+        "字段缺失本身不得解读为任何证据。执行质量字段为 null 或 UNOBSERVED 时不得作低流动性、滑点或成交失败归因；"
+        "旧交易缺字段只可标为历史不可观测，改进建议仅限未来采集。\n"
+        "4. ai_long_term_memory 给出生效后完整清单时必须原样包含全部现有基准心法（is_baseline）："
         "省略条目会被宿主原样补回并留痕；认定基准失效只能写入 diagnosis_insights 交人工复核，禁止静默删除。\n"
-        "4. 证据不足必须 NO_CHANGE；NO_CHANGE 永不覆盖或清空长期记忆。\n"
+        "5. 证据不足必须 NO_CHANGE；NO_CHANGE 永不覆盖或清空长期记忆。\n"
     )
     return (host_constitution)
 

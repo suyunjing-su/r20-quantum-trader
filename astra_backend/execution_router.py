@@ -564,6 +564,56 @@ def open_protected_position(decision: Dict[str, Any], *,
     except Exception as exc:
         return _fail("leverage", f"设置杠杆失败: {exc}", venue=venue)
 
+    # 仅采集可核验的 Binance 入场前盘口证据；采集失败不阻断交易，字段保持 None。
+    execution_evidence = None
+    if venue == "binance":
+        execution_evidence = {
+            "schema_version": 1,
+            "observed_at_ms": int(time.time() * 1000),
+            "signal_price": float(entry) if entry and float(entry) > 0 else None,
+            "book_status": "UNOBSERVED",
+            "spread_bps": None,
+            "bid_depth_5_usdt": None,
+            "ask_depth_5_usdt": None,
+            "estimated_slippage_bps": None,
+            "protection_status": "PENDING",
+            "protection_leg_ids": None,
+        }
+        try:
+            book = ad.fetch_orderbook(asset, depth=5)
+            bids = book.get("bids") if isinstance(book, dict) else None
+            asks = book.get("asks") if isinstance(book, dict) else None
+            if bids and asks:
+                bid_rows = [(float(row[0]), float(row[1])) for row in bids[:5]]
+                ask_rows = [(float(row[0]), float(row[1])) for row in asks[:5]]
+                best_bid, best_ask = bid_rows[0][0], ask_rows[0][0]
+                mid = (best_bid + best_ask) / 2
+                if mid > 0:
+                    execution_evidence.update({
+                        "book_status": "OBSERVED",
+                        "spread_bps": (best_ask - best_bid) / mid * 10000,
+                        "bid_depth_5_usdt": sum(px * qty for px, qty in bid_rows),
+                        "ask_depth_5_usdt": sum(px * qty for px, qty in ask_rows),
+                    })
+                    want_buy = action in ("BUY_LONG", "BUY", "LONG")
+                    levels = ask_rows if want_buy else bid_rows
+                    remaining = abs(float(contracts))
+                    quote = 0.0
+                    filled = 0.0
+                    for px, qty in levels:
+                        take = min(remaining, qty)
+                        quote += take * px
+                        filled += take
+                        remaining -= take
+                        if remaining <= 0:
+                            break
+                    if filled > 0 and remaining <= 0:
+                        vwap = quote / filled
+                        reference = best_ask if want_buy else best_bid
+                        execution_evidence["estimated_slippage_bps"] = abs(vwap - reference) / reference * 10000
+        except Exception as evidence_exc:
+            print(f"[binance execution evidence] warn {asset} pre-entry book unavailable: {evidence_exc}")
+
     # 入场单（按模式发市价单或限价单，系统默认市价单）
     order_mode = str(decision.get("order_mode") or os.getenv("ASTRA_ORDER_MODE", "market")).strip().lower()
     entry_px = None if order_mode == "market" else entry
@@ -637,6 +687,14 @@ def open_protected_position(decision: Dict[str, Any], *,
             detail += "；回滚记录: " + "；".join(rollback_notes)
         return _fail("protective", detail, venue=venue, order_id=order_id)
 
+    if execution_evidence is not None:
+        execution_evidence["protection_status"] = "VERIFIED"
+        execution_evidence["protection_leg_ids"] = {"take_profit": str(legs.get("tp") or ""),
+                                                    "stop_loss": str(legs.get("sl") or "")}
+        execution_evidence["entry_order_id"] = order_id or None
+        execution_evidence["entry_order_status"] = str(placed.get("status") or "UNKNOWN")
+        execution_evidence["entry_order_filled_qty"] = float(placed.get("executedQty") or 0.0)
+
     return RouteResult(ok=True, venue=venue, stage="done", asset=asset,
                        action=action, order_id=order_id,
                        tp_id=str(legs.get("tp")), sl_id=str(legs.get("sl")),
@@ -645,6 +703,7 @@ def open_protected_position(decision: Dict[str, Any], *,
                        margin_usdt=round(margin, 4),
                        margin_clamped_from_usdt=margin_clamped_from or None,
                        ref_price=ref_price, rr=round(rr, 3), leverage=leverage,
+                       execution_evidence=execution_evidence,
                        detail=f"{venue.upper()} 入场限价挂单 + TP/SL 双腿云端触发单已回读验证")
 
 
