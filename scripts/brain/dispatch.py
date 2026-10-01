@@ -68,6 +68,9 @@ def dispatch_llm_and_persist_decisions(*,
         t0 = time.time()
         raw_res = None
         brain_output = None
+        # 委员会成功时不会经过单模型分支，故不能依赖该分支绑定 content。
+        # 这里保存规范化后的委员会 JSON 长度，供遥测与成功收口使用。
+        content = ""
 
         # Transparent check: is Multi-Agent Council enabled?
         council_enabled = False
@@ -104,6 +107,9 @@ def dispatch_llm_and_persist_decisions(*,
                     ),
                     "advisors_total": len(council_transcript.get("advisors") or {}),
                 }
+                # 委员会已经完成 CIO 终审，不会再进入下方单模型请求分支。
+                # 将最终裁决序列化仅用于 output_chars 遥测，不能把它误当作再次请求。
+                content = json.dumps(brain_output, ensure_ascii=False, separators=(",", ":"))
                 print(f"[AI Brain Council] ✅ 委员会辩论与终审完成，耗时: {council_status['duration_ms']}ms"
                       f"（参谋 {council_status['advisors_ok']}/{council_status['advisors_total']} 提案有效）")
             except Exception as e:
