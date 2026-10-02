@@ -114,6 +114,26 @@ def _atomic_write_json(file_path: Path, data: Any) -> None:
 
 
 
+def _global_council_timeout() -> float:
+    """读取外部委员会配置的超时；委员会方案里的同名字段永不参与运行。"""
+    candidate = COUNCIL_CONFIG_FILE
+    if not isinstance(candidate, (str, Path)):
+        return DEFAULT_COUNCIL_TIMEOUT
+    path = Path(candidate)
+    if not path.is_file():
+        return DEFAULT_COUNCIL_TIMEOUT
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        if not isinstance(data, dict):
+            return DEFAULT_COUNCIL_TIMEOUT
+        return clamp_council_timeout(
+            data.get("timeout_seconds", DEFAULT_COUNCIL_TIMEOUT)
+        )
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return DEFAULT_COUNCIL_TIMEOUT
+
+
 @_locked_council
 def load_council_config(equity: float | None = None) -> Dict[str, Any]:
     """读取委员会配置；**绝不**用工厂默认覆盖可解析的用户文件。
@@ -123,6 +143,7 @@ def load_council_config(equity: float | None = None) -> Dict[str, Any]:
     现在：可解析 → 原样返回（结构问题只打警告标记，由写闸/UI 提示）；
     损坏 → 先备份成 `council_config_corrupt_*.json` 再重建默认（留痕可恢复）。
     """
+    global_timeout = _global_council_timeout()
     try:
         from astra_backend.equity_bands import domain_settings, resolve_council_profile
         selection_mode = domain_settings("council").get("mode")
@@ -132,6 +153,7 @@ def load_council_config(equity: float | None = None) -> Dict[str, Any]:
                 profile = get_council_profile(str(band.get("target_id") or ""))
                 if profile and isinstance(profile.get("config"), dict):
                     selected = json.loads(json.dumps(profile["config"], ensure_ascii=False))
+                    selected["timeout_seconds"] = global_timeout
                     selected["active_profile_id"] = profile.get("id")
                     selected["equity_band_id"] = band.get("id")
                     selected["calculation_equity"] = float(equity) if equity is not None else None
@@ -480,7 +502,9 @@ def apply_council_profile(profile_id: str) -> Dict[str, Any]:
     profile = get_council_profile(profile_id)
     if profile is None:
         raise ValueError("委员会方案不存在")
+    current_timeout = _global_council_timeout()
     config = dict(profile.get("config") or {})
+    config["timeout_seconds"] = current_timeout
     config["profile_id"] = profile.get("id")
     saved = save_council_config(config)
     saved["active_profile_id"] = profile.get("id")
