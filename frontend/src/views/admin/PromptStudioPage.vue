@@ -49,6 +49,7 @@ import CopyButton from '../../components/base/CopyButton.vue';
 const { t } = useI18n();
 import { useApi } from '../../composables/useApi';
 import { useAuthStore } from '../../stores/auth';
+import { useVenueAccountsStore } from '../../stores/venueAccounts';
 import {
   Plus, ArrowUp, ArrowDown, Eye, CheckCircle2, Save, AlertTriangle,
   History, RotateCcw, Trash2, Copy, Download, Upload, FileUp,
@@ -57,6 +58,7 @@ import BaseLoadingAnnounce from '../../components/base/BaseLoadingAnnounce.vue';
 
 const { api } = useApi();
 const auth = useAuthStore();
+const venueAccounts = useVenueAccountsStore();
 
 const lib = ref<any>(null);
 const loading = ref(true);
@@ -111,6 +113,11 @@ const activePipelineLabel = computed(
   () => pipelines.value.find((p) => p.id === activePipeline.value)?.label || '--',
 );
 const isActiveProfile = computed(() => selectedProfileId.value === lib.value?.active_profile_id);
+const equityMode = computed(() => lib.value?.equity_mode || 'split');
+const resolvedProfileId = computed(() => lib.value?.resolved_profile_id || lib.value?.active_profile_id || '');
+const resolvedProfile = computed(() => (lib.value?.profiles || []).find((p: any) => p.id === resolvedProfileId.value) || null);
+const resolvedSource = computed(() => lib.value?.resolved_profile_source || 'global_default');
+const currentEquity = computed(() => venueAccounts.portfolioSummary?.calculation_equity ?? null);
 
 const compiledPreview = computed(() => {
   if (previewMode.value === 'template') {
@@ -129,7 +136,12 @@ async function loadLib() {
   loading.value = true;
   loadError.value = '';
   try {
-    lib.value = await api('/api/v1/admin/prompt-library');
+    await venueAccounts.refresh();
+    const equity = venueAccounts.portfolioSummary?.calculation_equity;
+    const query = typeof equity === 'number' && Number.isFinite(equity) && equity >= 0
+      ? `?equity=${encodeURIComponent(equity)}`
+      : '';
+    lib.value = await api(`/api/v1/admin/prompt-library${query}`);
     if (!selectedProfileId.value || !(lib.value.profiles || []).some((p: any) => p.id === selectedProfileId.value)) {
       selectedProfileId.value = lib.value.active_profile_id || lib.value.profiles?.[0]?.id || '';
     }
@@ -466,7 +478,10 @@ function copyPreview() {
   toast.ok(t('admin.promptStudio.compiledCopied'))
 }
 
-onMounted(loadLib)
+onMounted(async () => {
+  await venueAccounts.refresh();
+  await loadLib();
+})
 </script>
 
 <template>
@@ -527,11 +542,19 @@ onMounted(loadLib)
 
         <template v-else>
           <div class="fact">
-            <span class="fact-label">{{ t('admin.promptStudio.bandProfile') }}</span>
-            <span class="fact-value truncate" :title="selectedProfile?.name">{{ selectedProfile?.name || '--' }}</span>
+            <span class="fact-label">{{ t('admin.promptStudio.bandDefaultProfile') }}</span>
+            <span class="fact-value truncate" :title="lib?.active_profile_id">{{ lib?.profiles?.find((p: any) => p.id === lib?.active_profile_id)?.name || lib?.active_profile_id || '--' }}</span>
+            <span class="fact-foot">{{ t('admin.promptStudio.bandDefaultFoot') }}</span>
+          </div>
+
+          <div class="fact">
+            <span class="fact-label">{{ t('admin.promptStudio.bandResolvedProfile') }}</span>
+            <span class="fact-value truncate" :title="resolvedProfile?.name">{{ resolvedProfile?.name || resolvedProfileId || '--' }}</span>
             <span class="fact-foot">
-              <span v-if="isActiveProfile" class="badge badge-up">{{ t('admin.promptStudio.profiles.active') }}</span>
-              <span v-else class="badge">{{ t('admin.promptStudio.bandInactiveFoot') }}</span>
+              <span class="badge" :class="resolvedSource !== 'global_default' ? 'badge-accent' : 'badge-up'">
+                {{ resolvedSource === 'equity_unified' ? t('admin.promptStudio.bandUnified') : resolvedSource === 'equity_band' ? t('admin.promptStudio.bandSplit') : t('admin.promptStudio.bandGlobalDefault') }}
+              </span>
+              <span v-if="currentEquity != null" class="mono"> · {{ currentEquity }} USDT</span>
             </span>
           </div>
 

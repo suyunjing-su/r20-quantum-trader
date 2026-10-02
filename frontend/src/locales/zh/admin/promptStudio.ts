@@ -94,6 +94,12 @@ export const zhAdminPromptStudio = {
 
   // ── 推倒式重构新增（批 4b）──
   bandProfile: '当前方案',
+  bandDefaultProfile: '全局默认方案',
+  bandResolvedProfile: '实际运行方案',
+  bandDefaultFoot: '未命中权益规则时使用',
+  bandGlobalDefault: '全局默认',
+  bandUnified: '统一模式',
+  bandSplit: '分割区间命中',
   bandPipeline: '消息管线',
   bandModules: '模块数',
   bandModulesFoot: '{on}/{total} 已启用',

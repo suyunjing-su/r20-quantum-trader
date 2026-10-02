@@ -1099,18 +1099,24 @@ def _import_with_templates(source: dict[str, Any], name_override: str) -> dict[s
 
 
 def active_profile(equity: float | None = None) -> dict[str, Any]:
-    """Return the active profile, optionally resolved from the independent equity bands."""
-    if equity is not None:
-        try:
-            from astra_backend.equity_bands import resolve_prompt_profile
+    """Return the effective profile, resolving unified or split equity overrides.
+
+    ``active_profile_id`` remains the global default. Equity settings are an
+    overlay: unified mode applies its one target even when equity is unknown;
+    split mode applies a matching band only when equity is available.
+    """
+    try:
+        from astra_backend.equity_bands import domain_settings, resolve_prompt_profile
+        settings = domain_settings("prompt")
+        if equity is not None or settings.get("mode") == "unified":
             band = resolve_prompt_profile(equity)
             if band:
                 target = str(band.get("target_id") or "").strip()
                 if target:
                     return resolve_profile(get_profile(target))
-        except Exception:
-            # A malformed optional band must not break the normal active profile path.
-            pass
+    except Exception:
+        # A malformed optional band must not break the normal active profile path.
+        pass
     return resolve_profile(get_profile(load_library()["active_profile_id"]))
 
 

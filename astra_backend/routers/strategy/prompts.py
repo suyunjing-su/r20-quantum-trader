@@ -7,7 +7,7 @@ from __future__ import annotations
 import os
 import re
 from typing import Any
-from fastapi import Header, HTTPException
+from fastapi import Header, HTTPException, Query
 from pydantic import BaseModel, Field
 from astra_backend.config import refresh_settings
 from astra_backend.audit import record as audit_record
@@ -23,7 +23,11 @@ router = APIRouter(tags=["strategy"])
 
 @router.get("/api/v1/prompt-library")
 @router.get("/api/v1/admin/prompt-library")
-def prompt_library(x_astra_session: str | None = Header(default=None, alias="X-Astra-Session"), x_astra_admin_token: str | None = Header(default=None)) -> dict[str, Any]:
+def prompt_library(
+    equity: float | None = Query(default=None, description="可选结算权益，用于展示权益模式下的实际方案"),
+    x_astra_session: str | None = Header(default=None, alias="X-Astra-Session"),
+    x_astra_admin_token: str | None = Header(default=None),
+) -> dict[str, Any]:
     refresh_settings()
     require_admin_header(x_astra_admin_token, x_astra_session)
     from scripts.ai_brain_trader import SYSTEM_PROMPT
@@ -31,9 +35,23 @@ def prompt_library(x_astra_session: str | None = Header(default=None, alias="X-A
     try:
         library = load_library()
         profile = active_profile()
+        from astra_backend.equity_bands import domain_settings, resolve_prompt_profile
+        equity_config = domain_settings("prompt")
+        resolved_band = resolve_prompt_profile(equity)
+        resolved_profile = profile
+        resolved_source = "global_default"
+        if resolved_band and resolved_band.get("target_id"):
+            resolved_profile = active_profile(equity=equity)
+            resolved_source = "equity_unified" if equity_config.get("mode") == "unified" else "equity_band"
+        profile = resolved_profile
         return {
             "active_style": library["active_style"],
             "active_profile_id": library["active_profile_id"],
+            "equity_mode": equity_config.get("mode", "split"),
+            "unified_target_id": equity_config.get("unified_target_id", ""),
+            "equity_band": resolved_band,
+            "resolved_profile_id": resolved_profile.get("id"),
+            "resolved_profile_source": resolved_source,
             "profiles": [{**item, "pipeline_views": {
                 "trading_system": pipeline_view(SYSTEM_PROMPT, item, "trading_system"),
                 "trading_user": pipeline_view(TRADING_USER_TEMPLATE, item, "trading_user"),

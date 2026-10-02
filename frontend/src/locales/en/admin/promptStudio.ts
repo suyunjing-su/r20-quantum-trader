@@ -94,6 +94,12 @@ export const enAdminPromptStudio = {
 
   // ── added by the rebuild (batch 4b) ──
   bandProfile: 'Current profile',
+  bandDefaultProfile: 'Global default',
+  bandResolvedProfile: 'Effective runtime profile',
+  bandDefaultFoot: 'Used when no equity rule matches',
+  bandGlobalDefault: 'Global default',
+  bandUnified: 'Unified mode',
+  bandSplit: 'Split-band match',
   bandPipeline: 'Message pipeline',
   bandModules: 'Modules',
   bandModulesFoot: '{on}/{total} enabled',
