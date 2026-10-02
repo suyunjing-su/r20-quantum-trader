@@ -23,6 +23,26 @@ def test_equity_bands_use_half_open_boundaries_and_independent_domains(tmp_path,
     assert len(prompt) == 1
 
 
+def test_unified_mode_uses_one_target_without_equity_and_preserves_split_ranges(tmp_path, monkeypatch):
+    monkeypatch.setattr(equity_bands, "BANDS_FILE", tmp_path / "bands.json")
+    split_rows = [{"id": "small", "min_equity": 0, "max_equity": 500,
+                   "target_id": "balanced"}]
+    equity_bands.save_domain_config("risk", split_rows, mode="unified",
+                                    unified_target_id="aggressive")
+
+    assert equity_bands.resolve_risk_suite(None)["target_id"] == "aggressive"
+    assert equity_bands.list_bands("risk") == equity_bands.validate_bands(split_rows)
+
+    equity_bands.save_domain_config("risk", mode="split", unified_target_id="aggressive")
+    assert equity_bands.resolve_risk_suite(100)["target_id"] == "balanced"
+
+
+def test_unified_mode_requires_a_target(tmp_path, monkeypatch):
+    monkeypatch.setattr(equity_bands, "BANDS_FILE", tmp_path / "bands.json")
+    with pytest.raises(ValueError, match="统一模式必须选择一个方案"):
+        equity_bands.save_domain_config("risk", [], mode="unified")
+
+
 def test_equity_bands_reject_enabled_overlaps(tmp_path, monkeypatch):
     monkeypatch.setattr(equity_bands, "BANDS_FILE", tmp_path / "bands.json")
     with pytest.raises(ValueError, match="重叠"):

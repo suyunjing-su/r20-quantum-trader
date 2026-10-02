@@ -145,10 +145,6 @@ def agent_capabilities(x_api_key: str | None = Header(default=None, alias="X-API
         "granted_scopes": sorted(actor.get("scopes") or []) if actor.get("auth_method") == "api_key" else [],
         "excluded": ["initial_capital_baseline", "venue_credentials"],
         "session_only_routes": [
-            "POST /api/v1/admin/council/profiles",
-            "PUT /api/v1/admin/council/profiles/{profile_id}",
-            "POST /api/v1/admin/council/profiles/{profile_id}/apply",
-            "DELETE /api/v1/admin/council/profiles/{profile_id}",
             "PUT /api/v1/admin/agent-api-key/scopes",
         ],
         "scoped_routes": {
@@ -163,7 +159,13 @@ def agent_capabilities(x_api_key: str | None = Header(default=None, alias="X-API
             ],
         },
         "routes": {
-            "council": ["/api/v1/admin/council/config", "/api/v1/admin/council/profiles", "/api/v1/admin/council/apply-suite", "/api/v1/admin/council/reset-role", "/api/v1/admin/council/import", "/api/v1/admin/council/export"],
+            "council": ["/api/v1/admin/council/config", "/api/v1/admin/council/profiles", "/api/v1/admin/council/equity-bands", "/api/v1/admin/council/apply-suite", "/api/v1/admin/council/reset-role", "/api/v1/admin/council/import", "/api/v1/admin/council/export"],
+            "council_profiles": [
+                "POST /api/v1/admin/council/profiles",
+                "PUT /api/v1/admin/council/profiles/{profile_id}",
+                "POST /api/v1/admin/council/profiles/{profile_id}/apply",
+                "DELETE /api/v1/admin/council/profiles/{profile_id}",
+            ],
             "equity_bands": ["/api/v1/admin/equity-bands/{domain}"],
             "prompt_workshop": ["/api/v1/admin/prompt-library", "/api/v1/admin/prompt-profiles", "/api/v1/admin/prompts"],
             "evolution": ["/api/v1/admin/evolution/config"],

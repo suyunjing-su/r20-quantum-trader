@@ -34,6 +34,7 @@ import EquityBandsEditor from '../../components/admin/EquityBandsEditor.vue';
 import { useAuthStore } from '../../stores/auth';
 import DangerZone from '../../components/admin/page-parts/DangerZone.vue';
 import BaseEmpty from '../../components/base/BaseEmpty.vue';
+import BaseDialog from '../../components/base/BaseDialog.vue';
 import BaseSwitch from '../../components/base/BaseSwitch.vue';
 import { ShieldAlert, Save, RotateCcw, Loader2, Info, Layers,
   Target, Flame, TrendingUp, RefreshCw, AlertTriangle, ChevronDown, ChevronRight,
@@ -69,6 +70,8 @@ const customEditorOpen = ref(false);
 const customSuiteId = ref('');
 const customSuiteName = ref('');
 const customSuiteDescription = ref('');
+const suiteDetailVisible = ref(false);
+const suiteDetail = ref<any>(null);
 const effectText = ref('');
 const serverValues = ref<Record<string, number>>({});
 const draft = reactive<Record<string, number>>({});       // 原生值（比例类为小数）
@@ -90,6 +93,11 @@ const activeCustomSuiteId = computed(() => {
     ([key, value]) => Math.abs((serverValues.value[key] ?? NaN) - value) < 1e-9))
   return match?.id || ''
 })
+
+function openSuiteDetail(s: any, custom = false) {
+  suiteDetail.value = { ...s, custom };
+  suiteDetailVisible.value = true;
+}
 
 async function applySuite(s: any) {
   if (busy.value) return
@@ -550,6 +558,10 @@ onMounted(loadData)
             :key="s.id"
             class="rk-suite"
             :class="{ 'is-on': activeSuiteId === s.id }"
+            role="button"
+            tabindex="0"
+            @click="openSuiteDetail(s)"
+            @keydown.enter="openSuiteDetail(s)"
           >
             <div class="rk-suite-top">
               <span class="rk-suite-name">{{ s.name }}</span>
@@ -560,7 +572,7 @@ onMounted(loadData)
             <button type="button"
               class="btn btn-ghost btn-sm"
               :disabled="busy !== '' || activeSuiteId === s.id"
-              @click="applySuite(s)"
+              @click.stop="applySuite(s)"
             >
               {{ activeSuiteId === s.id ? t('admin.risk.applied') : t('admin.risk.applySuite') }}
             </button>
@@ -599,7 +611,7 @@ onMounted(loadData)
         </div>
 
         <div v-if="customSuites.length" class="rk-suites rk-custom-list">
-          <article v-for="s in customSuites" :key="s.id" class="rk-suite">
+          <article v-for="s in customSuites" :key="s.id" class="rk-suite" role="button" tabindex="0" @click="openSuiteDetail(s, true)" @keydown.enter="openSuiteDetail(s, true)">
             <div class="rk-suite-top">
               <span class="rk-suite-name">{{ s.name }}</span>
               <span v-if="activeCustomSuiteId === s.id" class="badge badge-up">当前生效</span>
@@ -607,9 +619,9 @@ onMounted(loadData)
             </div>
             <p class="rk-suite-desc">{{ s.description || '未填写说明' }}</p>
             <div class="rk-custom-actions">
-              <button type="button" class="btn btn-primary btn-sm" :disabled="busy !== ''" @click="applyCustomSuite(s)">应用方案</button>
-              <button type="button" class="btn btn-ghost btn-sm" :disabled="busy !== ''" @click="beginCustomSuite(s)"><Pencil :size="13" />编辑/覆盖</button>
-              <button type="button" class="btn btn-quiet btn-icon btn-sm" :disabled="busy !== ''" title="删除方案" @click="deleteCustomSuite(s)"><Trash2 :size="14" /></button>
+              <button type="button" class="btn btn-primary btn-sm" :disabled="busy !== ''" @click.stop="applyCustomSuite(s)">应用方案</button>
+              <button type="button" class="btn btn-ghost btn-sm" :disabled="busy !== ''" @click.stop="beginCustomSuite(s)"><Pencil :size="13" />编辑/覆盖</button>
+              <button type="button" class="btn btn-quiet btn-icon btn-sm" :disabled="busy !== ''" title="删除方案" @click.stop="deleteCustomSuite(s)"><Trash2 :size="14" /></button>
             </div>
           </article>
         </div>
@@ -793,6 +805,22 @@ onMounted(loadData)
       </template>
     </BaseEmpty>
 
+    <BaseDialog
+      :open="suiteDetailVisible"
+      :title="suiteDetail ? `风控方案：${suiteDetail.name}` : '风控方案详情'"
+      :desc="suiteDetail?.description || suiteDetail?.desc || '查看已保存方案的完整风控参数'"
+      size="lg"
+      @close="suiteDetailVisible = false"
+    >
+      <div v-if="suiteDetail" class="rk-suite-detail">
+        <div class="rk-suite-detail-meta">
+          <span class="badge">{{ suiteDetail.custom ? '自定义方案' : '内置预设' }}</span>
+          <span class="badge">ID {{ suiteDetail.id }}</span>
+        </div>
+        <pre class="rk-suite-json">{{ JSON.stringify(suiteDetail.values || {}, null, 2) }}</pre>
+      </div>
+    </BaseDialog>
+
     <!-- 悬浮保存条 -->
     <div v-if="schema && dirtyKeys.length" class="rk-savebar">
       <span class="rk-savebar-text">{{ t('admin.risk.unsavedCount', undefined, { n: dirtyKeys.length }) }}</span>
@@ -808,6 +836,13 @@ onMounted(loadData)
 <style scoped>
 /* 批 97：72px = 悬浮保存条 `.rk-savebar`（position:fixed，bottom 16 + 自身高约 46）
    + 间隙 —— 为固定条预留的可视余量，属推导几何，刻意离格。 */
+.rk-suite[role="button"] { cursor:pointer; }
+.rk-suite[role="button"]:hover { border-color:var(--ds-color-brand); }
+
+.rk-suite-detail { display:grid; gap:12px; }
+.rk-suite-detail-meta { display:flex; flex-wrap:wrap; gap:6px; }
+.rk-suite-json { max-height:58vh; overflow:auto; padding:12px; color:var(--ds-color-text-primary); background:var(--ds-color-bg-surface-inset); border:1px solid var(--ds-color-border-default); border-radius:var(--r-ctl); font: var(--text-3xs)/1.5 var(--font-mono, monospace); white-space:pre-wrap; }
+
 .rk {
   display: flex;
   flex-direction: column;

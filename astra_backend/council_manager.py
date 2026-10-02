@@ -123,9 +123,10 @@ def load_council_config(equity: float | None = None) -> Dict[str, Any]:
     现在：可解析 → 原样返回（结构问题只打警告标记，由写闸/UI 提示）；
     损坏 → 先备份成 `council_config_corrupt_*.json` 再重建默认（留痕可恢复）。
     """
-    if equity is not None:
-        try:
-            from astra_backend.equity_bands import resolve_council_profile
+    try:
+        from astra_backend.equity_bands import domain_settings, resolve_council_profile
+        selection_mode = domain_settings("council").get("mode")
+        if equity is not None or selection_mode == "unified":
             band = resolve_council_profile(equity)
             if band:
                 profile = get_council_profile(str(band.get("target_id") or ""))
@@ -133,10 +134,10 @@ def load_council_config(equity: float | None = None) -> Dict[str, Any]:
                     selected = json.loads(json.dumps(profile["config"], ensure_ascii=False))
                     selected["active_profile_id"] = profile.get("id")
                     selected["equity_band_id"] = band.get("id")
-                    selected["calculation_equity"] = float(equity)
+                    selected["calculation_equity"] = float(equity) if equity is not None else None
                     return selected
-        except Exception:
-            pass
+    except Exception:
+        pass
 
     if COUNCIL_CONFIG_FILE.is_file():
         try:
@@ -468,13 +469,9 @@ def delete_council_profile(profile_id: str) -> bool:
         # A profile id is a stable target of the council equity-band mapping.
         # Refuse deletion rather than leaving a dangling reference that silently
         # falls back to the global council configuration.
-        from astra_backend.equity_bands import list_bands
-        referenced = any(
-            str(row.get("target_id") or "") == key
-            for row in list_bands("council")
-        )
-        if referenced:
-            raise ValueError("委员会方案已被资金区间引用，请先移除对应区间后再删除")
+        from astra_backend.equity_bands import is_target_referenced
+        if is_target_referenced("council", key):
+            raise ValueError("委员会方案已被资金区间引用，请先移除对应区间或切换统一方案后再删除")
         _write_council_profiles(kept)
         return True
 

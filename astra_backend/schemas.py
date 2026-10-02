@@ -188,6 +188,8 @@ class CouncilTestRequest(BaseModel):
 
 class EquityBandsUpdateRequest(BaseModel):
     bands: list[dict[str, Any]] = Field(default_factory=list, max_length=100)
+    mode: str | None = Field(default=None, pattern=r"^(split|unified)$")
+    unified_target_id: str | None = Field(default=None, max_length=120)
 
 
 class CouncilProfileCreateRequest(BaseModel):

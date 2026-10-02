@@ -127,21 +127,33 @@ def admin_delete_council_profile(profile_id: str, x_astra_session: str | None = 
 @router.get("/api/v1/admin/council/equity-bands")
 def admin_get_council_equity_bands(x_astra_session: str | None = Header(default=None, alias="X-Astra-Session")) -> dict[str, Any]:
     require_admin_header(x_astra_session=x_astra_session)
-    from astra_backend.equity_bands import list_bands
-    return {"domain": "council", "bands": list_bands("council")}
+    from astra_backend.equity_bands import domain_settings, list_bands
+    return {"domain": "council", "bands": list_bands("council"), **domain_settings("council")}
 
 
 @router.put("/api/v1/admin/council/equity-bands")
 def admin_put_council_equity_bands(payload: EquityBandsUpdateRequest, x_astra_session: str | None = Header(default=None, alias="X-Astra-Session")) -> dict[str, Any]:
     actor = require_superadmin(x_astra_session)
-    from astra_backend.equity_bands import save_bands, validate_band_targets
+    from astra_backend.equity_bands import save_domain_config, validate_band_target, validate_band_targets
     try:
         validate_band_targets("council", payload.bands)
-        bands = save_bands("council", payload.bands)
+        if payload.mode == "unified" or (payload.mode is None and payload.unified_target_id is not None):
+            target = payload.unified_target_id
+            if target is None:
+                from astra_backend.equity_bands import domain_settings
+                target = domain_settings("council")["unified_target_id"]
+            validate_band_target("council", target)
+        result = save_domain_config(
+            "council", payload.bands, mode=payload.mode,
+            unified_target_id=payload.unified_target_id,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    audit_record("council.equity_bands.update", "success", {"actor": actor["username"], "count": len(bands)})
-    return {"domain": "council", "bands": bands}
+    audit_record("council.equity_bands.update", "success", {
+        "actor": actor["username"], "count": len(result["bands"]),
+        "mode": result["mode"], "unified_target_id": result["unified_target_id"],
+    })
+    return result
 def admin_apply_council_suite(payload: CouncilApplySuiteRequest, x_astra_session: str | None = Header(default=None, alias="X-Astra-Session")) -> dict[str, Any]:
     actor = require_superadmin(x_astra_session)
     from astra_backend.council_manager import apply_preset_suite

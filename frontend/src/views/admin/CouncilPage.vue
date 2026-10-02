@@ -95,6 +95,8 @@ const availableSuites = ref<any[]>([]);
 const councilProfiles = ref<any[]>([]);
 const councilProfileName = ref('');
 const councilProfileDescription = ref('');
+const profileDetailVisible = ref(false);
+const profileDetail = ref<any>(null);
 const availableModels = ref<any[]>([]);
 /** 审计 P1-4b：席位绑定的 model_id 不在模型库 → 后端会静默回落主脑，UI 必须说出来 */
 function modelMissing(role: any): boolean {
@@ -293,6 +295,11 @@ async function doImportConfig() {
   } finally {
     importing.value = false;
   }
+}
+
+function openCouncilProfile(profile: any) {
+  profileDetail.value = profile;
+  profileDetailVisible.value = true;
 }
 
 async function saveCouncilProfile() {
@@ -627,11 +634,11 @@ onMounted(loadData);
           <button type="button" class="btn btn-ghost btn-sm" :disabled="!auth.isSuperadmin || !councilProfileName.trim()" @click="saveCouncilProfile">
             <Save :size="13" /> 保存方案
           </button>
-          <span v-for="profile in councilProfiles" :key="profile.id" class="badge" style="display:inline-flex;align-items:center;gap:5px">
-            {{ profile.name }}
-            <button type="button" class="btn btn-ghost btn-xs" :disabled="!auth.isSuperadmin" @click="applyCouncilProfile(profile)">应用</button>
-            <button type="button" class="btn btn-ghost btn-xs" :disabled="!auth.isSuperadmin" title="用当前配置覆盖该方案" @click="updateCouncilProfile(profile)">更新</button>
-            <button type="button" class="btn btn-ghost btn-xs" :disabled="!auth.isSuperadmin" @click="deleteCouncilProfile(profile)">×</button>
+          <span v-for="profile in councilProfiles" :key="profile.id" class="badge cn-profile-chip" role="button" tabindex="0" @click="openCouncilProfile(profile)" @keydown.enter="openCouncilProfile(profile)">
+            <span class="cn-profile-name">{{ profile.name }}</span>
+            <button type="button" class="btn btn-ghost btn-xs" :disabled="!auth.isSuperadmin" @click.stop="applyCouncilProfile(profile)">应用</button>
+            <button type="button" class="btn btn-ghost btn-xs" :disabled="!auth.isSuperadmin" title="用当前配置覆盖该方案" @click.stop="updateCouncilProfile(profile)">更新</button>
+            <button type="button" class="btn btn-ghost btn-xs" :disabled="!auth.isSuperadmin" @click.stop="deleteCouncilProfile(profile)">×</button>
           </span>
         </div>
       </section>
@@ -1066,10 +1073,33 @@ onMounted(loadData);
         </button>
       </template>
     </BaseDialog>
+
+    <BaseDialog
+      :open="profileDetailVisible"
+      :title="profileDetail ? `委员会方案：${profileDetail.name}` : '委员会方案详情'"
+      :desc="profileDetail?.description || '查看已保存方案的完整席位与议事参数'"
+      size="lg"
+      @close="profileDetailVisible = false"
+    >
+      <div v-if="profileDetail" class="cn-profile-detail">
+        <div class="cn-profile-meta">
+          <span class="badge">ID {{ profileDetail.id }}</span>
+          <span class="badge">{{ profileDetail.updated_at || '--' }}</span>
+        </div>
+        <pre class="cn-profile-json">{{ JSON.stringify(profileDetail.config || {}, null, 2) }}</pre>
+      </div>
+    </BaseDialog>
   </div>
 </template>
 
 <style scoped>
+.cn-profile-chip { display:inline-flex; align-items:center; gap:5px; cursor:pointer; }
+.cn-profile-chip:hover { border-color:var(--ds-color-brand); }
+.cn-profile-name { max-width:180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.cn-profile-detail { display:grid; gap:12px; }
+.cn-profile-meta { display:flex; flex-wrap:wrap; gap:6px; }
+.cn-profile-json { max-height:58vh; overflow:auto; padding:12px; color:var(--ds-color-text-primary); background:var(--ds-color-bg-surface-inset); border:1px solid var(--ds-color-border-default); border-radius:var(--r-ctl); font: var(--text-3xs)/1.5 var(--font-mono, monospace); white-space:pre-wrap; }
+
 .cn {
   display: flex;
   flex-direction: column;

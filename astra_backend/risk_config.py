@@ -399,16 +399,17 @@ def current_values(equity: float | None = None) -> dict[str, float | int]:
             out[p["key"]] = int(float(raw)) if p["type"] == "int" else float(raw)
         except (TypeError, ValueError):
             out[p["key"]] = DEFAULTS[p["key"]]
-    if equity is not None:
-        try:
-            from astra_backend.equity_bands import resolve_risk_suite
+    try:
+        from astra_backend.equity_bands import domain_settings, resolve_risk_suite
+        selection_mode = domain_settings("risk").get("mode")
+        if equity is not None or selection_mode == "unified":
             band = resolve_risk_suite(equity)
             if band and band.get("target_id"):
                 target = str(band["target_id"])
                 out.update(suite_values(target) if target in SUITE_IDS else custom_suite_values(target))
-        except (KeyError, ValueError, TypeError):
-            # Invalid target never replaces the validated process values.
-            pass
+    except (KeyError, ValueError, TypeError):
+        # Invalid target never replaces the validated process values.
+        pass
     return out
 
 

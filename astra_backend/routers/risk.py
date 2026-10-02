@@ -238,9 +238,9 @@ def admin_risk_custom_suite_delete(
     x_astra_session: str | None = Header(default=None, alias="X-Astra-Session"),
 ) -> dict[str, Any]:
     actor = require_superadmin(x_astra_session)
-    from astra_backend.equity_bands import list_bands
-    if any(str(row.get("target_id") or "") == suite_id for row in list_bands("risk")):
-        raise HTTPException(status_code=409, detail="风控方案已被资金区间引用，请先移除对应区间后再删除")
+    from astra_backend.equity_bands import is_target_referenced
+    if is_target_referenced("risk", suite_id):
+        raise HTTPException(status_code=409, detail="风控方案已被资金区间引用，请先移除对应区间或切换统一方案后再删除")
     if not risk_config.delete_custom_suite(suite_id):
         raise HTTPException(status_code=404, detail="未知自定义风控方案")
     audit_record("risk.custom_suite.delete", "success", {"actor": actor["username"], "suite_id": suite_id})
