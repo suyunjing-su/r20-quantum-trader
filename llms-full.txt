@@ -141,8 +141,11 @@ This setting changes the set of trades included in future reviews. It does not u
 | Method and path | Purpose | Request | Response / behavior |
 |---|---|---|---|
 | `GET /api/v1/admin/risk` | Read risk schema, preset suites, configured/process/effective values and freshness/diff information. | Optional query `equity` (float, available USDT) to derive effective values. | `schema`, `suites`, `values`, `process_values`, `process_freshness`, `file_vs_process`, `engine_values`, `effect`. |
-| `POST /api/v1/admin/risk` | Apply a suite and/or explicit risk values. | `values` object (environment-key to value), optional `suite_id`, optional `confirmation`. | `updated`, `applied_suite`, current `values`, effect note. |
+| `POST /api/v1/admin/risk` | Apply a suite and/or explicit risk values. | `values` object (environment-key to value), optional `suite_id`, `custom_suite_id`, optional `confirmation`. | `updated`, `applied_suite`, current `values`, effect note. |
 | `POST /api/v1/admin/risk/reset` | Remove all custom risk overrides. | `{"confirmation":"RESET RISK"}` exactly (case is normalized by server). | `reset`, default `values`, effect note. |
+| `POST /api/v1/admin/risk/custom-suites` | Create a saved custom suite. | `name`, optional `description`, complete `values` map. | `suite`, `custom_suites`; requires `risk_suites:write`. |
+| `PUT /api/v1/admin/risk/custom-suites/{suite_id}` | Replace a saved custom suite. | `name`, optional `description`, complete `values` map. | `suite`, `custom_suites`; requires `risk_suites:write`; `404` if missing. |
+| `DELETE /api/v1/admin/risk/custom-suites/{suite_id}` | Delete a saved custom suite. | No body. | `deleted`, `custom_suites`; requires `risk_suites:write`; `409` while any risk equity band references it. |
 
 Example (a low-impact numeric update; the server validates the actual key and range):
 
@@ -152,7 +155,31 @@ curl --fail-with-body -X POST "$BASE_URL/api/v1/admin/risk" \
   -d '{"values":{"ASTRA_MAX_LEVERAGE":5}}'
 ```
 
-Extreme risk values require the exact phrase `HIGH RISK`; ordinary values still pass the risk schema/range checks. If response is `400`, do not weaken controls by guessing alternate keys or values. Changes are persisted to `.env`; execution processes may take up to one 15-minute trading cycle to observe them. Initial capital/baseline routes are not in scope.
+Custom suite `values` must include every key in the current risk schema and satisfy parameter bounds and cross-field checks. Read `GET /api/v1/admin/risk` before creating or replacing a suite; the abbreviated example below is not a valid complete payload. Saving a suite does not apply it. Applying through `POST /api/v1/admin/risk` remains separate and retains normal validation and exact `HIGH RISK` confirmation rules when required. The `risk_suites:write` scope is off by default and must be granted by a superadmin; it does not imply the separate `equity_bands:write` scope. Agent keys cannot manage their own scopes. A custom suite referenced by a risk equity band must be unbound before deletion.
+
+A superadmin grants or replaces the Agent key's full scope list using an administrator session; include any existing scope that should remain enabled:
+
+```bash
+curl --fail-with-body -X PUT "$BASE_URL/api/v1/admin/agent-api-key/scopes" \\
+  -H "X-Astra-Session: $ADMIN_SESSION" -H 'Content-Type: application/json' \\
+  -d '{"scopes":["risk_suites:write","equity_bands:write"]}'
+```
+
+Prepare `create-suite.json` and `update-suite.json` with a complete `values` object copied from the live `GET /api/v1/admin/risk` schema; the request body must contain all risk parameter keys.
+
+```bash
+curl --fail-with-body -X POST "$BASE_URL/api/v1/admin/risk/custom-suites" \\
+  -H "X-API-Key: $AGENT_KEY" -H 'Content-Type: application/json' \\
+  --data-binary @create-suite.json
+
+curl --fail-with-body -X PUT "$BASE_URL/api/v1/admin/risk/custom-suites/<suite_id>" \\
+  -H "X-API-Key: $AGENT_KEY" -H 'Content-Type: application/json' \\
+  --data-binary @update-suite.json
+
+curl --fail-with-body -X DELETE "$BASE_URL/api/v1/admin/risk/custom-suites/<suite_id>" \\
+  -H "X-API-Key: $AGENT_KEY"
+```
+
 
 ## 7. Physical interceptors
 

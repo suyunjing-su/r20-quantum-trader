@@ -21,7 +21,7 @@ The Agent key can be generated, rotated, and deleted from **Admin → Agents** (
 - Prompt Workshop: `/api/v1/admin/prompt-library`, `/api/v1/admin/prompt-profiles...`, `/api/v1/admin/prompts`
   - Supports creating, editing, activating and deleting profiles, including enabled flags and pipeline module content/configuration.
 - Evolution configuration: `/api/v1/admin/evolution/config`
-- Risk: `/api/v1/admin/risk` (including reset and applying a saved custom suite by `custom_suite_id`). Custom suite create/update/delete routes are intentionally unavailable to Agent API keys; use a superadmin session.
+- Risk: `/api/v1/admin/risk` supports reading risk configuration and applying a known built-in/custom suite or validated risk values. Custom suite lifecycle is separately protected by the optional `risk_suites:write` scope: `POST /api/v1/admin/risk/custom-suites` creates; `PUT /api/v1/admin/risk/custom-suites/{suite_id}` modifies; `DELETE /api/v1/admin/risk/custom-suites/{suite_id}` deletes. This scope is off by default and does not grant `equity_bands:write`.
 - Physical interceptors: `/api/v1/admin/interceptors...`
 - Instrument pool: `POST /api/v1/admin/instruments`, `DELETE /api/v1/admin/instruments/{inst_id}`, `PUT /api/v1/admin/instruments/{inst_id}/venues`. The `GET` admin listing is intentionally unavailable to API-key callers because it includes capital-tier metadata.
 - Model connections: `/api/v1/admin/llm...`
@@ -30,17 +30,22 @@ The Agent key can be generated, rotated, and deleted from **Admin → Agents** (
 
 ## Granting optional scopes
 
-Agent keys start without sensitive optional scopes. A superadmin session can explicitly grant or revoke the equity-band write scope without rotating the secret:
+Agent keys start without sensitive optional scopes. A superadmin session can explicitly grant or revoke scopes without rotating the key. The request replaces the complete grant list, so include every scope that should remain enabled:
 
 ```http
 PUT /api/v1/admin/agent-api-key/scopes
 X-Astra-Session: <superadmin-session>
 Content-Type: application/json
 
-{"scopes":["equity_bands:write"]}
+{"scopes":["equity_bands:write","risk_suites:write"]}
 ```
 
-The scope grant is persisted as `ASTRA_AGENT_API_KEY_SCOPES`. `GET /api/v1/agent/capabilities` reports the scopes granted to the calling Agent key. The scopes-management endpoint itself is never available to Agent API keys, preventing a machine key from self-escalating.
+Available optional scopes:
+
+- `equity_bands:write`: permits `PUT /api/v1/admin/equity-bands/{domain}` for council, prompt, and risk mappings. GET remains available without this scope.
+- `risk_suites:write`: permits custom risk suite create/update/delete at the three `/api/v1/admin/risk/custom-suites` routes listed above. It does not grant initial capital, exchange credential, or equity-band write access.
+
+The grant list is persisted as `ASTRA_AGENT_API_KEY_SCOPES`. `GET /api/v1/agent/capabilities` reports granted scopes and the matching `scoped_routes`. The scope-management endpoint itself is never available to Agent API keys, preventing a machine key from self-escalating. The Agents panel exposes independent switches for these grants.
 
 
 ```bash
@@ -53,6 +58,6 @@ The venue-routing endpoint only accepts non-secret environment/routing values, p
 
 ## Deliberate exclusions
 
-Agent keys cannot access `/api/v1/admin/account-baseline`, manual-close/account execution endpoints, exchange credential updates/tests, account snapshots or other admin resources outside the explicit allowlist. In particular, initial capital baselines, the three exchanges' access credentials, and scope administration remain administrator-session-only. Equity-band writes are separately protected by the `equity_bands:write` grant; without it, the key can read bands but receives 403 on writes.
+Agent keys cannot access `/api/v1/admin/account-baseline`, manual-close/account execution endpoints, exchange credential updates/tests, account snapshots or other admin resources outside the explicit allowlist. In particular, initial capital baselines, the three exchanges' access credentials, and scope administration remain administrator-session-only. Equity-band writes require `equity_bands:write`; custom risk suite create/update/delete requires `risk_suites:write`. Both grants are independently managed and disabled by default.
 
 All writes performed through the API remain subject to the existing validation, confirmation phrases, and audit logging. Telemetry contains model call metadata only; prompts and responses are not persisted or returned.

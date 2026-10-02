@@ -19,6 +19,9 @@ Use only routes returned by capability discovery and permitted by the Agent API 
 - Prompt workshop and strategy profiles: `/api/v1/admin/prompt-library`, `/api/v1/admin/prompt-profiles...`, `/api/v1/admin/prompts`
 - Self-evolution configuration: `/api/v1/admin/evolution/config`
 - Risk and physical interceptors: `/api/v1/admin/risk`, `/api/v1/admin/interceptors...`
+  - Agent keys may read/apply risk configuration through the existing risk routes.
+  - Creating, updating, or deleting custom risk suites requires the optional `risk_suites:write` scope: `POST /api/v1/admin/risk/custom-suites`, `PUT|DELETE /api/v1/admin/risk/custom-suites/{suite_id}`.
+  - Writing council, prompt, or risk equity bands requires the separate optional `equity_bands:write` scope: `PUT /api/v1/admin/equity-bands/{domain}`.
 - LLM/provider configuration: `/api/v1/admin/llm...`
 - Instrument-pool mutations only: `POST /api/v1/admin/instruments`, `DELETE /api/v1/admin/instruments/{inst_id}`, `PUT /api/v1/admin/instruments/{inst_id}/venues`. The instrument listing is intentionally not available to Agent keys because it includes capital-tier metadata.
 - Safe exchange/routing configuration: `GET|PUT /api/v1/agent/exchanges/config`

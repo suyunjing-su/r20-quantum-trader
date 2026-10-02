@@ -19,11 +19,11 @@ The abbreviated `values` object above is illustrative; create/update requests mu
 
 ## Create, update, delete custom suites
 
-These management operations require a superadmin session (`X-Astra-Session`). They are intentionally not in the Agent API-key scope.
+Custom suite create/update/delete require a superadmin session or an Agent API key explicitly granted the `risk_suites:write` scope. The scope is disabled by default and can only be granted/revoked by a superadmin at `PUT /api/v1/admin/agent-api-key/scopes`. It is independent of `equity_bands:write`.
 
 - `POST /api/v1/admin/risk/custom-suites` creates a suite and returns `{ "suite": ..., "custom_suites": [...] }`.
 - `PUT /api/v1/admin/risk/custom-suites/{suite_id}` replaces the suite's name, description, and complete values.
-- `DELETE /api/v1/admin/risk/custom-suites/{suite_id}` removes the saved suite. Deleting a suite does not change the active risk configuration.
+- `DELETE /api/v1/admin/risk/custom-suites/{suite_id}` removes the saved suite. Deleting a suite does not change the active risk configuration. A referenced suite cannot be deleted until its risk equity-band mapping is removed; the API returns HTTP 409.
 
 Request body for POST/PUT:
 
@@ -53,7 +53,7 @@ POST `/api/v1/admin/risk` with `custom_suite_id` to apply a stored profile throu
 
 Application writes the normalized values to `.env`, refreshes backend risk constants, synchronizes leverage caps, and records an audit event. If any parameter crosses a configured high-risk threshold, repeat the request with the exact confirmation phrase `HIGH RISK`; otherwise the API responds with HTTP 400 and the affected fields. Built-in `suite_id` and `custom_suite_id` cannot be combined, and custom-suite application cannot be combined with an explicit `values` object.
 
-An Agent API key may read saved suites through the already-allowlisted risk GET endpoint and may apply a known custom suite ID via the existing risk update endpoint. It cannot create, modify, or delete custom suites. All apply requests retain the same validation, high-risk confirmation, and audit behavior as administrator requests.
+An Agent API key may read saved suites through the allowlisted risk GET endpoint and may apply a known custom suite ID through the existing risk update endpoint. With the optional `risk_suites:write` scope, it may also create, update, and delete custom suites through the routes above. Without that scope, those three methods return 403. Applying a suite and writing equity bands remain governed by their own route permissions and safety checks; `risk_suites:write` does not grant `equity_bands:write`. All apply requests retain the same validation, high-risk confirmation, and audit behavior as administrator requests.
 
 ## Built-in suite and reset compatibility
 
