@@ -60,6 +60,8 @@ export const enAdminAgents = {
   keyDeleteConfirm: 'Deleting this key immediately removes access for every agent using it. Delete it?',
   equityBandsScopeTitle: 'Equity-band write permission',
   equityBandsScopeDesc: 'Allow this Agent API key to write council, prompt and risk equity bands. Enable only when the automation workflow needs it.',
+  riskSuitesScopeTitle: 'Risk suite management permission',
+  riskSuitesScopeDesc: 'Allow this Agent API key to create, update and delete custom risk suites. A suite referenced by an equity band must be unbound before deletion.',
   scopeGranted: 'Write access granted',
   scopeNotGranted: 'Write access not granted',
   scopeLoadFailed: 'Could not load Agent scopes',

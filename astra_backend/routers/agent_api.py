@@ -12,13 +12,14 @@ from pydantic import BaseModel, Field, model_validator
 from astra_backend.audit import record as audit_record
 from astra_backend.dependencies import (
     AGENT_SCOPE_EQUITY_BANDS_WRITE,
+    AGENT_SCOPE_RISK_SUITES_WRITE,
     agent_api_key_scopes,
     require_admin_header,
     require_superadmin,
 )
 from astra_backend.settings_store import update_env
 
-AGENT_SCOPES = {AGENT_SCOPE_EQUITY_BANDS_WRITE}
+AGENT_SCOPES = {AGENT_SCOPE_EQUITY_BANDS_WRITE, AGENT_SCOPE_RISK_SUITES_WRITE}
 VENUES = ("okx", "binance", "gate")
 agent_router = APIRouter(tags=["agent-api"])
 
@@ -139,9 +140,6 @@ def agent_capabilities(x_api_key: str | None = Header(default=None, alias="X-API
         "granted_scopes": sorted(actor.get("scopes") or []) if actor.get("auth_method") == "api_key" else [],
         "excluded": ["initial_capital_baseline", "venue_credentials", "capital_tiers"],
         "session_only_routes": [
-            "POST /api/v1/admin/risk/custom-suites",
-            "PUT /api/v1/admin/risk/custom-suites/{suite_id}",
-            "DELETE /api/v1/admin/risk/custom-suites/{suite_id}",
             "POST /api/v1/admin/council/profiles",
             "PUT /api/v1/admin/council/profiles/{profile_id}",
             "POST /api/v1/admin/council/profiles/{profile_id}/apply",
@@ -150,6 +148,11 @@ def agent_capabilities(x_api_key: str | None = Header(default=None, alias="X-API
         ],
         "scoped_routes": {
             "equity_bands:write": ["PUT /api/v1/admin/equity-bands/{domain}"],
+            "risk_suites:write": [
+                "POST /api/v1/admin/risk/custom-suites",
+                "PUT /api/v1/admin/risk/custom-suites/{suite_id}",
+                "DELETE /api/v1/admin/risk/custom-suites/{suite_id}",
+            ],
         },
         "routes": {
             "council": ["/api/v1/admin/council/config", "/api/v1/admin/council/profiles", "/api/v1/admin/council/apply-suite", "/api/v1/admin/council/reset-role", "/api/v1/admin/council/import", "/api/v1/admin/council/export"],

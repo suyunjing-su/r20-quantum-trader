@@ -41,6 +41,7 @@ const agentKeyLoading = ref(false);
 const agentKeyBusy = ref(false);
 const generatedAgentKey = ref('');
 const equityBandsWriteGranted = ref(false);
+const riskSuitesWriteGranted = ref(false);
 const scopeLoading = ref(false);
 const scopeBusy = ref(false);
 
@@ -50,6 +51,7 @@ async function loadAgentScopes() {
   try {
     const result = await api<{ scopes: string[] }>('/api/v1/admin/agent-api-key/scopes');
     equityBandsWriteGranted.value = (result.scopes || []).includes('equity_bands:write');
+    riskSuitesWriteGranted.value = (result.scopes || []).includes('risk_suites:write');
   } catch (e: any) {
     toast.err(t('admin.agents.scopeLoadFailed'), e?.message || String(e));
   } finally {
@@ -60,7 +62,10 @@ async function loadAgentScopes() {
 async function saveAgentScopes() {
   scopeBusy.value = true;
   try {
-    const scopes = equityBandsWriteGranted.value ? ['equity_bands:write'] : [];
+    const scopes = [
+      ...(equityBandsWriteGranted.value ? ['equity_bands:write'] : []),
+      ...(riskSuitesWriteGranted.value ? ['risk_suites:write'] : []),
+    ];
     await api('/api/v1/admin/agent-api-key/scopes', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -252,6 +257,21 @@ function ageText(a: any): string {
                 @change="saveAgentScopes"
               />
               <span>{{ equityBandsWriteGranted ? t('admin.agents.scopeGranted') : t('admin.agents.scopeNotGranted') }}</span>
+            </label>
+          </div>
+          <div class="agent-scope-row">
+            <div>
+              <strong class="agent-scope-title">{{ t('admin.agents.riskSuitesScopeTitle') }}</strong>
+              <p class="agent-scope-desc">{{ t('admin.agents.riskSuitesScopeDesc') }}</p>
+            </div>
+            <label class="agent-scope-toggle">
+              <input
+                v-model="riskSuitesWriteGranted"
+                type="checkbox"
+                :disabled="scopeLoading || scopeBusy || !agentKeyConfigured"
+                @change="saveAgentScopes"
+              />
+              <span>{{ riskSuitesWriteGranted ? t('admin.agents.scopeGranted') : t('admin.agents.scopeNotGranted') }}</span>
             </label>
           </div>
 

@@ -191,6 +191,10 @@ def _agent_api_key_scope_allows(method: str, path: str, actor: dict[str, Any] | 
         if method == "GET":
             return True
         return method == "PUT" and "equity_bands:write" in set((actor or {}).get("scopes") or ())
+    if path == "/api/v1/admin/risk/custom-suites" and method == "POST":
+        return "risk_suites:write" in set((actor or {}).get("scopes") or ())
+    if re.fullmatch(r"^/api/v1/admin/risk/custom-suites/[^/]+$", path) and method in {"PUT", "DELETE"}:
+        return "risk_suites:write" in set((actor or {}).get("scopes") or ())
     route_rules = (
         (r"^/api/v1/admin/(council(?:/.*)?|interceptors(?:/.*)?|policy(?:/.*)?|prompt-library|prompt-profiles(?:/.*)?|prompts|evolution/config)$", {"GET", "POST", "PUT", "DELETE"}),
         (r"^/api/v1/admin/risk$", {"GET", "POST"}),
@@ -214,7 +218,7 @@ async def admin_session_context(request: Request, call_next):
     try:
         if api_actor and not _agent_api_key_scope_allows(request.method.upper(), request.url.path, api_actor):
             from fastapi.responses import JSONResponse
-            return JSONResponse(status_code=403, content={"detail": "Agent API Key 无权访问此接口；资金档位写入需要管理员授予 equity_bands:write scope，其他敏感配置仍仅可由管理员会话配置"})
+            return JSONResponse(status_code=403, content={"detail": "Agent API Key 无权访问此接口；风险方案写入需要管理员授予 risk_suites:write scope，资金档位写入需要 equity_bands:write scope，其他敏感配置仍仅可由管理员会话配置"})
         response = await call_next(request)
         path = request.url.path
         if path.startswith("/api/v1/admin") or path.startswith("/admin") or path.startswith("/api/v1/account"):

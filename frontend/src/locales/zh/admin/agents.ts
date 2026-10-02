@@ -61,6 +61,8 @@ export const zhAdminAgents = {
   keyDeleteConfirm: '删除后所有使用此密钥的 Agent 将立即失去访问权限。确定删除？',
   equityBandsScopeTitle: '资金档位写入权限',
   equityBandsScopeDesc: '允许此 Agent API Key 写入委员会、Prompt 和风险资金区间。仅在确认自动化流程需要时开启。',
+  riskSuitesScopeTitle: '风控方案管理权限',
+  riskSuitesScopeDesc: '允许此 Agent API Key 创建、修改和删除自定义风控方案；引用中的方案需先解除资金区间绑定才能删除。仅在确认自动化流程需要时开启。',
   scopeGranted: '已授权写入',
   scopeNotGranted: '未授权写入',
   scopeLoadFailed: '无法读取 Agent 权限范围',

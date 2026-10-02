@@ -42,15 +42,33 @@ class AgentApiKeyRoutesTest(unittest.TestCase):
         actor["scopes"] = ["equity_bands:write"]
         self.assertTrue(_agent_api_key_scope_allows("PUT", path, actor))
 
+    def test_risk_suite_crud_requires_its_explicit_write_scope(self):
+        from astra_backend.app import _agent_api_key_scope_allows
+
+        actor = {"auth_method": "api_key", "scopes": []}
+        routes = [
+            ("POST", "/api/v1/admin/risk/custom-suites"),
+            ("PUT", "/api/v1/admin/risk/custom-suites/suite-1"),
+            ("DELETE", "/api/v1/admin/risk/custom-suites/suite-1"),
+        ]
+        for method, path in routes:
+            with self.subTest(method=method, path=path):
+                self.assertFalse(_agent_api_key_scope_allows(method, path, actor))
+        actor["scopes"] = ["risk_suites:write"]
+        for method, path in routes:
+            with self.subTest(method=method, path=path):
+                self.assertTrue(_agent_api_key_scope_allows(method, path, actor))
+        self.assertFalse(_agent_api_key_scope_allows("DELETE", "/api/v1/admin/risk/custom-suites/a/b", actor))
+
     def test_agent_authentication_reads_scopes_without_self_escalation(self):
         from astra_backend.dependencies import authenticate_agent_api_key
 
         with mock.patch.dict(A.os.environ, {
             "ASTRA_AGENT_API_KEY": "secret",
-            "ASTRA_AGENT_API_KEY_SCOPES": "equity_bands:write",
+            "ASTRA_AGENT_API_KEY_SCOPES": "equity_bands:write,risk_suites:write",
         }, clear=False):
             actor = authenticate_agent_api_key("secret")
-        self.assertEqual(actor["scopes"], ["equity_bands:write"])
+        self.assertEqual(actor["scopes"], ["equity_bands:write", "risk_suites:write"])
 
     def test_status_only_exposes_presence(self):
         with mock.patch.dict(A.os.environ, {"ASTRA_AGENT_API_KEY": "secret"}, clear=False):
@@ -58,12 +76,16 @@ class AgentApiKeyRoutesTest(unittest.TestCase):
         self.superadmin.assert_called_once_with()
 
     def test_superadmin_can_grant_equity_band_scope(self):
-        result = A.put_agent_api_key_scopes(A.AgentApiScopesUpdate(scopes=["equity_bands:write"]))
-        self.assertEqual(result["scopes"], ["equity_bands:write"])
-        self.update_env.assert_called_once_with({"ASTRA_AGENT_API_KEY_SCOPES": "equity_bands:write"})
+        result = A.put_agent_api_key_scopes(A.AgentApiScopesUpdate(
+            scopes=["equity_bands:write", "risk_suites:write"]
+        ))
+        self.assertEqual(result["scopes"], ["equity_bands:write", "risk_suites:write"])
+        self.update_env.assert_called_once_with({
+            "ASTRA_AGENT_API_KEY_SCOPES": "equity_bands:write,risk_suites:write"
+        })
         self.audit.assert_called_once_with(
             "agent_api_key.scopes.update", "success",
-            {"actor": "root", "scopes": ["equity_bands:write"]},
+            {"actor": "root", "scopes": ["equity_bands:write", "risk_suites:write"]},
         )
 
     def test_scope_update_rejects_unknown_scope(self):
