@@ -29,7 +29,8 @@ No query parameters or body. Requires a valid Agent key. Returns JSON with:
 
 - `auth_header`: `X-API-Key`.
 - `scope`: `configuration-and-telemetry`.
-- `excluded`: `initial_capital_baseline`, `venue_credentials`, `capital_tiers`.
+- `excluded`: `initial_capital_baseline`, `venue_credentials`. Capital-tier changes are **not** excluded when the optional `capital_tiers:write` scope is granted; initial capital and exchange credentials remain excluded.
+- `granted_scopes` and `scoped_routes`: explicit grants for the calling Agent key, including `capital_tiers:write` when enabled.
 - `routes`: resource groups and representative paths.
 
 This route is a discovery aid; endpoint methods and request schemas below plus the deployment's live OpenAPI document define the exact contract. A route being reachable as an admin is not sufficient: Agent-key requests must stay within the explicit scope.
@@ -200,15 +201,19 @@ Interceptor code changes affect a physical execution guard. Review source, test 
 
 ## 8. Trading instrument pool
 
-Agent keys may mutate the pool but **cannot call `GET /api/v1/admin/instruments`**, because that listing contains capital-tier metadata.
+Agent keys may mutate the instrument pool through the dedicated allowlist. They **cannot call `GET /api/v1/admin/instruments`**, because that full admin listing includes sensitive capital-tier metadata. A safe, reduced tier view is provided separately.
 
 | Method and path | Purpose | Request | Success / notable errors |
 |---|---|---|---|
 | `POST /api/v1/admin/instruments` | Add a USDT perpetual instrument. | `{"inst_id":"BTC-USDT-SWAP","venues":["okx","binance"]}`. `inst_id` must match `[A-Z0-9]{2,15}-USDT-SWAP`; `venues` optional, allowed values `okx`, `binance`, `gate`. | Added instrument and validation details; `400` invalid/unsupported venue/contract, `409` duplicate or pool capacity. |
 | `DELETE /api/v1/admin/instruments/{inst_id}` | Remove an instrument. | JSON body `{"confirmation":"REMOVE BTC-USDT-SWAP"}`; exact uppercase instrument-specific phrase required. | Removed ID and new count; `400` bad phrase, `403` protected BTC sentinel, `404` missing, `409` held/tracked/minimum-pool constraint, `503` holdings unknown. |
 | `PUT /api/v1/admin/instruments/{inst_id}/venues` | Change venue assignments. | `{"venues":["okx","gate"]}`; non-empty list from `okx`, `binance`, `gate`. | Updated assignment/validation; `400` venue contract unavailable, `409` would remove a venue with open holdings, `503` holdings unknown. |
+| `GET /api/v1/agent/capital-tiers` | Read the sanitized instrument-tier view and available tier definitions. | None. | `items` includes only instrument ID/name, tier ID/label, tier-derived leverage cap and stop-loss ATR multiplier; does not return base size, risk budget, capital, venue credentials, or full pool records. |
+| `PUT /api/v1/admin/instruments/{inst_id}/capital-tier` | Change one instrument's classification. | `{"tier":"tier_1_bluechip"}` or `{"tier":"tier_2_momentum"}`. Requires optional `capital_tiers:write`. | Updated tier plus tier-derived `max_leverage` and `sl_atr_mult`; `400` invalid tier, `404` missing instrument, `409` open/ tracked holdings, `503` holdings state unknown. |
 
-Contract addition and venue assignment perform exchange contract validation and may depend on exchange public market-data availability. Deletion and venue reassignment fail closed when current holdings cannot be confirmed. Never retry destructive requests blindly; GET access is intentionally denied, so rely on mutation response and ask an administrator to inspect the protected listing when state is uncertain.
+A superadmin grants this permission through `PUT /api/v1/admin/agent-api-key/scopes` or the independent scope switch on **Admin → Agents**. The endpoint replaces the entire scope list, so retain any other grants explicitly. It is independent from `equity_bands:write` and `risk_suites:write`. Agent keys cannot use the general instrument listing to inspect sensitive fields, add/remove instruments, or alter venue assignments through this tier permission. Tier changes are audited and fail closed when holdings cannot be confirmed or are present; only the classification and the two profile-derived fields can be changed by this endpoint.
+
+Contract addition and venue assignment perform exchange contract validation and may depend on exchange public market-data availability. Deletion and venue reassignment fail closed when current holdings cannot be confirmed. Never retry destructive requests blindly; rely on the mutation response and ask an administrator to inspect the protected listing when state is uncertain.
 
 ## 9. LLM providers and models
 
@@ -316,7 +321,7 @@ The route allowlist denies these operations even if a caller knows their adminis
 
 - Initial capital baseline update and account baseline controls.
 - Binance, Gate, or OKX access credentials, credential testing, or account snapshots.
-- Capital/funding tier read or mutation; the instrument GET listing is excluded for this reason.
+- Funding-tier and allocation changes outside the dedicated instrument-tier API; the full admin instrument listing remains unavailable. The sanitized `GET /api/v1/agent/capital-tiers` view is read-only unless the key separately has `capital_tiers:write` for the dedicated tier update route.
 - Manual close, account execution, and unrelated administrative routes.
 - `PUT /api/v1/admin/multi-exchange` and `POST /api/v1/admin/multi-exchange/test-connection`.
 

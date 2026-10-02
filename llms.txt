@@ -23,7 +23,8 @@ Use only routes returned by capability discovery and permitted by the Agent API 
   - Creating, updating, or deleting custom risk suites requires the optional `risk_suites:write` scope: `POST /api/v1/admin/risk/custom-suites`, `PUT|DELETE /api/v1/admin/risk/custom-suites/{suite_id}`.
   - Writing council, prompt, or risk equity bands requires the separate optional `equity_bands:write` scope: `PUT /api/v1/admin/equity-bands/{domain}`.
 - LLM/provider configuration: `/api/v1/admin/llm...`
-- Instrument-pool mutations only: `POST /api/v1/admin/instruments`, `DELETE /api/v1/admin/instruments/{inst_id}`, `PUT /api/v1/admin/instruments/{inst_id}/venues`. The instrument listing is intentionally not available to Agent keys because it includes capital-tier metadata.
+- Instrument-pool mutations: `POST /api/v1/admin/instruments`, `DELETE /api/v1/admin/instruments/{inst_id}`, `PUT /api/v1/admin/instruments/{inst_id}/venues`.
+- Capital-tier metadata: `GET /api/v1/agent/capital-tiers` returns a sanitized per-instrument tier view. Changing a symbol between `tier_1_bluechip` and `tier_2_momentum` requires the optional `capital_tiers:write` scope via `PUT /api/v1/admin/instruments/{inst_id}/capital-tier`. Existing holdings or unknown holdings state block changes. Initial capital and exchange credentials remain excluded.
 - Safe exchange/routing configuration: `GET|PUT /api/v1/agent/exchanges/config`
 - Execution/model telemetry: `GET /api/v1/agent/telemetry`; execution-unit status: `GET /api/v1/admin/agents`
 
@@ -31,7 +32,7 @@ For every request, follow the method, path, and schema from capability discovery
 
 ## Safety boundaries
 
-- Agent API keys cannot access initial capital baselines, exchange access credentials, funding/capital tiers, account snapshots, manual-close endpoints, or unrelated admin routes.
+- Agent API keys cannot access initial capital baselines, exchange access credentials, funding tiers, account snapshots, manual-close endpoints, or unrelated admin routes. Per-instrument capital-tier metadata is available only through the sanitized Agent endpoint; changes require the explicit `capital_tiers:write` scope.
 - Do not attempt to bypass the route allowlist or transform an excluded operation into another route.
 - Never enable execution, turn off `dry_run`, or make a destructive configuration change without the exact confirmation phrase required by the endpoint and explicit operator authorization.
 - Treat exchange execution switches as live operational controls; a successful API response is not evidence that an exchange order is safe or appropriate.

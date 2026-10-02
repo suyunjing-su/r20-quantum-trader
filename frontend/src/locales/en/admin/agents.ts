@@ -41,7 +41,7 @@ export const enAdminAgents = {
   promptPolicy: 'Prompt policy',
   apiKeyTitle: 'Agent API key',
   apiKeyDesc: 'Manage the dedicated key for automated agents. Rotation revokes the previous key immediately.',
-  keyScopeNote: 'The key is limited to approved configuration and telemetry routes. Initial capital, exchange credentials and capital tiers are excluded. The secret is shown only when generated.',
+  keyScopeNote: 'The key is limited to approved configuration and telemetry routes. Initial capital and exchange credentials are excluded. Per-instrument capital-tier changes require a separate explicit grant. The secret is shown only when generated.',
   keyChecking: 'Checking',
   keyActive: 'Active',
   keyNotConfigured: 'Not configured',
@@ -62,10 +62,12 @@ export const enAdminAgents = {
   equityBandsScopeDesc: 'Allow this Agent API key to write council, prompt and risk equity bands. Enable only when the automation workflow needs it.',
   riskSuitesScopeTitle: 'Risk suite management permission',
   riskSuitesScopeDesc: 'Allow this Agent API key to create, update and delete custom risk suites. A suite referenced by an equity band must be unbound before deletion.',
+  capitalTiersScopeTitle: 'Instrument capital-tier management',
+  capitalTiersScopeDesc: 'Allow reading the sanitized tier list and changing an instrument between blue-chip and momentum tiers with tier-derived leverage and stop parameters. Updates are rejected while holdings exist or holdings state is unknown.',
   scopeGranted: 'Write access granted',
   scopeNotGranted: 'Write access not granted',
   scopeLoadFailed: 'Could not load Agent scopes',
-  scopeSaved: 'Agent equity-band permission updated',
+  scopeSaved: 'Agent API scopes updated',
   scopeSaveFailed: 'Could not update Agent permission',
 
   status: {

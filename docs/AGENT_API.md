@@ -23,7 +23,8 @@ The Agent key can be generated, rotated, and deleted from **Admin → Agents** (
 - Evolution configuration: `/api/v1/admin/evolution/config`
 - Risk: `/api/v1/admin/risk` supports reading risk configuration and applying a known built-in/custom suite or validated risk values. Custom suite lifecycle is separately protected by the optional `risk_suites:write` scope: `POST /api/v1/admin/risk/custom-suites` creates; `PUT /api/v1/admin/risk/custom-suites/{suite_id}` modifies; `DELETE /api/v1/admin/risk/custom-suites/{suite_id}` deletes. This scope is off by default and does not grant `equity_bands:write`.
 - Physical interceptors: `/api/v1/admin/interceptors...`
-- Instrument pool: `POST /api/v1/admin/instruments`, `DELETE /api/v1/admin/instruments/{inst_id}`, `PUT /api/v1/admin/instruments/{inst_id}/venues`. The `GET` admin listing is intentionally unavailable to API-key callers because it includes capital-tier metadata.
+- Instrument pool: `POST /api/v1/admin/instruments`, `DELETE /api/v1/admin/instruments/{inst_id}`, `PUT /api/v1/admin/instruments/{inst_id}/venues`. The full `GET` admin listing remains unavailable to Agent-key callers because it includes sensitive tier metadata.
+- Instrument capital tiers: `GET /api/v1/agent/capital-tiers` returns a sanitized tier view; changing a symbol's tier requires `capital_tiers:write` and uses `PUT /api/v1/admin/instruments/{inst_id}/capital-tier`. The dedicated operation can only set the supported blue-chip/momentum classification and derived leverage/stop parameters. It is rejected while holdings or tracker state exist, and fails closed when holdings are unknown.
 - Model connections: `/api/v1/admin/llm...`
 - Venue routing: `GET|PUT /api/v1/agent/exchanges/config`
 - Execution/model telemetry: `GET /api/v1/agent/telemetry`; execution-unit status is also available from `GET /api/v1/admin/agents`.
@@ -37,13 +38,16 @@ PUT /api/v1/admin/agent-api-key/scopes
 X-Astra-Session: <superadmin-session>
 Content-Type: application/json
 
-{"scopes":["equity_bands:write","risk_suites:write"]}
+{"scopes":["equity_bands:write","risk_suites:write","capital_tiers:write"]}
 ```
 
 Available optional scopes:
 
 - `equity_bands:write`: permits `PUT /api/v1/admin/equity-bands/{domain}` for council, prompt, and risk mappings. GET remains available without this scope.
 - `risk_suites:write`: permits custom risk suite create/update/delete at the three `/api/v1/admin/risk/custom-suites` routes listed above. It does not grant initial capital, exchange credential, or equity-band write access.
+- `capital_tiers:write`: permits `PUT /api/v1/admin/instruments/{inst_id}/capital-tier` to change the instrument tier between the supported classifications. It does not grant access to the full instrument listing or changes to base size, risk budget, venues, or credentials.
+
+Read-only tier metadata can be fetched from `GET /api/v1/agent/capital-tiers` without this write scope; the response is deliberately limited to instrument ID/name, tier label/ID, maximum leverage, and stop-loss ATR multiplier. Tier writes are rejected while positions/tracker entries exist, and return 503 if current holdings state is unknown.
 
 The grant list is persisted as `ASTRA_AGENT_API_KEY_SCOPES`. `GET /api/v1/agent/capabilities` reports granted scopes and the matching `scoped_routes`. The scope-management endpoint itself is never available to Agent API keys, preventing a machine key from self-escalating. The Agents panel exposes independent switches for these grants.
 
@@ -58,6 +62,6 @@ The venue-routing endpoint only accepts non-secret environment/routing values, p
 
 ## Deliberate exclusions
 
-Agent keys cannot access `/api/v1/admin/account-baseline`, manual-close/account execution endpoints, exchange credential updates/tests, account snapshots or other admin resources outside the explicit allowlist. In particular, initial capital baselines, the three exchanges' access credentials, and scope administration remain administrator-session-only. Equity-band writes require `equity_bands:write`; custom risk suite create/update/delete requires `risk_suites:write`. Both grants are independently managed and disabled by default.
+Agent keys cannot access `/api/v1/admin/account-baseline`, manual-close/account execution endpoints, exchange credential updates/tests, account snapshots or other admin resources outside the explicit allowlist. Initial capital baselines, the three exchanges' access credentials, and scope administration remain administrator-session-only. Equity-band writes require `equity_bands:write`; custom risk suite create/update/delete requires `risk_suites:write`; instrument-tier writes require `capital_tiers:write`. The tier-list endpoint is sanitized and does not expose full instrument-pool capital metadata. All grants are independent and disabled by default.
 
 All writes performed through the API remain subject to the existing validation, confirmation phrases, and audit logging. Telemetry contains model call metadata only; prompts and responses are not persisted or returned.

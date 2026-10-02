@@ -1,5 +1,6 @@
 """Risk constants, instrument pool, baseline capital, and position close routes."""
 from __future__ import annotations
+import json
 from typing import Any
 from fastapi import APIRouter, Body, Header, HTTPException, Query
 
@@ -19,6 +20,7 @@ from astra_backend.schemas import (
     InitialCapitalUpdate,
     InstrumentAddRequest,
     InstrumentVenuesUpdate,
+    InstrumentTierUpdate,
     InstrumentDeleteRequest,
     ManualCloseRequest,
 )
@@ -518,6 +520,53 @@ def update_admin_instrument_venues(
         "venue_validation": validation,
         "message": f"{target} 可交易场所已更新为：{', '.join(v.upper() for v in requested)}",
     }
+
+
+@router.put("/api/v1/admin/instruments/{inst_id}/capital-tier")
+def update_admin_instrument_capital_tier(
+    inst_id: str,
+    payload: InstrumentTierUpdate,
+    x_astra_session: str | None = Header(default=None, alias="X-Astra-Session"),
+) -> dict[str, Any]:
+    """Change only a symbol's tier classification and its tier-derived limits."""
+    actor = require_superadmin(x_astra_session)
+    target = inst_id.upper()
+    from scripts.instrument_pool import TIER_PROFILES, derive_instrument_leverage_cap
+    tier = payload.tier
+    profile = TIER_PROFILES[tier]
+    holdings = _live_holdings(target)
+    if holdings[2]:
+        raise HTTPException(status_code=503, detail=f"无法确认 {target} 的实时持仓，暂不允许修改资本档位：{holdings[2]}")
+    if holdings[0]:
+        raise HTTPException(status_code=409, detail=f"{target} 仍在 {', '.join(holdings[1])} 持有仓位，请平仓后再修改资本档位")
+    trackers_path = DATA_DIR / "position_trackers.json"
+    try:
+        trackers = json.loads(trackers_path.read_text(encoding="utf-8")) if trackers_path.exists() else {}
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=503, detail="无法读取持仓追踪状态，暂不允许修改资本档位") from exc
+    if not isinstance(trackers, dict):
+        raise HTTPException(status_code=503, detail="持仓追踪状态格式无效，暂不允许修改资本档位")
+    tracker_keys = _tracker_keys_for(target, trackers)
+    if tracker_keys:
+        raise HTTPException(status_code=409, detail=f"{target} 存在持仓追踪记录，请先完成仓位清理后再修改资本档位")
+
+    changed: dict[str, Any] = {}
+    def _update(pool: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        for item in pool:
+            if str(item.get("instId") or "").upper() == target:
+                item["tier"] = tier
+                item["max_leverage"] = derive_instrument_leverage_cap(tier)
+                item["sl_atr_mult"] = profile["sl_atr_mult"]
+                changed.update({"tier": tier, "max_leverage": item["max_leverage"],
+                                "sl_atr_mult": item["sl_atr_mult"]})
+                return pool
+        raise HTTPException(status_code=404, detail="该合约不在交易标的池中")
+
+    mutate_instruments(_update)
+    audit_record("instrument.capital_tier.update", "success", {
+        "actor": actor["username"], "instId": target, **changed,
+    })
+    return {"updated": target, **changed, "effective": "immediate"}
 
 
 @router.post("/api/v1/admin/positions/close")

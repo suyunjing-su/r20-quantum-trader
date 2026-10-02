@@ -42,7 +42,7 @@ export const zhAdminAgents = {
   promptPolicy: '提示词策略',
   apiKeyTitle: 'Agent API Key',
   apiKeyDesc: '为自动化 Agent 管理专用访问密钥。轮换会立即使旧密钥失效。',
-  keyScopeNote: '密钥仅授予受限配置与遥测接口；初始本金、交易所凭证和资金档位不在权限范围内。密钥只在生成时显示一次。',
+  keyScopeNote: '密钥仅授予受限配置与遥测接口；初始本金和交易所凭证不在权限范围内。标的资本档位仅在单独授权后可修改。密钥只在生成时显示一次。',
   keyChecking: '检查中',
   keyActive: '已启用',
   keyNotConfigured: '未配置',
@@ -63,10 +63,12 @@ export const zhAdminAgents = {
   equityBandsScopeDesc: '允许此 Agent API Key 写入委员会、Prompt 和风险资金区间。仅在确认自动化流程需要时开启。',
   riskSuitesScopeTitle: '风控方案管理权限',
   riskSuitesScopeDesc: '允许此 Agent API Key 创建、修改和删除自定义风控方案；引用中的方案需先解除资金区间绑定才能删除。仅在确认自动化流程需要时开启。',
+  capitalTiersScopeTitle: '标的资本档位管理权限',
+  capitalTiersScopeDesc: '允许读取脱敏的标的档位清单，并修改标的的蓝筹/动量分类及其派生杠杆、止损参数。存在持仓或持仓状态未知时拒绝修改。',
   scopeGranted: '已授权写入',
   scopeNotGranted: '未授权写入',
   scopeLoadFailed: '无法读取 Agent 权限范围',
-  scopeSaved: 'Agent 资金档位权限已更新',
+  scopeSaved: 'Agent API 权限范围已更新',
   scopeSaveFailed: 'Agent 权限更新失败',
 
   // 批 27：健康 / 运行状态 / 调用状态此前都是原样印后端枚举

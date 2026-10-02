@@ -13,13 +13,18 @@ from astra_backend.audit import record as audit_record
 from astra_backend.dependencies import (
     AGENT_SCOPE_EQUITY_BANDS_WRITE,
     AGENT_SCOPE_RISK_SUITES_WRITE,
+    AGENT_SCOPE_CAPITAL_TIERS_WRITE,
     agent_api_key_scopes,
     require_admin_header,
     require_superadmin,
 )
 from astra_backend.settings_store import update_env
 
-AGENT_SCOPES = {AGENT_SCOPE_EQUITY_BANDS_WRITE, AGENT_SCOPE_RISK_SUITES_WRITE}
+AGENT_SCOPES = {
+    AGENT_SCOPE_EQUITY_BANDS_WRITE,
+    AGENT_SCOPE_RISK_SUITES_WRITE,
+    AGENT_SCOPE_CAPITAL_TIERS_WRITE,
+}
 VENUES = ("okx", "binance", "gate")
 agent_router = APIRouter(tags=["agent-api"])
 
@@ -138,7 +143,7 @@ def agent_capabilities(x_api_key: str | None = Header(default=None, alias="X-API
         "auth_header": "X-API-Key",
         "scope": "configuration-and-telemetry",
         "granted_scopes": sorted(actor.get("scopes") or []) if actor.get("auth_method") == "api_key" else [],
-        "excluded": ["initial_capital_baseline", "venue_credentials", "capital_tiers"],
+        "excluded": ["initial_capital_baseline", "venue_credentials"],
         "session_only_routes": [
             "POST /api/v1/admin/council/profiles",
             "PUT /api/v1/admin/council/profiles/{profile_id}",
@@ -153,6 +158,9 @@ def agent_capabilities(x_api_key: str | None = Header(default=None, alias="X-API
                 "PUT /api/v1/admin/risk/custom-suites/{suite_id}",
                 "DELETE /api/v1/admin/risk/custom-suites/{suite_id}",
             ],
+            "capital_tiers:write": [
+                "PUT /api/v1/admin/instruments/{inst_id}/capital-tier",
+            ],
         },
         "routes": {
             "council": ["/api/v1/admin/council/config", "/api/v1/admin/council/profiles", "/api/v1/admin/council/apply-suite", "/api/v1/admin/council/reset-role", "/api/v1/admin/council/import", "/api/v1/admin/council/export"],
@@ -164,12 +172,38 @@ def agent_capabilities(x_api_key: str | None = Header(default=None, alias="X-API
                 "POST /api/v1/admin/instruments",
                 "DELETE /api/v1/admin/instruments/{inst_id}",
                 "PUT /api/v1/admin/instruments/{inst_id}/venues",
+                "PUT /api/v1/admin/instruments/{inst_id}/capital-tier",
             ],
             "models": ["/api/v1/admin/llm"],
             "exchange_routing": ["/api/v1/agent/exchanges/config"],
             "execution_telemetry": ["/api/v1/agent/telemetry", "/api/v1/admin/agents"],
+            "capital_tiers": ["GET /api/v1/agent/capital-tiers"],
         },
     }
+
+
+@agent_router.get("/api/v1/agent/capital-tiers")
+def get_agent_capital_tiers() -> dict[str, Any]:
+    """Read only symbol classification and tier-derived controls, never capital data."""
+    require_admin_header()
+    from scripts.instrument_pool import TIER_PROFILES, load_instruments
+    items = []
+    for row in load_instruments():
+        tier = str(row.get("tier") or "")
+        profile = TIER_PROFILES.get(tier, {})
+        items.append({
+            "instId": row.get("instId"),
+            "name": row.get("name"),
+            "tier": tier,
+            "tier_label": profile.get("label"),
+            "max_leverage": row.get("max_leverage"),
+            "sl_atr_mult": row.get("sl_atr_mult"),
+        })
+    return {"items": items, "available_tiers": [
+        {"id": tier, "label": profile["label"], "max_leverage": profile["max_leverage"],
+         "sl_atr_mult": profile["sl_atr_mult"]}
+        for tier, profile in TIER_PROFILES.items()
+    ]}
 
 
 @agent_router.get("/api/v1/agent/exchanges/config")

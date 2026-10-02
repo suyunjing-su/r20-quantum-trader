@@ -30,6 +30,7 @@ REQUEST_API_KEY_ACTOR: ContextVar[dict[str, Any] | None] = ContextVar("astra_api
 
 AGENT_SCOPE_EQUITY_BANDS_WRITE = "equity_bands:write"
 AGENT_SCOPE_RISK_SUITES_WRITE = "risk_suites:write"
+AGENT_SCOPE_CAPITAL_TIERS_WRITE = "capital_tiers:write"
 
 
 def agent_api_key_scopes() -> set[str]:

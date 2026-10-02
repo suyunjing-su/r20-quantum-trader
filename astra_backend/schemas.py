@@ -222,6 +222,10 @@ class InstrumentVenuesUpdate(BaseModel):
     venues: list[str] = Field(min_length=1)
 
 
+class InstrumentTierUpdate(BaseModel):
+    tier: str = Field(pattern=r"^(tier_1_bluechip|tier_2_momentum)$")
+
+
 class InstrumentDeleteRequest(BaseModel):
     confirmation: str = ""
 

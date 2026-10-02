@@ -42,16 +42,21 @@ const agentKeyBusy = ref(false);
 const generatedAgentKey = ref('');
 const equityBandsWriteGranted = ref(false);
 const riskSuitesWriteGranted = ref(false);
+const capitalTiersWriteGranted = ref(false);
 const scopeLoading = ref(false);
 const scopeBusy = ref(false);
+const grantedScopesSnapshot = ref<string[]>([]);
 
 async function loadAgentScopes() {
   if (!auth.isSuperadmin) return;
   scopeLoading.value = true;
   try {
     const result = await api<{ scopes: string[] }>('/api/v1/admin/agent-api-key/scopes');
-    equityBandsWriteGranted.value = (result.scopes || []).includes('equity_bands:write');
-    riskSuitesWriteGranted.value = (result.scopes || []).includes('risk_suites:write');
+    const scopes = result.scopes || [];
+    grantedScopesSnapshot.value = [...scopes];
+    equityBandsWriteGranted.value = scopes.includes('equity_bands:write');
+    riskSuitesWriteGranted.value = scopes.includes('risk_suites:write');
+    capitalTiersWriteGranted.value = scopes.includes('capital_tiers:write');
   } catch (e: any) {
     toast.err(t('admin.agents.scopeLoadFailed'), e?.message || String(e));
   } finally {
@@ -65,15 +70,19 @@ async function saveAgentScopes() {
     const scopes = [
       ...(equityBandsWriteGranted.value ? ['equity_bands:write'] : []),
       ...(riskSuitesWriteGranted.value ? ['risk_suites:write'] : []),
+      ...(capitalTiersWriteGranted.value ? ['capital_tiers:write'] : []),
     ];
     await api('/api/v1/admin/agent-api-key/scopes', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ scopes }),
     });
+    grantedScopesSnapshot.value = scopes;
     toast.ok(t('admin.agents.scopeSaved'));
   } catch (e: any) {
-    equityBandsWriteGranted.value = !equityBandsWriteGranted.value;
+    equityBandsWriteGranted.value = grantedScopesSnapshot.value.includes('equity_bands:write');
+    riskSuitesWriteGranted.value = grantedScopesSnapshot.value.includes('risk_suites:write');
+    capitalTiersWriteGranted.value = grantedScopesSnapshot.value.includes('capital_tiers:write');
     toast.err(t('admin.agents.scopeSaveFailed'), e?.message || String(e));
   } finally {
     scopeBusy.value = false;
@@ -272,6 +281,22 @@ function ageText(a: any): string {
                 @change="saveAgentScopes"
               />
               <span>{{ riskSuitesWriteGranted ? t('admin.agents.scopeGranted') : t('admin.agents.scopeNotGranted') }}</span>
+            </label>
+          </div>
+
+          <div class="agent-scope-row">
+            <div>
+              <strong class="agent-scope-title">{{ t('admin.agents.capitalTiersScopeTitle') }}</strong>
+              <p class="agent-scope-desc">{{ t('admin.agents.capitalTiersScopeDesc') }}</p>
+            </div>
+            <label class="agent-scope-toggle">
+              <input
+                v-model="capitalTiersWriteGranted"
+                type="checkbox"
+                :disabled="scopeLoading || scopeBusy || !agentKeyConfigured"
+                @change="saveAgentScopes"
+              />
+              <span>{{ capitalTiersWriteGranted ? t('admin.agents.scopeGranted') : t('admin.agents.scopeNotGranted') }}</span>
             </label>
           </div>
 
