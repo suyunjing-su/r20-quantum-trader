@@ -164,9 +164,8 @@ class LLMFetchModelsRequest(BaseModel):
 class CouncilConfigUpdateRequest(BaseModel):
     enabled: bool
     consensus_mode: str = Field(default="standard")
-    # 审计 P2-13：与 council_manager.MIN/MAX/DEFAULT_COUNCIL_TIMEOUT 同源
-    # （旧默认 60 与引擎默认 240 不一致，管理员不改这一项时前后端口径就不同）
-    timeout_seconds: float = Field(default=240.0, ge=30.0, le=420.0)
+    # 仅保留最低安全预算；委员会超时不再人为设置 420 秒上限。
+    timeout_seconds: float = Field(default=240.0, ge=30.0)
     roles: dict[str, Any]
 
 

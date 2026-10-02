@@ -3,7 +3,7 @@
 | 状态 | 口径 |
 |---|---|
 | 成功 | `status=ok`；`content`/`reasoning` **去空白**；`model_used` 在无覆盖时回落**当前活跃模型**；`weight` 缺省 1.0；解析事实（requested/registered/fallback/note）**照实带出** |
-| ★ 重试 | **只有**错误含 504/502/timeout **且** `timeout > 35` 才退避 1.5s 重试**一次**：强度 `high→medium`、剩余预算收紧为 `max(20, timeout-20)`、且**允许回落**（保住席位优先）|
+| ★ 重试 | **只有**错误含 504/502/timeout **且** `timeout > 35` 才退避 1.5s 重试**一次**：保持委员会席位原思考强度、剩余预算收紧为 `max(20, timeout-20)`、且**允许回落**（保住席位优先）|
 | ★ 降级 | 重试仍失败 ⇒ `status=error`、内容写明「异常/超时降级」、`latency_ms=0`，且 **`weight=0.0`** —— **降级的席位不得参与表决权重** |
 
 ★ 那条 `weight=0.0` 是本刀最要紧的一条：委员会里一个**没答出来的席位**若仍按 1.0 计权，
@@ -88,15 +88,15 @@ class SeatOutcomeTest(unittest.TestCase):
         self.assertEqual(len(self.calls), 1, "非 502/504/timeout ⇒ 不重试")
         self.assertIn("400 bad request", out["content"])
 
-    def test_long_timeout_gateway_error_retries_once_with_lower_effort(self):
-        """★ 退避重试的**全部参数**都要对：降强度、收紧预算、允许回落。"""
+    def test_long_timeout_gateway_error_retries_with_same_effort(self):
+        """★ 退避重试保持委员会指定的思考强度。"""
         out = self._call([RuntimeError("502 bad gateway"), ("重试正文", "", {}, 3.0)],
                          timeout=60.0)
         self.assertEqual(out["status"], "ok")
         self.assertEqual(out["content"], "重试正文")
         self.assertEqual(len(self.calls), 2)
         retry = self.calls[1]
-        self.assertEqual(retry["reasoning_effort"], "medium", "high ⇒ 降为 medium")
+        self.assertEqual(retry["reasoning_effort"], "high", "重试必须保持委员会指定的 high")
         self.assertEqual(retry["timeout"], 40.0, "剩余预算 = timeout - 20")
         self.assertTrue(retry["allow_fallback"], "重试允许回落（保住席位优先）")
         self.assertTrue(self.sleep_mock.called, "先退避")
@@ -104,7 +104,7 @@ class SeatOutcomeTest(unittest.TestCase):
     def test_medium_effort_is_not_downgraded_further(self):
         out = self._call([RuntimeError("504"), ("ok", "", {}, 1.0)], timeout=60.0,
                          resolved={**_resolved(), "effort": "medium"})
-        self.assertEqual(self.calls[1]["reasoning_effort"], "medium", "非 high 保持原强度")
+        self.assertEqual(self.calls[1]["reasoning_effort"], "medium", "保持委员会指定强度")
 
     def test_degraded_seat_has_zero_weight(self):
         """★ **降级的席位权重为 0**：没答出来的席位不得让「沉默」变成「赞成」。"""

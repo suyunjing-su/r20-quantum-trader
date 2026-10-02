@@ -473,14 +473,14 @@ class CouncilBudgetTests(_Base):
         import astra_backend.council_manager as cm
         self.cm = cm
 
-    def test_timeout_is_clamped_at_both_ends(self):
-        self.assertEqual(self.cm.clamp_council_timeout(5000), self.cm.MAX_COUNCIL_TIMEOUT)
+    def test_timeout_is_clamped_at_minimum(self):
+        self.assertEqual(self.cm.clamp_council_timeout(5000), 5000.0)
         self.assertEqual(self.cm.clamp_council_timeout(1), self.cm.MIN_COUNCIL_TIMEOUT)
         self.assertEqual(self.cm.clamp_council_timeout("junk"), self.cm.DEFAULT_COUNCIL_TIMEOUT)
         self.assertEqual(self.cm.clamp_council_timeout(float("nan")), self.cm.DEFAULT_COUNCIL_TIMEOUT)
 
-    def test_max_budget_leaves_margin_below_scheduler_kill(self):
-        self.assertLess(self.cm.MAX_COUNCIL_TIMEOUT, 600.0)
+    def test_max_budget_is_not_artificially_limited(self):
+        self.assertEqual(self.cm.MAX_COUNCIL_TIMEOUT, float("inf"))
 
     def test_schema_default_matches_engine_default(self):
         from astra_backend.schemas import CouncilConfigUpdateRequest
@@ -488,7 +488,7 @@ class CouncilBudgetTests(_Base):
         self.assertEqual(float(field.default), self.cm.DEFAULT_COUNCIL_TIMEOUT)
         bounds = {type(m).__name__: m for m in (field.metadata or [])}
         self.assertEqual(float(bounds["Ge"].ge), self.cm.MIN_COUNCIL_TIMEOUT)
-        self.assertEqual(float(bounds["Le"].le), self.cm.MAX_COUNCIL_TIMEOUT)
+        self.assertNotIn("Le", bounds)
 
     def test_cio_reserve_exists_in_both_modes(self):
         """定位说明（结构优化阶段 2 / B5）：原先用 inspect.getsource(门面函数)，
@@ -505,7 +505,7 @@ class CouncilBudgetTests(_Base):
             "enabled": False, "consensus_mode": "standard", "timeout_seconds": 5000,
             "roles": {"cio": dict(self.cm.DEFAULT_PRESET_TEMPLATES["cio"])},
         })
-        self.assertEqual(cfg["timeout_seconds"], self.cm.MAX_COUNCIL_TIMEOUT)
+        self.assertEqual(cfg["timeout_seconds"], 5000.0)
 
 
 class DocsAndExampleDriftTests(_Base):

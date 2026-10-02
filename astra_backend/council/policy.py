@@ -123,7 +123,7 @@ DEFAULT_PRESET_TEMPLATES: Dict[str, Dict[str, Any]] = {
     },
 }
 
-MAX_COUNCIL_TIMEOUT: float = 420.0  # 留出余量：调度器 600s 硬杀，主脑与委员会同一进程
+MAX_COUNCIL_TIMEOUT: float = float("inf")  # 保留兼容导出；委员会配置不再设置人为上限，实际进程仍受网关任务超时保护
 
 MIN_SAFE_REASONING_TIME: float = 5.0
 

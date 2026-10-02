@@ -273,7 +273,7 @@ def _migrate_untouched_preset_prompts(config: Dict[str, Any]) -> bool:
 # ---- 委员会配置导入/导出（对齐提示词工坊策略包体验） ----
 COUNCIL_EXPORT_FORMAT = "astra-council-config"
 COUNCIL_EXPORT_VERSION = 1
-_VALID_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high"}
+_VALID_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "max", "xhigh", "auto"}
 
 def export_council_config() -> Dict[str, Any]:
     """自描述导出包：一个 JSON 文件即可完整还原投委会席位、提示词与议事规则。"""
@@ -351,7 +351,7 @@ def import_council_config(payload: Dict[str, Any]) -> Dict[str, Any]:
             "model_id": str(role.get("model_id", ""))[:80],
         }
     try:
-        timeout_seconds = min(300.0, max(10.0, float(src.get("timeout_seconds", DEFAULT_COUNCIL_TIMEOUT))))
+        timeout_seconds = clamp_council_timeout(src.get("timeout_seconds", DEFAULT_COUNCIL_TIMEOUT))
     except (TypeError, ValueError):
         timeout_seconds = DEFAULT_COUNCIL_TIMEOUT
 

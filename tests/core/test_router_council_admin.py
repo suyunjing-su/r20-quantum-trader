@@ -7,7 +7,7 @@
 | ★ **超管 vs 管理员** | 改配置/套用套件/重置角色/导入 都必须 `require_superadmin`（返回 `actor`，写进审计）；**只读**的取配置与导出只要 `require_admin_header` |
 | ★ **默认值同源（审计 P2-13）** | `CouncilConfigUpdateRequest.timeout_seconds` 的默认**必须**等于 `council_manager.DEFAULT_COUNCIL_TIMEOUT`（注释：旧默认 60 与引擎默认 240 不一致 ⇒ 管理员不改这一项时前后端口径不同）|
 | ★ **模型健康摊开（审计 P1-4b）** | 配置响应带 `model_health` + 说明文案（旧版**静默回落主脑**，页面照旧宣称多模型 ⇒ 现在载荷带 `model_fallback` 标记）|
-| ★ **约束内建** | `timeout_seconds` 有 `ge=30, le=420` ⇒ 越界在**模型层**就被拒（不是等到引擎）|
+| ★ **约束内建** | `timeout_seconds` 有 `ge=30` ⇒ 低于最小值在**模型层**就被拒（不是等到引擎）|
 | 失败即 400 | 套用套件 / 导入 抛 `ValueError` ⇒ **400**（不 500），成功则写审计 |
 """
 
@@ -31,7 +31,7 @@ class TimeoutSingleSourceTest(unittest.TestCase):
 
     def test_bounds_are_enforced_at_the_model_layer(self):
         from pydantic import ValidationError
-        for bad in (29.0, 421.0):
+        for bad in (29.0,):
             with self.subTest(value=bad):
                 with self.assertRaises(ValidationError):
                     CouncilConfigUpdateRequest(enabled=True, roles={}, timeout_seconds=bad)

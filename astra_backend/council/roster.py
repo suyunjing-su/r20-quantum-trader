@@ -9,9 +9,10 @@ from typing import Any, Dict, List
 
 from astra_backend.council.policy import (
     DEFAULT_COUNCIL_TIMEOUT,
-    MAX_COUNCIL_TIMEOUT,
     MIN_COUNCIL_TIMEOUT,
 )
+
+_VALID_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "max", "xhigh", "auto"}
 
 
 def seat_model_health(roles: Any) -> List[Dict[str, Any]]:
@@ -48,7 +49,9 @@ def resolve_seat_model(role_spec: Dict[str, Any]) -> Dict[str, Any]:
     """
     from astra_backend.llm_manager import load_llm_config
     requested = str(role_spec.get("model_id") or "").strip()
-    effort = role_spec.get("reasoning_effort") or "medium"
+    effort = str(role_spec.get("reasoning_effort") or "medium").strip().lower()
+    if effort not in _VALID_REASONING_EFFORTS:
+        effort = "medium"
     try:
         cfg = load_llm_config(mask_keys=False)
     except Exception as exc:
@@ -58,13 +61,14 @@ def resolve_seat_model(role_spec: Dict[str, Any]) -> Dict[str, Any]:
     models = [i for i in (cfg.get("models") or []) if isinstance(i, dict)]
     if not requested:
         return {"model": "", "base_url": None, "api_key": None, "api_format": None,
-                "effort": cfg.get("active_reasoning_effort", "medium"), "requested": "",
+                "effort": effort, "requested": "",
                 "registered": True, "fallback": False, "reason": "", "registered_ids": []}
     for item in models:
         if item.get("id") == requested:
             return {"model": item.get("id"), "base_url": item.get("base_url"),
                     "api_key": item.get("api_key"), "api_format": item.get("api_format"),
-                    "effort": item.get("reasoning_effort") or effort, "requested": requested,
+                    # 委员会席位的 reasoning_effort 是运行时覆盖，必须优先于模型库默认值。
+                    "effort": effort, "requested": requested,
                     "registered": True, "fallback": False, "reason": "", "registered_ids": []}
     return {"model": "", "base_url": None, "api_key": None, "api_format": None,
             "effort": effort, "requested": requested, "registered": False, "fallback": True,
@@ -143,4 +147,4 @@ def clamp_council_timeout(value: Any) -> float:
         return DEFAULT_COUNCIL_TIMEOUT
     if num != num or num in (float("inf"), float("-inf")):
         return DEFAULT_COUNCIL_TIMEOUT
-    return min(MAX_COUNCIL_TIMEOUT, max(MIN_COUNCIL_TIMEOUT, round(num, 1)))
+    return max(MIN_COUNCIL_TIMEOUT, round(num, 1))

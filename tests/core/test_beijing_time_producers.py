@@ -106,7 +106,7 @@ def test_council_save_export_and_backup_mocked():
                    _locked_council=lambda fn: fn,
                    # P2-13：超时预算统一夹取（单一事实源），隔离执行注入直通实现
                    clamp_council_timeout=lambda value: float(value),
-                   MIN_COUNCIL_TIMEOUT=30.0, MAX_COUNCIL_TIMEOUT=420.0)
+                   MIN_COUNCIL_TIMEOUT=30.0, MAX_COUNCIL_TIMEOUT=float("inf"))
     assert mod.save_council_config({"roles": {"cio": {}}})["updated_at"] == EXPECTED
     assert write.call_count == 1
     assert mod.export_council_config()["exported_at"] == EXPECTED

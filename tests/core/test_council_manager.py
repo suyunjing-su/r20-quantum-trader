@@ -7,20 +7,14 @@
 |---|---|
 | ★ **可解析就绝不覆盖** | 审计 P1-4a 的核心：文件能被解析且含 `roles` ⇒ **原样返回**；结构有问题只打 `config_warning`，用户自写提示词一个字都不许蒸发 |
 | ★ **损坏先留痕再重建** | 不可解析/缺 `roles` ⇒ 先把原字节备份成 `council_config_corrupt_<stamp>.json`，再重建工厂默认；**备份失败也要继续重建**并打日志 |
-| ★ **超时预算单一事实源** | 审计 P2-13：`clamp_council_timeout` 是唯一事实源（`[30, 420]`）；`save_council_config` 任何写入口都夹取 |
+| ★ **超时预算单一事实源** | `clamp_council_timeout` 是唯一事实源（最低 30 秒，无人为上限）；`save_council_config` 任何写入口都夹取 |
 | ★ **读写共用同一校验** | 审计 P1-4a：读写两侧都过 `validate_council_roles`，杜绝"写得进、读不回"的白名单漂移 |
 | ★ **模型绑定不许静默回落** | 审计 P1-4b：`enforce_models=True` ⇒ 未登记绑定直接拒绝；整包导入（`False`）⇒ **清空**该绑定（=跟随主脑）并如实回报，绝不静默保留一个查不到的 id |
 | ★ **RMW 全程持锁** | `_locked_council` 装饰器把 load/save/import/套用预设整段包进可重入 `file_lock`（嵌套 save 不会自锁）|
 | ★ **stdout 保护** | `save` 读旧配置前显式限定 `str/Path`：Mock 既像路径又会被 `open()` 当**文件描述符**解释 ⇒ 会关掉 fd 1 让套件退出码变 120。用例注入 Mock 后断言 stdout 仍可用 |
 | ★ **导入包自描述** | `export` 产出 `{format,version,exported_at,config}`；`import` 同时接受标准包与裸 `{roles:...}`，并做字段清洗（截断/夹取/枚举归一）|
 
-## 🐞 本刀实测到一处**单一事实源被绕过**（未擅自改生产代码）
-
-`import_council_config` 里超时预算是**硬编码的 `[10.0, 300.0]`**，而不是审计 P2-13 指定的
-`clamp_council_timeout`（`[30, 420]`）：实测 `timeout_seconds=400`（策略允许的合法值）
-导入后被**悄悄压到 300**，`5000` 也压到 300 而非 420。
-即"唯一事实源"在导入这条路上并未生效。用例按实际行为钉住并标注。
-
+## 导入配置与保存配置都通过 `clamp_council_timeout` 归一化；最低 30 秒，不再设置 420 秒上限。
 另登记一处：`_atomic_write_json` **没有失败清理**（其余 6 个原子写辅助都有 `finally: unlink`），
 `os.replace` 抛错时会留下一个 `tmp*` 临时文件。用例按实际行为钉住。
 """
@@ -64,7 +58,7 @@ class _Base(unittest.TestCase):
         self._start(mock.patch.object(CM, "validate_seat_model_bindings",
                                       return_value=[]))
         self._start(mock.patch.object(CM, "clamp_council_timeout",
-                                      side_effect=lambda v: min(420.0, max(30.0, float(v)))))
+                                      side_effect=lambda v: max(30.0, float(v))))
 
     def _write(self, payload, raw=None):
         self.file.parent.mkdir(parents=True, exist_ok=True)
@@ -102,7 +96,7 @@ class ReexportTests(unittest.TestCase):
         self.assertEqual(CM.COUNCIL_EXPORT_FORMAT, "astra-council-config")
         self.assertEqual(CM.COUNCIL_EXPORT_VERSION, 1)
         self.assertEqual(CM._VALID_REASONING_EFFORTS,
-                         {"none", "minimal", "low", "medium", "high"})
+                         {"none", "minimal", "low", "medium", "high", "max", "xhigh", "auto"})
 
     def test_legacy_hash_map_covers_the_four_seats(self):
         self.assertEqual(set(CM._LEGACY_PRESET_PROMPT_HASHES),
@@ -180,7 +174,7 @@ class LoadConfigTests(_Base):
         self.assertEqual(config["timeout_seconds"], policy.DEFAULT_COUNCIL_TIMEOUT)
         self.assertEqual(set(config["roles"]), set(policy.DEFAULT_PRESET_TEMPLATES))
         self.assertIn("updated_at", config)
-        self.assertEqual(json.loads(self.file.read_text())["roles"].keys(),
+        self.assertEqual(json.loads(self.file.read_text(encoding="utf-8"))["roles"].keys(),
                          config["roles"].keys(), "默认档必须落盘")
 
     def test_factory_default_roles_are_deep_copies(self):
@@ -210,7 +204,7 @@ class LoadConfigTests(_Base):
         self.assertIn("config_warning", config)
         self.assertIn("缺少仲裁官席位", config["config_warning"])
         self.assertIn("已保留原文件", config["config_warning"])
-        self.assertEqual(json.loads(self.file.read_text())["roles"]["cio"]["prompt"],
+        self.assertEqual(json.loads(self.file.read_text(encoding="utf-8"))["roles"]["cio"]["prompt"],
                          "我的提示词", "结构异常不得引发覆盖")
 
     def test_corrupt_json_is_backed_up_then_rebuilt(self):
@@ -329,7 +323,7 @@ class MigrateTests(_Base):
                              {"cio": {digest}}, clear=True):
             config = CM.load_council_config()
         self.assertNotEqual(config["updated_at"], "2000-01-01 00:00:00")
-        self.assertEqual(json.loads(self.file.read_text())["roles"]["cio"]["prompt"],
+        self.assertEqual(json.loads(self.file.read_text(encoding="utf-8"))["roles"]["cio"]["prompt"],
                          policy.DEFAULT_PRESET_TEMPLATES["cio"]["prompt"])
 
 
@@ -390,10 +384,10 @@ class SaveConfigTests(_Base):
 
     def test_timeout_goes_through_the_single_source_of_truth(self):
         clamp = self._start(mock.patch.object(CM, "clamp_council_timeout",
-                                              side_effect=lambda v: min(420.0, max(30.0, float(v)))))
+                                              side_effect=lambda v: max(30.0, float(v))))
         self.assertEqual(CM.save_council_config({"roles": _roles(),
                                                  "timeout_seconds": 5000})["timeout_seconds"],
-                         420.0)
+                         5000.0)
         self.assertEqual(CM.save_council_config({"roles": _roles(),
                                                  "timeout_seconds": 5})["timeout_seconds"],
                          30.0)
@@ -403,7 +397,7 @@ class SaveConfigTests(_Base):
         config = CM.save_council_config({"roles": _roles()})
         self.assertRegex(config["updated_at"],
                          r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\+08:00$")
-        self.assertEqual(json.loads(self.file.read_text())["updated_at"],
+        self.assertEqual(json.loads(self.file.read_text(encoding="utf-8"))["updated_at"],
                          config["updated_at"])
 
     def test_model_problems_are_fatal_when_enforced(self):
@@ -613,17 +607,12 @@ class ExportImportTests(_Base):
                          [{"role_id": "cio", "model_id": "ghost"}])
         self.assertEqual(CM.load_council_config()["roles"]["cio"]["model_id"], "")
 
-    def test_import_timeout_window_narrows_the_single_source_of_truth(self):
-        """🐞 实测缺陷：审计 P2-13 声明 `clamp_council_timeout`(`[30,420]`) 是唯一事实源，
-        但 import 里硬编码的是 `[10,300]` ⇒ 合法的 400 秒预算被悄悄压到 300。"""
-        for given, expected in ((5, 30.0), (100, 100.0), (400, 300.0), (5000, 300.0)):
+    def test_import_timeout_is_normalised_without_an_upper_bound(self):
+        for given, expected in ((5, 30.0), (100, 100.0), (400, 400.0), (5000, 5000.0)):
             with self.subTest(given=given):
                 out = CM.import_council_config(
                     {"roles": {"cio": {"prompt": "p"}}, "timeout_seconds": given})
                 self.assertEqual(out["timeout_seconds"], expected)
-        self.assertEqual(CM.clamp_council_timeout.__wrapped__ if hasattr(
-            CM.clamp_council_timeout, "__wrapped__") else 400.0, 400.0,
-            "对照：策略侧允许 400（MAX=420）")
 
     def test_import_non_numeric_timeout_falls_back_to_the_default(self):
         out = CM.import_council_config({"roles": {"cio": {"prompt": "p"}},

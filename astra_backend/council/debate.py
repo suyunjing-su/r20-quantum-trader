@@ -20,7 +20,6 @@ from astra_backend.council.policy import (
     DEFAULT_CONSENSUS_MODE,
     CIO_MIN_ARBITRATION_TIME,
     DEFAULT_PRESET_TEMPLATES,
-    MAX_COUNCIL_TIMEOUT,
     MIN_SAFE_REASONING_TIME,
     VALID_CONSENSUS_MODES,
 )
@@ -135,7 +134,7 @@ def _call_single_trader(resolve_seat: Callable[..., Any],
         if ("504" in err_str or "502" in err_str or "timeout" in err_str.lower()) and timeout > 35.0:
             try:
                 time.sleep(1.5)
-                retry_effort = "medium" if override_effort == "high" else override_effort
+                retry_effort = override_effort
                 c_retry, r_retry, _, lat_retry = execute_llm_request(
                     messages=messages,
                     model=override_model,
@@ -315,9 +314,8 @@ def execute_council_debate(load_config: Callable[[], Dict[str, Any]], resolve_se
 
     t_start = time.time()
     effective_timeout = max(1.0, float(timeout))
-    # 审计 P2-13：这里只夹**上限**（防手改配置撞调度器 600s 击杀）；
-    # 下限不夹——显式传入极小超时是"立即中止"的既有契约（测试与降级路径依赖它）。
-    effective_timeout = min(float(MAX_COUNCIL_TIMEOUT), max(0.0, float(effective_timeout)))
+    # 委员会预算只受调用方/网关任务超时约束，不再人为夹到 420 秒。
+    effective_timeout = max(0.0, float(effective_timeout))
     deadline = t_start + effective_timeout
 
     rem = deadline - time.time()

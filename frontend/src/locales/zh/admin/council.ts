@@ -31,10 +31,10 @@ export const zhAdminCouncil = {
   modeDebateTag: 'Debate',
   modeDebateDesc: '多空双方逐轮辩论，CIO 裁决。最慢，适合极端不确定行情。',
   timeoutLabel: '投委会超时保护:',
-  timeoutHint: '秒（区间 30~420；为 CIO 裁决预留至少 45s，超时自动降级为单模型决策）',
+  timeoutHint: '秒（最低 30 秒；超时自动降级为单模型决策）',
   // 批 26：状态带脚注与卡片副标题此前复用同一条长文案，同屏出现两次（相距约 100px）。
   // 带内只留「区间」，完整口径留在卡片副标题。
-  timeoutFoot: '区间 30~420s',
+  timeoutFoot: '最低 30s',
   weightHint: '席位权重：仅作为 CIO 终审时的参考提示写入裁决输入（不参与自动加权计票）',
   restoreSuite: '恢复对冲基金标准阵容',
   addTrader: '添加自定义交易员席位',
@@ -123,6 +123,7 @@ export const zhAdminCouncil = {
   fieldModel: '模型绑定',
   fieldWeight: '席位权重',
   fieldTemperature: '采样温度',
+  fieldReasoningEffort: '思考强度',
   fieldTimeout: '超时保护',
   runTestHint: '现场调用一次完整投委会辩论（预计 10~25 秒）',
   verdictTitle: '首席投资官（CIO）终审判定',

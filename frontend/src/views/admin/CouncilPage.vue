@@ -618,7 +618,6 @@ onMounted(loadData);
               type="number"
               inputmode="numeric"
               :min="30"
-              :max="420"
               step="10"
               class="field cn-num-input"
               :disabled="!auth.isSuperadmin"
@@ -769,6 +768,20 @@ onMounted(loadData);
                     <option v-for="m in availableModels" :key="m.id" :value="m.id">
                       {{ m.name || m.id }}
                     </option>
+                  </select>
+                </label>
+
+                <label class="cn-param">
+                  <span class="label-caps">{{ t('admin.council.fieldReasoningEffort') }}</span>
+                  <select v-model="selectedRole.reasoning_effort" class="field" :aria-label="t('admin.council.fieldReasoningEffort')" :disabled="!auth.isSuperadmin">
+                    <option value="max">MAX</option>
+                    <option value="xhigh">XHIGH</option>
+                    <option value="high">HIGH</option>
+                    <option value="medium">MEDIUM</option>
+                    <option value="low">LOW</option>
+                    <option value="minimal">MINIMAL</option>
+                    <option value="none">NONE</option>
+                    <option value="auto">AUTO</option>
                   </select>
                 </label>
 
