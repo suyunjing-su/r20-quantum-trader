@@ -45,6 +45,7 @@ from astra_backend.routers import (
     risk_router,
     strategy_router,
     llm_router,
+    fast_decision_router,
     gateway_router,
     dashboard_router,
     agent_router,
@@ -328,6 +329,7 @@ app.include_router(exchanges_router)
 app.include_router(risk_router)
 app.include_router(strategy_router)
 app.include_router(llm_router)
+app.include_router(fast_decision_router)
 app.include_router(gateway_router)
 app.include_router(dashboard_router)
 app.include_router(agent_router)

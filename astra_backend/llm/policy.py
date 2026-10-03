@@ -22,6 +22,7 @@ SUPPORTED_API_FORMATS = [
     {"id": "openai_chat", "name": "OpenAI Chat (/chat/completions)", "desc": "标准 ChatML 对话格式，兼容 OpenAI/Gemini/DeepSeek/主流中继"},
     {"id": "openai_responses", "name": "OpenAI Responses (/responses)", "desc": "OpenAI 专属 Responses API 结构化接口"},
     {"id": "claude_messages", "name": "Claude Messages (/messages)", "desc": "Anthropic Claude 原生 Messages API，支持原生长思维链"},
+    {"id": "typesafe_system_one", "name": "TypeSafe System One (/systemone)", "desc": "TypeSafe typed decision protocol；不是 Chat Completions"},
 ]
 STANDARD_REASONING_EFFORTS = ["max", "xhigh", "high", "medium", "low", "minimal", "none", "auto"]
 DEFAULT_PROVIDERS = [
@@ -87,6 +88,21 @@ DEFAULT_PROVIDERS = [
         "api_format": "openai_chat",
         "api_path": "/chat/completions",
         "description": "Google AI Studio 官方原生/OpenAI 兼容端点",
+        "models": [],
+    },
+    {
+        "id": "typesafe",
+        "name": "TypeSafe System One",
+        "type": "TypeSafe",
+        "group": "结构化决策",
+        "enabled": False,
+        "multi_key_enabled": False,
+        "response_api_enabled": False,
+        "base_url": "https://api.typesafe.ai/v1",
+        "api_key": "",
+        "api_format": "typesafe_system_one",
+        "api_path": "/systemone",
+        "description": "TypeSafe System One typed decision endpoint（默认关闭）",
         "models": [],
     },
 ]

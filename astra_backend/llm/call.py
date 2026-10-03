@@ -26,6 +26,14 @@ from astra_backend.llm.policy import (
     MIN_REQUEST_ATTEMPTS,
     SUPPORTED_API_FORMATS,
 )
+from astra_backend.llm.system_one import (
+    SYSTEM_ONE_API_FORMAT,
+    SYSTEM_ONE_CAPABILITY,
+    SYSTEM_ONE_DEFAULT_PATH,
+    build_diagnostic_request,
+    execute_system_one_request,
+    is_system_one_format,
+)
 from astra_backend.llm.providers import _join_api_path
 from astra_backend.llm.transport import (
     _LLMHardError,
@@ -95,6 +103,21 @@ def fetch_remote_models(reload_config: Callable[[], Dict[str, Any]], get_active_
         prov = next((p for p in config.get("providers", []) if p.get("base_url", "").rstrip("/") == cleaned_url and p.get("api_key")), None)
         if prov:
             api_key = prov.get("api_key", "")
+
+    selected_provider = next((p for p in config.get("providers", []) if provider_id and p.get("id") == provider_id), None)
+    selected_format = str((selected_provider or {}).get("api_format") or "").strip()
+    if is_system_one_format(selected_format):
+        # TypeSafe's public API documentation does not define a stable /models
+        # endpoint or response envelope.  Do not probe or invent a discovery
+        # contract: manual registration is the supported fallback until TypeSafe
+        # publishes one.  Connection testing and native System One execution do
+        # not depend on model discovery.
+        return {
+            "ok": False,
+            "error": "TypeSafe System One 未公开稳定的模型发现接口契约",
+            "recommendation": "请手动登记模型 ID（例如官方文档列出的别名或未来模型），再执行连接测试。",
+            "discovery": "unsupported_by_documented_contract",
+        }
 
     endpoints = []
     bearer_hdr = {"Authorization": f"Bearer {api_key}"} if api_key else {}
@@ -232,6 +255,8 @@ def execute_llm_request(get_active_runtime: Callable[[], Dict[str, Any]], resolv
     target_url = base_url or runtime.get("base_url") or os.getenv("LLM_BASE_URL") or os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1"
     target_key = api_key if api_key is not None else runtime.get("api_key", "")
     target_format = api_format or runtime.get("api_format") or _detect_api_format(target_url, target_model)
+    if is_system_one_format(target_format):
+        raise RuntimeError("TypeSafe System One models require a typed decision request; they cannot be used in the chat execution path")
     target_effort = reasoning_effort or runtime.get("reasoning_effort") or "high"
     target_rtype = runtime.get("reasoning_type", "auto")
     effective_timeout = float(timeout) if (timeout is not None and float(timeout) > 0) else float(runtime.get("thinking_timeout") or 120.0)
@@ -373,6 +398,39 @@ def test_llm_connection(reload_config: Callable[[], Dict[str, Any]],
             "error": "Base URL 格式无效，必须以 http:// 或 https:// 开头",
             "recommendation": "请检查并填写正确的服务 Base URL，例如 https://api.openai.com/v1",
         }
+
+    if is_system_one_format(api_format):
+        result = execute_system_one_request(
+            model=model,
+            state={"diagnostic": True},
+            questions={
+                "connection_check": {
+                    "type": "choice",
+                    "criteria": {
+                        "question": "Is this a connectivity diagnostic?",
+                        "options": ["yes", "no"],
+                    },
+                }
+            },
+            base_url=cleaned_url,
+            api_key=api_key,
+            api_path=api_path or _lookup_api_path(reload_config, cleaned_url, model) or SYSTEM_ONE_DEFAULT_PATH,
+            timeout=timeout,
+            attempts=2,
+        )
+        if result.get("ok"):
+            result["api_format_name"] = "TypeSafe System One"
+            result["response_preview"] = "typed answers received"
+            result["reasoning_detected"] = False
+            result["compatibility_note"] = "System One typed request/response validated; no chat fallback used"
+        else:
+            result["recommendation"] = {
+                401: "API Key 认证失败，请检查 TypeSafe 密钥是否正确或是否已过期",
+                422: "System One typed request rejected; check model and question schema",
+                429: "TypeSafe rate limit reached; retry later",
+                529: "TypeSafe service temporarily unavailable; retry later",
+            }.get(result.get("status_code"), "请检查 TypeSafe Base URL、模型 ID 与 typed request 配置")
+        return result
 
     test_messages = [
         {"role": "user", "content": "Ping test for connection. Please respond with exactly the single word: PONG"}

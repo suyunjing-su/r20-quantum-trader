@@ -75,6 +75,7 @@ from astra_backend.llm.store import (
     init_llm_config as _store_init_llm_config,
     load_llm_config as _store_load_llm_config,
     resolve_model_runtime as _store_resolve_model_runtime,
+    validate_model_runtime as _store_validate_model_runtime,
 )
 
 _BJ = timezone(timedelta(hours=8))
@@ -161,11 +162,26 @@ def recent_failover_events(limit: int = 30) -> List[Dict[str, Any]]:
     return _core_recent_failover_events(FAILOVER_EVENTS_FILE, limit)
 
 
-def activate_provider_model(provider_id: str, model_id: str, reasoning_effort: Optional[str] = None, thinking_timeout: Optional[float] = None) -> Dict[str, Any]:
+def validate_model_runtime(model_id: str, required_capability: str | None = None) -> Dict[str, Any]:
+    """Resolve a model for special typed runtimes with lifecycle validation."""
+    return _store_validate_model_runtime(init_llm_config(), model_id, required_capability=required_capability)
+def activate_provider_model(
+    provider_id: str,
+    model_id: str,
+    reasoning_effort: Optional[str] = None,
+    thinking_timeout: Optional[float] = None,
+) -> Dict[str, Any]:
     """薄壳：调用时解析 LLM_CONFIG_FILE 与 init_llm_config 模块全局，
     使测试对二者的 patch / 直接赋值必然生效。实现已迁往 astra_backend.llm.store
     （结构优化阶段 2 / B4）。"""
-    return _store_activate_provider_model(LLM_CONFIG_FILE, init_llm_config, provider_id, model_id, reasoning_effort, thinking_timeout)
+    return _store_activate_provider_model(
+        LLM_CONFIG_FILE,
+        init_llm_config,
+        provider_id,
+        model_id,
+        reasoning_effort,
+        thinking_timeout,
+    )
 
 
 def update_llm_settings(

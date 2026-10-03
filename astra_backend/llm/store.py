@@ -29,6 +29,12 @@ from astra_backend.llm.policy import (
     SUPPORTED_API_FORMATS,
 )
 from astra_backend.llm.providers import _provider_holds_active_model, _resolve_active_provider_id
+from astra_backend.llm.system_one import (
+    SYSTEM_ONE_API_FORMAT,
+    SYSTEM_ONE_CAPABILITY,
+    SYSTEM_ONE_DEFAULT_PATH,
+    is_system_one_format,
+)
 from astra_backend.llm.util import _atomic_write_json, mask_secret
 from astra_backend.llm.env_sync import (
     build_env_values,
@@ -147,7 +153,7 @@ def init_llm_config(config_file: Path) -> Dict[str, Any]:
                 "api_path": m.get("api_path") or p.get("api_path", ""),
                 "reasoning_type": m.get("reasoning_type", _detect_reasoning_type(mid)),
                 "reasoning_effort": m.get("reasoning_effort") or m.get("default_effort", "high"),
-                "capabilities": m.get("capabilities", _detect_capabilities(mid)),
+                "capabilities": m.get("capabilities") or _detect_capabilities(mid, m.get("api_format") or p_fmt),
                 "context_length": m.get("context_length"),
                 "max_tokens": m.get("max_tokens"),
                 "description": m.get("description", ""),
@@ -259,6 +265,52 @@ def load_llm_config(config: Dict[str, Any], mask_keys: bool = True) -> Dict[str,
     return res
 
 
+def _provider_for_model(config: Dict[str, Any], model: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    pid = str(model.get("provider_id") or "").strip()
+    if not pid:
+        return None
+    return next((p for p in config.get("providers", []) if str(p.get("id")) == pid), None)
+
+
+def validate_model_runtime(config: Dict[str, Any], model_id: str, *, required_capability: str | None = None) -> Dict[str, Any]:
+    """Resolve a callable model only when ownership, provider and credentials are valid."""
+    target = next((m for m in config.get("models", []) if str(m.get("id")) == str(model_id)), None)
+    if not target:
+        raise ValueError(f"模型未登记或已删除：{model_id}")
+    provider = _provider_for_model(config, target)
+    if provider is None:
+        raise ValueError(f"模型 {model_id} 没有有效的供应商归属")
+    if not bool(provider.get("enabled", False)):
+        raise ValueError(f"供应商已禁用：{provider.get('name') or provider.get('id')}")
+    fmt = str(target.get("api_format") or provider.get("api_format") or "openai_chat").strip()
+    provider_models = provider.get("models")
+    if isinstance(provider_models, list):
+        if not any(str(item.get("id")) == str(model_id) for item in provider_models if isinstance(item, dict)):
+            raise ValueError(f"模型 {model_id} 未登记在供应商 {provider.get('id')} 名下")
+    elif is_system_one_format(fmt):
+        raise ValueError(f"TypeSafe 模型 {model_id} 缺少供应商模型登记")
+    if is_system_one_format(fmt) and not is_system_one_format(provider.get("api_format")):
+        raise ValueError(f"TypeSafe 模型 {model_id} 的供应商协议不匹配")
+    api_key = str(provider.get("api_key") or "").strip()
+    if not api_key:
+        raise ValueError(f"供应商缺少 API Key：{provider.get('name') or provider.get('id')}")
+    if required_capability:
+        caps = set(target.get("capabilities") or _detect_capabilities(str(model_id), fmt))
+        if required_capability not in caps:
+            raise ValueError(f"模型 {model_id} 未声明所需能力：{required_capability}")
+    return {
+        **target,
+        "provider_id": provider.get("id"),
+        "provider_name": provider.get("name") or target.get("provider_name"),
+        "base_url": str(provider.get("base_url") or target.get("base_url") or "").rstrip("/"),
+        "api_key": api_key,
+        "api_format": fmt,
+        "api_path": str(target.get("api_path") or provider.get("api_path") or ""),
+        "provider_enabled": True,
+        "has_key": True,
+    }
+
+
 def get_active_llm_runtime(config: Dict[str, Any]) -> Dict[str, Any]:
     """Retrieve active LLM credentials and configuration for runtime execution."""
     from ..config import settings
@@ -338,6 +390,15 @@ def resolve_model_runtime(config: Dict[str, Any], model_id: str) -> Optional[Dic
     target = next((m for m in config.get("models", []) if m.get("id") == model_id), None)
     if not target:
         return None
+    target_format = str(target.get("api_format") or "").strip()
+    if is_system_one_format(target_format):
+        # TypeSafe models must use the same strict lifecycle validator as
+        # Fast Decision; legacy chat fallback behavior must not weaken this
+        # protocol's provider ownership, enabled-state, or credential checks.
+        try:
+            return validate_model_runtime(config, model_id)
+        except ValueError:
+            return None
     base_url = (target.get("base_url") or "").rstrip("/")
     api_key = target.get("api_key") or ""
     if not api_key or not base_url:
@@ -587,6 +648,7 @@ def upsert_model(config_file: Path, reload_config: Callable[[], Dict[str, Any]],
     base_url = str(model_data.get("base_url", "")).strip().rstrip("/")
     api_key = str(model_data.get("api_key", "")).strip()
     api_format = str(model_data.get("api_format", "openai_chat")).strip()
+    api_path = str(model_data.get("api_path") or "").strip()
     provider_name = str(model_data.get("provider_name", "")).strip()
     reasoning_type = str(model_data.get("reasoning_type", "auto")).strip()
     default_effort = str(model_data.get("default_effort") or model_data.get("reasoning_effort", "high")).strip()
@@ -618,12 +680,23 @@ def upsert_model(config_file: Path, reload_config: Callable[[], Dict[str, Any]],
     if prov:
         if not base_url:
             base_url = prov.get("base_url", "")
-        # 不再把供应商密钥快照进模型条目：密钥唯一存放处是供应商，
-        # 读取时由 init_llm_config 合并注入；轮换密钥即刻对全部模型生效
+        # Provider protocol is authoritative. A TypeSafe provider cannot be
+        # registered as chat merely because a legacy client omitted the field.
+        provider_format = str(prov.get("api_format") or "openai_chat").strip()
+        if is_system_one_format(provider_format) and not is_system_one_format(api_format):
+            raise ValueError("TypeSafe provider models must use the TypeSafe System One protocol")
+        if is_system_one_format(api_format) and not is_system_one_format(provider_format):
+            raise ValueError("System One model must belong to a TypeSafe System One provider")
         if not provider_name:
             provider_name = prov.get("name", "自定义")
         if not provider_id:
             provider_id = prov.get("id", "openai")
+        if is_system_one_format(provider_format):
+            api_format = SYSTEM_ONE_API_FORMAT
+            api_path = api_path or prov.get("api_path") or SYSTEM_ONE_DEFAULT_PATH
+
+    if is_system_one_format(api_format) and not prov:
+        raise ValueError("System One model must be registered under an existing TypeSafe provider")
 
     if not base_url or not base_url.startswith(("http://", "https://")):
         active = get_active_llm_runtime(reload_config())
@@ -632,6 +705,12 @@ def upsert_model(config_file: Path, reload_config: Callable[[], Dict[str, Any]],
     valid_formats = [f["id"] for f in SUPPORTED_API_FORMATS]
     if api_format not in valid_formats:
         api_format = _detect_api_format(base_url, mid)
+    if is_system_one_format(api_format):
+        api_format = SYSTEM_ONE_API_FORMAT
+        api_path = api_path or SYSTEM_ONE_DEFAULT_PATH
+        caps = list(dict.fromkeys([*(caps or []), SYSTEM_ONE_CAPABILITY, "system_one"]))
+    elif not caps:
+        caps = _detect_capabilities(mid, api_format)
 
     models = config.setdefault("models", [])
     existing = next((m for m in models if m["id"] == mid), None)
@@ -651,7 +730,9 @@ def upsert_model(config_file: Path, reload_config: Callable[[], Dict[str, Any]],
         name=name,
         provider_id=provider_id,
         provider_name=provider_name,
-        reasoning_type=reasoning_type    )
+        reasoning_type=reasoning_type,
+        api_path=api_path,
+    )
 
     write_model_into_providers_local_list(
         caps=caps,
@@ -662,7 +743,10 @@ def upsert_model(config_file: Path, reload_config: Callable[[], Dict[str, Any]],
         mid=mid,
         name=name,
         prov=prov,
-        reasoning_type=reasoning_type    )
+        reasoning_type=reasoning_type,
+        api_format=api_format,
+        api_path=api_path,
+    )
 
     if mid == config.get("active_model_id") and default_effort:
         config["active_reasoning_effort"] = default_effort
@@ -766,13 +850,17 @@ def upsert_provider(config_file: Path, reload_config: Callable[[], Dict[str, Any
 
     if not api_format:
         api_format = "claude_messages" if "claude" in pid or "anthropic" in base_url.lower() else "openai_chat"
+    if is_system_one_format(api_format):
+        api_format = SYSTEM_ONE_API_FORMAT
 
     # Automatically synchronize api_path with selected api_format if default was provided
-    if api_path in ["/chat/completions", "/messages", "/responses", ""]:
+    if api_path in ["/chat/completions", "/messages", "/responses", "/systemone", ""]:
         if api_format == "claude_messages":
             api_path = "/messages"
         elif api_format == "openai_responses":
             api_path = "/responses"
+        elif is_system_one_format(api_format):
+            api_path = SYSTEM_ONE_DEFAULT_PATH
         else:
             api_path = "/chat/completions"
 

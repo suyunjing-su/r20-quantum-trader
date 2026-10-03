@@ -144,6 +144,17 @@ def preflight_reconcile_and_housekeeping(*,
         # fail-closed：仅禁止本周期新增下单（不是清库），持仓管理照常执行
         print("[挂单对账] fail-closed：本周期禁止新增下单（对账失败，不清库）")
     entries_blocked = not reconcile_ok
+    try:
+        from astra_backend.fast_decision_store import entry_block_status
+        _fast_block = entry_block_status()
+        if _fast_block.get("blocked"):
+            entries_blocked = True
+            print(f"[Fast Decision] 禁止新开仓至 {_fast_block.get('expires_at')}: {_fast_block.get('reason')}")
+    except Exception as _fast_exc:
+        # A guardian status read failure must not create an unsafe bypass; retain
+        # the existing reconciliation decision and disclose the read failure.
+        entries_blocked = True
+        print(f"[Fast Decision] warn 保护闸状态不可读，禁止本周期新开仓: {_fast_exc}")
 
     # 0. Clean Stale Open Orders & Harvest Real-time News Sentiment
     orders_ok, orders_error = clean_stale_open_orders(keep_ord_ids=reconciled_kept_ord_ids)

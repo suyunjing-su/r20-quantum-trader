@@ -34,7 +34,17 @@ export const zhAdminCouncil = {
   timeoutHint: '秒（最低 30 秒；超时自动降级为单模型决策）',
   // 批 26：状态带脚注与卡片副标题此前复用同一条长文案，同屏出现两次（相距约 100px）。
   // 带内只留「区间」，完整口径留在卡片副标题。
-  timeoutFoot: '最低 30s',
+  fastDecisionTitle: 'Fast Decision / 风险守护',
+  fastDecisionDesc: '独立的保护判断路径，不属于投委会席位，不产生开仓信号；默认关闭，失败时保持 HOLD。',
+  fastDecisionModel: 'System One 模型',
+  fastDecisionChooseModel: '选择已登记的 TypeSafe 模型',
+  fastDecisionTimeout: '单次超时（秒）',
+  fastDecisionTtl: '判断 TTL（秒）',
+  fastDecisionOn: '已启用：仅允许保护升级与减仓动作',
+  fastDecisionOff: '已关闭：系统保持安全默认，不调用模型',
+  fastDecisionSave: '保存守护配置',
+  fastDecisionSaved: 'Fast Decision 配置已保存',
+  fastDecisionSaveFailed: 'Fast Decision 保存失败：{msg}',
   weightHint: '席位权重：仅作为 CIO 终审时的参考提示写入裁决输入（不参与自动加权计票）',
   restoreSuite: '恢复对冲基金标准阵容',
   addTrader: '添加自定义交易员席位',
@@ -168,4 +178,6 @@ export const zhAdminCouncil = {
   // ── 批 67：席位提示词与导入 JSON 文本域缺少程序化名称 ──
   seatPromptAria: '席位提示词',
   importJsonAria: '委员会配置 JSON',
+  profileNameAria: '委员会方案名称',
+  profileDescriptionAria: '委员会方案说明',
 };

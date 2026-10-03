@@ -68,10 +68,24 @@ export const enAdminLlm = {
   baseUrlPlaceholder: 'Enter exactly as required by the provider, e.g. https://open.bigmodel.cn/api/paas/v4',
   baseUrlDesc: 'Automatic /v1 appending has been removed: versioned paths (/v1, /v4, /v1beta, etc.) are used verbatim and appended directly to the request endpoint; only bare hostnames still get /v1 for compatibility.',
   apiPath: 'API path',
+  systemOneExampleTitle: 'Native TypeSafe System One request',
+  systemOneExampleDesc: 'This protocol is not Chat Completions or Claude Messages. The key is never rendered here.',
+  systemOneExample: `POST /v1/systemone
+Authorization: Bearer [configured provider secret]
+Content-Type: application/json
+
+{
+  "model": "<registered-system-one-model>",
+  "state": { },
+  "questions": { }
+}
+
+Response: { "model": "...", "answers": { }, "usage": { } }`,
   deleteProvider: 'Delete provider',
   saveProvider: 'Save provider config',
   brainActiveModel: 'Brain active',
   capChat: 'Chat',
+  capStructuredDecision: 'Structured decision',
   capVision: 'Image in',
   capToolsTitle: 'Supports tool calling',
   capReasonTitle: 'Supports long reasoning chains',
@@ -118,6 +132,7 @@ export const enAdminLlm = {
   capVisionFull: 'Image in (vision)',
   capToolsFull: 'Tool calling (tools)',
   capCotFull: 'Chain of thought (CoT)',
+  capStructuredDecisionFull: 'Structured decision (System One)',
   effortLabel: 'Reasoning effort',
   contextLen: 'Context window (tokens)',
   maxTokensLabel: 'Max output tokens',

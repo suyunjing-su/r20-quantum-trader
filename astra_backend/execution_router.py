@@ -825,6 +825,134 @@ def _cancel_proven_own_legs(ad: Any, base: str,
     return note
 
 
+
+def reduce_only_position(symbol: str, quantity: float, *, venue: str = "gate",
+                         pos_side: Optional[str] = None, adapter: Any = None,
+                         environment: Optional[str] = None) -> RouteResult:
+    """Submit a bounded, exchange-native reduce-only market order.
+
+    This is the protective execution boundary for Fast Decision.  It deliberately
+    does not use ``fast_close_position``: REDUCE_ONLY must carry an explicit
+    quantity and must never silently become a whole-position close.  The venue
+    adapter is the only object allowed to serialize the native request; this
+    router performs the execution gate, live-position check, side selection, and
+    quantity bound before delegating.
+    """
+    v = str(venue or getattr(getattr(adapter, "capabilities", None), "venue", "gate") or "gate").lower()
+    try:
+        qty = float(quantity)
+    except (TypeError, ValueError):
+        return _fail("reduce_only_validate", "减仓数量必须是有限正数", venue=v)
+    if not math.isfinite(qty) or qty <= 0:
+        return _fail("reduce_only_validate", "减仓数量必须是有限正数", venue=v)
+
+    try:
+        ad = adapter or get_adapter(v, environment=environment)
+        env_name = str(environment or getattr(ad, "environment", "live") or "live")
+        # Existing-position protection is maintenance, not a new-entry request.
+        # The adapter capability check remains mandatory.
+        require_execution(v, environment=env_name, maintenance=True)
+        native = ad.native_symbol(canonical_base(symbol))
+        rows = [row for row in (ad.positions() or []) if isinstance(row, dict)]
+        wanted_side = str(pos_side or "").strip().lower()
+
+        def row_symbol(row: Dict[str, Any]) -> str:
+            return str(row.get("inst_id") or row.get("instId") or row.get("symbol") or "")
+
+        def row_side(row: Dict[str, Any]) -> str:
+            side = str(row.get("side") or row.get("posSide") or "").strip().lower()
+            if side in {"long", "short"}:
+                return side
+            try:
+                return "long" if float(row.get("size_signed") or row.get("pos") or 0) > 0 else "short"
+            except (TypeError, ValueError):
+                return ""
+
+        matches = [
+            row for row in rows
+            if (row_symbol(row) == native or canonical_base(row_symbol(row)) == canonical_base(symbol))
+            and (not wanted_side or wanted_side == "net" or row_side(row) == wanted_side)
+        ]
+        if len(matches) != 1:
+            return _fail(
+                "reduce_only_validate",
+                "无法唯一确定目标持仓，拒绝减仓",
+                venue=v,
+                asset=native,
+            )
+        target = matches[0]
+        try:
+            current = abs(float(target.get("size_signed") or target.get("pos") or target.get("amount") or 0))
+        except (TypeError, ValueError):
+            current = 0.0
+        if not math.isfinite(current) or current <= 0 or qty > current + max(1e-12, current * 1e-9):
+            return _fail(
+                "reduce_only_validate",
+                f"减仓数量 {qty:g} 超过当前持仓 {current:g}",
+                venue=v,
+                asset=native,
+            )
+
+        # Gate's currently verified path accepts integer contracts only.  Never
+        # let its adapter round a Fast Decision quantity into an unintended size.
+        if v == "gate" and not bool(getattr(ad.capabilities, "decimal_amount", False)):
+            if abs(qty - round(qty)) > 1e-9:
+                return _fail(
+                    "reduce_only_validate",
+                    "Gate 当前能力未验证小数张减仓，拒绝隐式取整",
+                    venue=v,
+                    asset=native,
+                )
+
+        side = row_side(target)
+        if side not in {"long", "short"}:
+            return _fail("reduce_only_validate", "持仓方向无法确定，拒绝减仓", venue=v, asset=native)
+        close_side = "sell" if side == "long" else "buy"
+        raw = target.get("raw") if isinstance(target.get("raw"), dict) else {}
+
+        if v == "okx":
+            raw_pos_side = str(raw.get("posSide") or "").strip().lower()
+            api_pos_side = raw_pos_side if raw_pos_side in {"long", "short"} else "net"
+            result = ad.place_order(
+                canonical_base(symbol), close_side, qty, price=None,
+                order_type="market", pos_side=api_pos_side, reduce_only=True,
+            )
+        elif v == "binance":
+            hedge_side = str(raw.get("positionSide") or "").strip().upper()
+            if hedge_side in {"LONG", "SHORT"}:
+                result = ad.place_order(
+                    canonical_base(symbol), close_side, qty, price=None,
+                    position_side=hedge_side,
+                )
+            else:
+                result = ad.place_order(
+                    canonical_base(symbol), close_side, qty, price=None,
+                    reduce_only=True,
+                )
+        else:
+            result = ad.place_order(
+                canonical_base(symbol), close_side, qty, price=None,
+                reduce_only=True,
+            )
+        if isinstance(result, dict) and result.get("closed") is False:
+            return _fail("reduce_only_submit", str(result.get("reason") or result), venue=v, asset=native)
+        return RouteResult(
+            ok=True,
+            venue=v,
+            stage="reduce_only_submitted",
+            asset=native,
+            quantity=qty,
+            reduce_only=True,
+            position_side=side,
+            detail=f"{v.upper()} reduce-only market order submitted",
+            raw=result,
+        )
+    except ExchangeCapabilityError as exc:
+        return _fail("reduce_only_gate", str(exc), venue=v)
+    except Exception as exc:
+        return _fail("reduce_only_submit", f"{v.upper()} reduce-only 下单失败: {exc}", venue=v)
+
+
 def close_position(symbol: str, *, venue: str = "gate", adapter: Any = None,
                    environment: Optional[str] = None, pos_side: Optional[str] = None) -> RouteResult:
     """市价全平（close=true + ioc），依赖同前：开闸 + 凭证。"""
@@ -893,8 +1021,9 @@ def close_position(symbol: str, *, venue: str = "gate", adapter: Any = None,
     if isinstance(data, dict) and data.get("closed") is False:
         return _fail("close", f"{v.upper()} 平仓未受理: {data.get('reason') or data}", venue=v, asset=asset)
     if close_evidence is not None:
-        close_evidence["order_id"] = str(data.get("order_id") or data.get("id") or "") or None
-        close_evidence["order_status"] = str(data.get("status") or "UNKNOWN")
+        evidence_data = data if isinstance(data, dict) else {}
+        close_evidence["order_id"] = str(evidence_data.get("order_id") or evidence_data.get("id") or "") or None
+        close_evidence["order_status"] = str(evidence_data.get("status") or "UNKNOWN")
         if close_evidence.get("order_id"):
             try:
                 from scripts.trader.execution_evidence import persist_venue_execution_evidence

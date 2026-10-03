@@ -148,6 +148,7 @@ class LLMModelUpsertRequest(BaseModel):
     base_url: str | None = None
     api_key: str | None = None
     api_format: str = "openai_chat"
+    api_path: str | None = None
     reasoning_type: str = "auto"
     default_effort: str | None = None
     reasoning_effort: str | None = None
@@ -169,6 +170,15 @@ class CouncilConfigUpdateRequest(BaseModel):
     # 仅保留最低安全预算；委员会超时不再人为设置 420 秒上限。
     timeout_seconds: float = Field(default=240.0, ge=30.0)
     roles: dict[str, Any]
+
+
+class FastDecisionConfigUpdateRequest(BaseModel):
+    enabled: bool = False
+    provider_id: str = ""
+    model_id: str = ""
+    timeout_seconds: float = Field(default=8.0, ge=1.0, le=120.0)
+    decision_ttl_seconds: float = Field(default=45.0, ge=1.0, le=3600.0)
+    action_dedup_seconds: float = Field(default=60.0, ge=1.0, le=3600.0)
 
 
 class CouncilApplySuiteRequest(BaseModel):

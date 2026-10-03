@@ -144,6 +144,11 @@ def load_council_config(equity: float | None = None) -> Dict[str, Any]:
     损坏 → 先备份成 `council_config_corrupt_*.json` 再重建默认（留痕可恢复）。
     """
     global_timeout = _global_council_timeout()
+    if isinstance(COUNCIL_CONFIG_FILE, (str, Path)) and Path(COUNCIL_CONFIG_FILE).is_dir():
+        # A directory occupying the config path is a deployment/configuration
+        # error; fail explicitly instead of attempting an atomic replace that
+        # produces platform-dependent PermissionError/IsADirectoryError.
+        raise IsADirectoryError(str(COUNCIL_CONFIG_FILE))
     try:
         from astra_backend.equity_bands import domain_settings, resolve_council_profile
         selection_mode = domain_settings("council").get("mode")

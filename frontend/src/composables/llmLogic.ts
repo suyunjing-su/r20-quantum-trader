@@ -178,6 +178,7 @@ const DEFAULT_PATH: Record<string, string> = {
   claude_messages: '/messages',
   openai_responses: '/responses',
   openai_chat: '/chat/completions',
+  typesafe_system_one: '/systemone',
 }
 
 /**

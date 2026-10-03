@@ -16,6 +16,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from astra_backend.llm.capabilities import _detect_reasoning_type
 from astra_backend.llm.providers import _join_api_path
+from astra_backend.llm.system_one import is_system_one_format
 
 
 # Transient upstream faults (gateway route flaps, bot/rate shields, 5xx) must not
@@ -355,6 +356,8 @@ def build_request_spec(
     """Build endpoint URL, headers, and request payload according to the specific API protocol format."""
     max_tokens = _coerce_max_tokens(max_tokens)
     cleaned_url = base_url.rstrip("/")
+    if is_system_one_format(api_format):
+        raise ValueError("TypeSafe System One uses build_system_one_request, not chat messages")
     # 「API 路径」字段生效：标准路径由协议格式决定；仅非标准自定义路径覆盖之。
     custom_path = str(api_path or "").strip()
     if custom_path and not custom_path.startswith("/"):

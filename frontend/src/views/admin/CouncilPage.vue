@@ -98,6 +98,21 @@ const councilProfileDescription = ref('');
 const profileDetailVisible = ref(false);
 const profileDetail = ref<any>(null);
 const availableModels = ref<any[]>([]);
+const fastDecisionConfig = ref<any>({
+  enabled: false,
+  provider_id: '',
+  model_id: '',
+  timeout_seconds: 8,
+  decision_ttl_seconds: 45,
+  action_dedup_seconds: 60,
+});
+const fastDecisionStatus = ref<any>({ enabled: false, safe_default: true });
+const fastDecisionSaving = ref(false);
+const fastDecisionModels = computed(() => availableModels.value.filter((m: any) => {
+  const format = String(m.api_format || '').toLowerCase();
+  const caps = new Set(m.capabilities || []);
+  return format === 'typesafe_system_one' && (caps.has('structured_decision') || caps.has('system_one'));
+}));
 /** 审计 P1-4b：席位绑定的 model_id 不在模型库 → 后端会静默回落主脑，UI 必须说出来 */
 function modelMissing(role: any): boolean {
   return isModelMissing(role, availableModels.value);
@@ -189,10 +204,18 @@ async function loadData() {
       api('/api/v1/admin/council/config'),
       api('/api/v1/admin/llm/models'),
     ]);
+    let fastRes: any = {};
+    try {
+      fastRes = await api('/api/v1/admin/fast-decision/config');
+    } catch {
+      fastRes = {};
+    }
     councilConfig.value = cRes;
     availableSuites.value = cRes.available_suites || [];
     councilProfiles.value = cRes.profiles || [];
     availableModels.value = mRes.models || [];
+    fastDecisionConfig.value = { ...fastDecisionConfig.value, ...(fastRes.config || {}) };
+    fastDecisionStatus.value = fastRes.status || fastDecisionStatus.value;
     expandedRole.value = nextExpandedRole(Object.keys(cRes.roles || {}), expandedRole.value);
   } catch (e: any) {
     loadError.value = e.message;
@@ -202,6 +225,28 @@ async function loadData() {
   }
 }
 
+async function saveFastDecisionConfig() {
+  if (!auth.isSuperadmin) return;
+  fastDecisionSaving.value = true;
+  try {
+    const selected = fastDecisionModels.value.find((m: any) => m.id === fastDecisionConfig.value.model_id);
+    const payload = {
+      ...fastDecisionConfig.value,
+      provider_id: selected?.provider_id || fastDecisionConfig.value.provider_id || '',
+    };
+    const res = await api('/api/v1/admin/fast-decision/config', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    });
+    fastDecisionConfig.value = res.config;
+    fastDecisionStatus.value = res.status;
+    toast.ok(t('admin.council.fastDecisionSaved'));
+  } catch (e: any) {
+    toast.err(t('admin.council.fastDecisionSaveFailed', undefined, { msg: e.message }));
+  } finally {
+    fastDecisionSaving.value = false;
+  }
+}
 async function saveConfig() {
   if (!auth.isSuperadmin) {
     toast.err(t('admin.council.superadminOnly'));
@@ -628,8 +673,8 @@ onMounted(loadData);
         </div>
 
         <div class="cn-rules-foot" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
-          <input v-model="councilProfileName" class="field" maxlength="80" placeholder="保存当前委员会方案名称" :disabled="!auth.isSuperadmin" />
-          <input v-model="councilProfileDescription" class="field" maxlength="240" placeholder="说明（可选）" :disabled="!auth.isSuperadmin" />
+          <input v-model="councilProfileName" class="field" maxlength="80" placeholder="保存当前委员会方案名称" :aria-label="t('admin.council.profileNameAria')" :disabled="!auth.isSuperadmin" />
+          <input v-model="councilProfileDescription" class="field" maxlength="240" placeholder="说明（可选）" :aria-label="t('admin.council.profileDescriptionAria')" :disabled="!auth.isSuperadmin" />
           <button type="button" class="btn btn-ghost btn-sm" :disabled="!auth.isSuperadmin || !councilProfileName.trim()" @click="saveCouncilProfile">
             <Save :size="13" /> 保存方案
           </button>
@@ -639,6 +684,44 @@ onMounted(loadData);
             <button type="button" class="btn btn-ghost btn-xs" :disabled="!auth.isSuperadmin" title="用当前配置覆盖该方案" @click.stop="updateCouncilProfile(profile)">更新</button>
             <button type="button" class="btn btn-ghost btn-xs" :disabled="!auth.isSuperadmin" @click.stop="deleteCouncilProfile(profile)">×</button>
           </span>
+        </div>
+      </section>
+
+      <!-- ══ 独立保护判断：不属于投委会席位，不参与辩论或投票 ══ -->
+      <section class="card fast-decision-card">
+        <header class="card-head">
+          <div>
+            <h2 class="card-title"><Shield :size="14" />{{ t('admin.council.fastDecisionTitle') }}</h2>
+            <p class="card-sub">{{ t('admin.council.fastDecisionDesc') }}</p>
+          </div>
+          <BaseSwitch v-model="fastDecisionConfig.enabled" :disabled="!auth.isSuperadmin" :label="t('admin.council.fastDecisionTitle')" />
+        </header>
+        <div class="cn-rules-foot fast-decision-grid">
+          <label class="field-stack">
+            <span class="form-label">{{ t('admin.council.fastDecisionModel') }}</span>
+            <select v-model="fastDecisionConfig.model_id" class="field" :disabled="!auth.isSuperadmin">
+              <option value="">{{ t('admin.council.fastDecisionChooseModel') }}</option>
+              <option v-for="m in fastDecisionModels" :key="`${m.provider_id}:${m.id}`" :value="m.id">
+                {{ m.name || m.id }} · {{ m.provider_name || m.provider_id }}
+              </option>
+            </select>
+          </label>
+          <label class="field-stack">
+            <span class="form-label">{{ t('admin.council.fastDecisionTimeout') }}</span>
+            <input v-model.number="fastDecisionConfig.timeout_seconds" type="number" min="1" max="120" class="field num" :disabled="!auth.isSuperadmin" />
+          </label>
+          <label class="field-stack">
+            <span class="form-label">{{ t('admin.council.fastDecisionTtl') }}</span>
+            <input v-model.number="fastDecisionConfig.decision_ttl_seconds" type="number" min="1" max="3600" class="field num" :disabled="!auth.isSuperadmin" />
+          </label>
+        </div>
+        <div class="cn-rules-foot fast-decision-foot">
+          <span class="fast-decision-note">
+            {{ fastDecisionStatus.runtime_error || (fastDecisionStatus.enabled ? t('admin.council.fastDecisionOn') : t('admin.council.fastDecisionOff')) }}
+          </span>
+          <button type="button" class="btn btn-primary btn-sm" :disabled="fastDecisionSaving || !auth.isSuperadmin" @click="saveFastDecisionConfig">
+            {{ fastDecisionSaving ? t('admin.council.saving') : t('admin.council.fastDecisionSave') }}
+          </button>
         </div>
       </section>
 
@@ -1607,5 +1690,26 @@ onMounted(loadData);
 .cn-file {
   font-size: var(--text-xs);
   color: var(--ds-color-text-description);
+}
+.fast-decision-grid {
+  display: grid;
+  grid-template-columns: minmax(240px, 2fr) minmax(120px, 1fr) minmax(120px, 1fr);
+  gap: var(--ds-space-3);
+}
+.fast-decision-foot {
+  display: flex;
+  align-items: center;
+  gap: var(--ds-space-3);
+  justify-content: flex-end;
+}
+.fast-decision-note {
+  margin-right: auto;
+  color: var(--ds-color-text-description);
+  font-size: var(--text-3xs);
+}
+@media (max-width: 760px) {
+  .fast-decision-grid { grid-template-columns: 1fr; }
+  .fast-decision-foot { align-items: stretch; flex-direction: column; }
+  .fast-decision-note { margin-right: 0; }
 }
 </style>

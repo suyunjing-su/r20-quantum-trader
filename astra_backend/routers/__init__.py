@@ -5,6 +5,7 @@ from .exchanges import router as exchanges_router
 from .risk import router as risk_router
 from .strategy import router as strategy_router
 from .llm import router as llm_router
+from .fast_decision import router as fast_decision_router
 from .gateway import router as gateway_router
 from .dashboard import router as dashboard_router
 from .plaza import router as plaza_router
@@ -17,6 +18,7 @@ __all__ = [
     "risk_router",
     "strategy_router",
     "llm_router",
+    "fast_decision_router",
     "gateway_router",
     "dashboard_router",
     "plaza_router",

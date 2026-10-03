@@ -14,6 +14,7 @@ from astra_backend.schemas import (
     LLMModelUpsertRequest,
     LLMFetchModelsRequest,
 )
+from astra_backend.llm.system_one import SYSTEM_ONE_CAPABILITY, is_system_one_format
 from astra_backend.llm_manager import (
     load_llm_config,
     get_active_llm_runtime,
@@ -102,6 +103,12 @@ def admin_test_llm(payload: LLMTestRequest, x_astra_session: str | None = Header
 
     raw_config = load_llm_config(mask_keys=False)
     m_entry = next((m for m in raw_config.get("models", []) if m["id"] == payload.model), None)
+    if payload.provider_id and m_entry and str(m_entry.get("provider_id") or "") != str(payload.provider_id):
+        raise HTTPException(status_code=400, detail="所选模型不属于所选供应商")
+    p_entry = next((p for p in raw_config.get("providers", []) if p.get("id") == payload.provider_id), None)
+    if p_entry and p_entry.get("enabled") is False:
+        raise HTTPException(status_code=409, detail="所选供应商已禁用，不能执行连接测试")
+
     if m_entry:
         if not base_url:
             base_url = m_entry.get("base_url")
@@ -118,17 +125,30 @@ def admin_test_llm(payload: LLMTestRequest, x_astra_session: str | None = Header
         if not payload.api_format:
             api_format = active_runtime.get("api_format", "openai_chat")
 
+    if is_system_one_format(api_format):
+        if not payload.provider_id or not p_entry or not m_entry:
+            raise HTTPException(status_code=400, detail="System One 测试必须选择已登记的 TypeSafe 供应商与模型")
+        if not is_system_one_format(p_entry.get("api_format")) or str(m_entry.get("provider_id")) != str(payload.provider_id):
+            raise HTTPException(status_code=400, detail="System One 模型与供应商协议/归属不匹配")
+        capabilities = set(m_entry.get("capabilities") or [])
+        if SYSTEM_ONE_CAPABILITY not in capabilities and "system_one" not in capabilities:
+            raise HTTPException(status_code=400, detail="所选模型未声明 System One structured_decision 能力")
+        if not api_key:
+            raise HTTPException(status_code=409, detail="TypeSafe 供应商缺少 API Key")
+
     fn_test = app_attr("test_llm_connection", test_llm_connection)
-    result = fn_test(
-        base_url=base_url or "",
-        api_key=api_key or "",
-        model=payload.model,
-        api_format=api_format,
-        reasoning_effort=payload.reasoning_effort,
-        reasoning_type=payload.reasoning_type,
-        timeout=25.0,
-        max_tokens=payload.max_tokens,
-    )
+    test_kwargs = {
+        "base_url": base_url or "",
+        "api_key": api_key or "",
+        "model": payload.model,
+        "api_format": api_format,
+        "reasoning_effort": payload.reasoning_effort,
+        "reasoning_type": payload.reasoning_type,
+        "timeout": 25.0,
+    }
+    if payload.max_tokens is not None:
+        test_kwargs["max_tokens"] = payload.max_tokens
+    result = fn_test(**test_kwargs)
     audit_record("llm.connection.test", "success" if result.get("ok") else "failed", {
         "model": payload.model,
         "api_format": api_format,

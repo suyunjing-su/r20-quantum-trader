@@ -38,8 +38,12 @@ def _detect_reasoning_type(model_id: str) -> str:
     return "auto"
 
 
-def _detect_capabilities(model_id: str) -> List[str]:
+def _detect_capabilities(model_id: str, api_format: str | None = None) -> List[str]:
     m = model_id.lower()
+    if str(api_format or "").strip().lower() in {"typesafe_system_one", "system_one", "typesafe"}:
+        # System One is a typed decision protocol, not a chat model.  Do not
+        # infer this capability from a model name alone.
+        return ["structured_decision", "system_one"]
     caps = ["chat"]
     # 视觉能力按「显式多模态标记 ∪ 家族默认」判定，而非靠 flash 这类词——
     # 历史版本把 "flash" 当视觉关键词，会误标 deepseek-v4-flash 等纯文本模型。
@@ -65,7 +69,10 @@ def _detect_capabilities(model_id: str) -> List[str]:
     return caps
 
 
-def _detect_api_format(url: str, model_id: str) -> str:
+def _detect_api_format(url: str, model_id: str, configured_format: str | None = None) -> str:
+    explicit = str(configured_format or "").strip().lower()
+    if explicit in {"typesafe_system_one", "system_one", "typesafe"}:
+        return "typesafe_system_one"
     u = url.lower()
     m = model_id.lower()
     if "anthropic.com" in u or "claude" in u or "claude" in m and "messages" in u:

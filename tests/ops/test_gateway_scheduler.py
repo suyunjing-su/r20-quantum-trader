@@ -386,6 +386,7 @@ class TickTests(unittest.TestCase):
         self.scheduler = GatewayScheduler(self.store, max_workers=1)
         self.addCleanup(self.scheduler.shutdown)
         self.scheduler.executor = MagicMock()
+        self.scheduler.fast_decision_executor = MagicMock()
         self.now = datetime(2026, 9, 1, 18, 0, tzinfo=BJ)
         self.schedule = patch.object(SCH, "load_schedule", return_value={}).start()
         self.due = patch.object(self.scheduler, "due", return_value=True).start()
@@ -428,9 +429,14 @@ class TickTests(unittest.TestCase):
         bound method 对象，`is` 永远为假（同一个 self 也不行）。比 `__func__`/`__self__`。"""
         self._future()
         self.scheduler.tick(self.now)
-        submitted = self.scheduler.executor.submit.call_args_list[0][0][0]
-        self.assertIs(submitted.__func__, GatewayScheduler._execute)
-        self.assertIs(submitted.__self__, self.scheduler)
+        submissions = [
+            call[0][0]
+            for executor in (self.scheduler.executor, self.scheduler.fast_decision_executor)
+            for call in executor.submit.call_args_list
+        ]
+        self.assertTrue(submissions)
+        self.assertTrue(all(submitted.__func__ is GatewayScheduler._execute for submitted in submissions))
+        self.assertTrue(all(submitted.__self__ is self.scheduler for submitted in submissions))
 
     def test_no_state_is_written_when_nothing_is_due(self):
         self._future()

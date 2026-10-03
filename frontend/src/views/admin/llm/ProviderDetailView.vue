@@ -133,6 +133,7 @@ function monogram(name: string): string {
               <option value="openai_chat">OpenAI Chat (/chat/completions)</option>
               <option value="claude_messages">Claude Messages (/messages)</option>
               <option value="openai_responses">OpenAI Responses (/responses)</option>
+              <option value="typesafe_system_one">TypeSafe System One (/systemone)</option>
             </select>
           </div>
 
@@ -220,6 +221,14 @@ function monogram(name: string): string {
           </button>
         </footer>
       </section>
+
+      <section v-if="providerForm.api_format === 'typesafe_system_one'" class="card pd-protocol-card">
+        <header class="card-head">
+          <h2 class="card-title"><Brain :size="14" />{{ t('admin.llm.systemOneExampleTitle') }}</h2>
+        </header>
+        <p class="pd-protocol-desc">{{ t('admin.llm.systemOneExampleDesc') }}</p>
+        <pre class="pd-protocol-example">{{ t('admin.llm.systemOneExample') }}</pre>
+      </section>
     </template>
 
     <!-- ══════════ Tab B：模型 ══════════ -->
@@ -245,6 +254,9 @@ function monogram(name: string): string {
               </div>
 
               <div class="pd-caps">
+                <span v-if="m.capabilities?.includes('structured_decision') || m.capabilities?.includes('system_one')" class="badge badge-accent">
+                  {{ t('admin.llm.capStructuredDecision') }}
+                </span>
                 <span v-if="m.capabilities?.includes('chat')" class="badge">{{ t('admin.llm.capChat') }}</span>
                 <span v-if="m.capabilities?.includes('vision')" class="badge">
                   <ImageIcon :size="11" />{{ t('admin.llm.capVision') }}
@@ -417,6 +429,27 @@ function monogram(name: string): string {
   font-size: var(--text-4xs);
   line-height: var(--leading-body);
   color: var(--ds-color-text-placeholder);
+}
+.pd-protocol-card {
+  overflow: hidden;
+}
+.pd-protocol-desc {
+  margin: 0;
+  padding: 0 var(--ds-space-4) var(--ds-space-3);
+  color: var(--ds-color-text-description);
+  font-size: var(--text-xs);
+  line-height: var(--leading-body);
+}
+.pd-protocol-example {
+  margin: 0 var(--ds-space-4) var(--ds-space-4);
+  padding: var(--ds-space-3);
+  overflow-x: auto;
+  border: 1px solid var(--ds-color-border-default);
+  border-radius: var(--ds-radius-sm);
+  background: var(--ds-color-bg-surface-inset);
+  color: var(--ds-color-text-description);
+  font: var(--text-4xs)/1.6 var(--font-mono);
+  white-space: pre-wrap;
 }
 .pd-key {
   position: relative;

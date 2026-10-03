@@ -70,10 +70,24 @@ export const zhAdminLlm = {
   baseUrlPlaceholder: '按供应商要求原样填写，如 https://open.bigmodel.cn/api/paas/v4',
   baseUrlDesc: '已取消自动补 /v1：带版本路径（/v1、/v4、/v1beta 等）以填写内容为准，直接拼接请求端点；仅裸域名自动兼容补 /v1。',
   apiPath: 'API 路径',
+  systemOneExampleTitle: 'TypeSafe System One 原生请求',
+  systemOneExampleDesc: '该协议不是 Chat Completions，也不是 Claude Messages；页面不会渲染真实密钥。',
+  systemOneExample: `POST /v1/systemone
+Authorization: Bearer [已配置的供应商密钥]
+Content-Type: application/json
+
+{
+  "model": "<已登记的 System One 模型>",
+  "state": { },
+  "questions": { }
+}
+
+响应：{ "model": "...", "answers": { }, "usage": { } }`,
   deleteProvider: '删除供应商',
   saveProvider: '保存供应商配置',
   brainActiveModel: '主脑生效',
   capChat: '聊天',
+  capStructuredDecision: '结构化决策',
   capVision: 'T图 > T',
   capToolsTitle: '支持工具调用',
   capReasonTitle: '支持长链推演',
@@ -120,6 +134,7 @@ export const zhAdminLlm = {
   capVisionFull: 'T图 > T (vision)',
   capToolsFull: '工具调用 (tools)',
   capCotFull: '链式思考 (CoT)',
+  capStructuredDecisionFull: '结构化决策 (System One)',
   effortLabel: '思考推演强度',
   contextLen: '上下文上限长度 (Tokens)',
   maxTokensLabel: '最大输出 Tokens',

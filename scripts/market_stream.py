@@ -1,16 +1,17 @@
 """公共行情 WebSocket 流（**只读**；不参与任何交易决策/下单路径）。
 
-## 定位（先读这段，避免误用）
+## 定位
 
-本模块是 roadmap「从轮询迈向流式」的**基础层**，本刀只交付：
+本模块是公共行情 WebSocket 的唯一基础层，提供：
 
 1. **帧解析**：把三所公共行情的原始帧归一成 tick；
-2. **有界缓冲**：每个标的只留最近 N 条 tick（内存有界，绝不攒无界表）；
-3. **健康账本**：帧数/tick 数/解析失败/连接错误/**陈旧度**；
-4. **探测 CLI**：`python -m scripts.market_stream --probe`（只读、按需跑、不常驻）。
+2. **有界缓冲**：每个标的只留最近 N 条 tick；
+3. **健康账本**：帧数/tick 数/解析失败/连接错误/陈旧度；
+4. **常驻管理器**：`MarketStreamManager` 复用上述连接、解析和健康账本，在 Gateway worker 生命周期内运行；
+5. **探测 CLI**：`python -m scripts.market_stream --probe` 仍然只读、按需运行。
 
-**它不**：不常驻、不接决策路径、不改任何下单行为。现有 REST 取数（
-`market_data_service`）一字未动 —— 流式是**并存**的观测与未来取数面，不是替换。
+`MarketStreamManager` 只负责市场事件和一个有界 callback，不执行 LLM 调用、不执行交易。
+现有 REST 取数（`market_data_service`）仍保持不变；本模块没有新建第二条行情采集链。
 
 ## 三条被真实端点教出来的规则（本机实跑核对，2026-09-20）
 
@@ -42,7 +43,7 @@ import tempfile
 import threading
 import time
 from collections import deque
-from typing import Any, Deque, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Deque, Dict, List, Optional, Sequence, Tuple
 
 #: 快照格式版本（跨进程契约；加字段就升版本）
 SCHEMA_VERSION = 1
@@ -66,7 +67,10 @@ __all__ = [
     "parse_frame",
     "stream_url",
     "venue_symbol",
+    "stream_url_for_symbols",
     "subscribe_payload",
+    "subscribe_payload_for_symbols",
+    "MarketStreamManager",
     "write_snapshot",
     "load_snapshot",
     "probe",
@@ -121,15 +125,126 @@ def stream_url(venue: str, symbol: str) -> str:
 
 
 def subscribe_payload(venue: str, symbol: str) -> Optional[Dict[str, Any]]:
-    """非路径式场所的订阅帧；路径式场所返回 None（不发订阅帧）。"""
-    if venue in _PATH_SUBSCRIBE:
+    """Compatibility wrapper for the original one-symbol probe API."""
+    return subscribe_payload_for_symbols(venue, (symbol,))
+
+
+def stream_url_for_symbols(venue: str, symbols: Sequence[str]) -> str:
+    """Build one long-lived venue connection for a bounded symbol set."""
+    normalized = [venue_symbol(venue, item) for item in symbols if str(item or "").strip()]
+    if not normalized:
+        raise ValueError("至少需要一个行情标的")
+    if venue == "binance":
+        streams = "/".join(f"{item.lower()}@trade" for item in normalized)
+        return f"wss://fstream.binance.com/stream?streams={streams}"
+    return VENUE_ENDPOINTS[venue]
+
+
+def subscribe_payload_for_symbols(venue: str, symbols: Sequence[str]) -> Optional[Dict[str, Any]]:
+    """Build the existing protocol's bounded multi-symbol subscription frame."""
+    normalized = [venue_symbol(venue, item) for item in symbols if str(item or "").strip()]
+    if venue == "binance":
         return None
     if venue == "okx":
-        return {"op": "subscribe", "args": [{"channel": "tickers", "instId": symbol}]}
+        return {"op": "subscribe", "args": [{"channel": "tickers", "instId": item} for item in normalized]}
     if venue == "gate":
-        return {"time": int(time.time()), "channel": "futures.tickers",
-                "event": "subscribe", "payload": [symbol]}
+        return {"time": int(time.time()), "channel": "futures.tickers", "event": "subscribe", "payload": normalized}
     raise KeyError(f"未知场所：{venue}")
+
+
+class MarketStreamManager:
+    """Resident adapter around this module's existing public market stream.
+
+    It owns one bounded connection per venue, keeps parsing and health accounting in
+    this module, and invokes a cheap callback only after a valid tick.  Consumers
+    must coalesce work in the callback; this class never performs LLM calls.
+    """
+
+    def __init__(self, *, venues: Sequence[str] = ("okx", "gate", "binance"),
+                 symbols: Sequence[str] = ("BTC-USDT-SWAP",),
+                 on_tick: Optional[Callable[[Dict[str, Any]], None]] = None,
+                 snapshot_path: Optional[str] = None,
+                 connect_factory: Any = None,
+                 reconnect_seconds: float = 1.0) -> None:
+        self.venues = tuple(str(item).lower() for item in venues)
+        self.symbols = tuple(str(item) for item in symbols if str(item or "").strip())
+        self.on_tick = on_tick
+        self.snapshot_path = snapshot_path
+        self.connect_factory = connect_factory
+        self.reconnect_seconds = max(0.1, float(reconnect_seconds))
+        self.health = StreamHealth()
+        self.buffer = TickBuffer()
+        self._stop = threading.Event()
+        self._threads: list[threading.Thread] = []
+        self._write_lock = threading.Lock()
+
+    def start(self) -> None:
+        if self._threads:
+            return
+        if not self.symbols:
+            return
+        self._stop.clear()
+        for venue in self.venues:
+            thread = threading.Thread(target=self._run_venue, args=(venue,),
+                                      name=f"astra-market-{venue}", daemon=True)
+            self._threads.append(thread)
+            thread.start()
+
+    def stop(self, timeout: float = 3.0) -> None:
+        self._stop.set()
+        for thread in self._threads:
+            thread.join(timeout=max(0.0, float(timeout)))
+        self._threads.clear()
+
+    def snapshot(self) -> Dict[str, Any]:
+        payload = self.health.snapshot()
+        payload["buffers"] = self.buffer.sizes()
+        if self.snapshot_path:
+            with self._write_lock:
+                payload["written"] = write_snapshot(self.snapshot_path, payload)
+        return payload
+
+    def _run_venue(self, venue: str) -> None:
+        factory = self.connect_factory
+        if factory is None:
+            try:
+                from websockets.sync.client import connect as factory  # type: ignore[no-redef]
+            except Exception as exc:
+                self.health.note_error(venue, f"connect import failed: {exc}")
+                return
+        while not self._stop.is_set():
+            frames = 0
+            try:
+                url = stream_url_for_symbols(venue, self.symbols)
+                with factory(url, open_timeout=8, close_timeout=3) as ws:
+                    payload = subscribe_payload_for_symbols(venue, self.symbols)
+                    if payload is not None:
+                        ws.send(json.dumps(payload))
+                    while not self._stop.is_set():
+                        try:
+                            raw = ws.recv(timeout=2.0)
+                        except Exception:
+                            break
+                        parsed = parse_frame(venue, raw)
+                        frames += 1
+                        for tick in parsed["ticks"]:
+                            self.buffer.put(tick)
+                            if self.on_tick is not None:
+                                try:
+                                    self.on_tick(dict(tick))
+                                except Exception as exc:
+                                    self.health.note_error(venue, f"tick callback failed: {exc}")
+                        self.health.note_frame(venue, ticks=len(parsed["ticks"]), error=parsed["error"])
+                if frames == 0 and not self._stop.is_set():
+                    self.health.note_error(venue, "长连接窗口内没有收到数据帧")
+                if not self._stop.is_set():
+                    self.health.note_reconnect(venue)
+                    self._stop.wait(self.reconnect_seconds)
+            except Exception as exc:
+                self.health.note_error(venue, f"{type(exc).__name__}: {exc}")
+                if not self._stop.is_set():
+                    self.health.note_reconnect(venue)
+                    self._stop.wait(self.reconnect_seconds)
 
 
 def _tick(venue: str, symbol: str, price: Any, *, kind: str,

@@ -26,6 +26,8 @@ const {
   toggleCapability,
 } = useLlmCtx()
 
+const isSystemOne = computed(() => selectedProvider.value?.api_format === 'typesafe_system_one')
+
 /** 能力标签（旧版把同一段三元样式写了 4 遍，只有 key 与文案不同）
  *  存**完整键路径**并直接 `t(c.labelKey)`，避免拼接键逃过 i18n 静态校验。 */
 const CAPABILITIES = [
@@ -33,6 +35,7 @@ const CAPABILITIES = [
   { key: 'vision', labelKey: 'admin.llm.capVisionFull' },
   { key: 'tools', labelKey: 'admin.llm.capToolsFull' },
   { key: 'reasoning', labelKey: 'admin.llm.capCotFull' },
+  { key: 'structured_decision', labelKey: 'admin.llm.capStructuredDecisionFull' },
 ]
 
 const title = computed(() =>
@@ -74,7 +77,7 @@ const title = computed(() =>
         <span class="form-label">{{ t('admin.llm.capBadges') }}</span>
         <div class="me-caps">
           <button
-            v-for="c in CAPABILITIES"
+            v-for="c in CAPABILITIES.filter((item) => !isSystemOne || item.key === 'structured_decision')"
             :key="c.key"
             type="button"
             class="me-cap"
@@ -86,7 +89,7 @@ const title = computed(() =>
         </div>
       </div>
 
-      <label class="field-stack me-field">
+      <label v-if="!isSystemOne" class="field-stack me-field">
         <span class="form-label">{{ t('admin.llm.effortLabel') }}</span>
         <select v-model="modelForm.reasoning_effort" class="field me-select" :aria-label="t('admin.llm.effortLabel')">
           <option v-for="opt in availableEffortOptions" :key="opt.value" :value="opt.value">
@@ -95,7 +98,7 @@ const title = computed(() =>
         </select>
       </label>
 
-      <label class="field-stack me-field">
+      <label v-if="!isSystemOne" class="field-stack me-field">
         <span class="form-label">{{ t('admin.llm.contextLen') }}</span>
         <input
           v-model.number="modelForm.context_length"
@@ -106,7 +109,7 @@ const title = computed(() =>
         />
       </label>
 
-      <label class="field-stack me-field">
+      <label v-if="!isSystemOne" class="field-stack me-field">
         <span class="form-label">{{ t('admin.llm.maxTokensLabel') }}</span>
         <span class="form-hint">{{ t('admin.llm.maxTokensHelp') }}</span>
         <input
