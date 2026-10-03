@@ -127,6 +127,7 @@ def admin_test_llm(payload: LLMTestRequest, x_astra_session: str | None = Header
         reasoning_effort=payload.reasoning_effort,
         reasoning_type=payload.reasoning_type,
         timeout=25.0,
+        max_tokens=payload.max_tokens,
     )
     audit_record("llm.connection.test", "success" if result.get("ok") else "failed", {
         "model": payload.model,

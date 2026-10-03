@@ -149,6 +149,7 @@ def init_llm_config(config_file: Path) -> Dict[str, Any]:
                 "reasoning_effort": m.get("reasoning_effort") or m.get("default_effort", "high"),
                 "capabilities": m.get("capabilities", _detect_capabilities(mid)),
                 "context_length": m.get("context_length"),
+                "max_tokens": m.get("max_tokens"),
                 "description": m.get("description", ""),
             }
 
@@ -324,6 +325,7 @@ def get_active_llm_runtime(config: Dict[str, Any]) -> Dict[str, Any]:
         "api_path": prov_api_path,
         "reasoning_effort": active_effort,
         "reasoning_type": reasoning_type,
+        "max_tokens": target_model.get("max_tokens") if target_model else None,
         "thinking_timeout": thinking_timeout,
         "request_attempts": config.get("request_attempts", DEFAULT_REQUEST_ATTEMPTS),
         "fallback_model_ids": config.get("fallback_model_ids", []),
@@ -364,6 +366,7 @@ def resolve_model_runtime(config: Dict[str, Any], model_id: str) -> Optional[Dic
         "api_path": str(target.get("api_path", "") or ""),
         "reasoning_effort": effort if effort in STANDARD_REASONING_EFFORTS else "high",
         "reasoning_type": reasoning_type,
+        "max_tokens": target.get("max_tokens"),
         "thinking_timeout": thinking_timeout,
     }
 
@@ -590,6 +593,16 @@ def upsert_model(config_file: Path, reload_config: Callable[[], Dict[str, Any]],
     desc = str(model_data.get("description", "")).strip()
     caps = model_data.get("capabilities") or _detect_capabilities(mid)
     ctx_len = model_data.get("context_length")
+    raw_max_tokens = model_data.get("max_tokens")
+    if raw_max_tokens in (None, ""):
+        max_tokens = None
+    else:
+        try:
+            max_tokens = int(raw_max_tokens)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("最大输出 Tokens 必须是整数") from exc
+        if not 256 <= max_tokens <= 131072:
+            raise ValueError("最大输出 Tokens 必须在 256 到 131072 之间")
 
     if not mid:
         raise ValueError("模型 ID 不能为空")
@@ -629,6 +642,7 @@ def upsert_model(config_file: Path, reload_config: Callable[[], Dict[str, Any]],
         base_url=base_url,
         caps=caps,
         ctx_len=ctx_len,
+        max_tokens=max_tokens,
         default_effort=default_effort,
         desc=desc,
         existing=existing,
@@ -642,6 +656,7 @@ def upsert_model(config_file: Path, reload_config: Callable[[], Dict[str, Any]],
     write_model_into_providers_local_list(
         caps=caps,
         ctx_len=ctx_len,
+        max_tokens=max_tokens,
         default_effort=default_effort,
         desc=desc,
         mid=mid,

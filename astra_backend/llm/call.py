@@ -214,6 +214,7 @@ def execute_llm_request(get_active_runtime: Callable[[], Dict[str, Any]], resolv
     response_format: Optional[Dict[str, Any]] = None,
     timeout: Optional[float] = None,
     allow_fallback: bool = True,
+    max_tokens: Optional[int] = None,
 ) -> Tuple[str, str, Dict[str, Any], int]:
     """Unified resilient executor for LLM calls across all 3 protocols.
 
@@ -251,6 +252,7 @@ def execute_llm_request(get_active_runtime: Callable[[], Dict[str, Any]], resolv
         "api_path": "" if base_url else str(runtime.get("api_path", "") or ""),
         "reasoning_effort": target_effort,
         "reasoning_type": target_rtype,
+        "max_tokens": max_tokens if max_tokens is not None else runtime.get("max_tokens"),
     }
     candidates: List[Dict[str, Any]] = [primary]
     if allow_fallback:
@@ -263,6 +265,8 @@ def execute_llm_request(get_active_runtime: Callable[[], Dict[str, Any]], resolv
             # 调用方显式指定 timeout 时统一预算；否则用回退模型自身的思考上限
             if timeout is not None and float(timeout) > 0:
                 rt["thinking_timeout"] = float(timeout)
+            if max_tokens is not None:
+                rt["max_tokens"] = max_tokens
             candidates.append(rt)
 
     call_started = time.perf_counter()
@@ -356,6 +360,7 @@ def test_llm_connection(reload_config: Callable[[], Dict[str, Any]],
     reasoning_type: str = "auto",
     timeout: float = 15.0,
     api_path: str = "",
+    max_tokens: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Execute a real diagnostic ping across any of the 3 API formats."""
     cleaned_url = str(base_url or "").strip().rstrip("/")
@@ -382,6 +387,7 @@ def test_llm_connection(reload_config: Callable[[], Dict[str, Any]],
         reasoning_effort=reasoning_effort,
         temperature=0.1,
         reasoning_type=reasoning_type,
+        max_tokens=max_tokens or 8192,
         api_path=api_path or _lookup_api_path(reload_config, cleaned_url, model),
     )
 
@@ -440,7 +446,7 @@ def test_llm_connection(reload_config: Callable[[], Dict[str, Any]],
         ])
         if is_param_conflict and api_format == "openai_chat":
             try:
-                fb_payload = {"model": model, "messages": test_messages, "stream": True}
+                fb_payload = {"model": model, "messages": test_messages, "max_tokens": max_tokens or 8192, "stream": True}
                 fb_req = urllib.request.Request(endpoint, data=json.dumps(fb_payload).encode("utf-8"), headers=headers)
                 t1 = time.perf_counter()
                 with urllib.request.urlopen(fb_req, timeout=timeout) as fb_resp:

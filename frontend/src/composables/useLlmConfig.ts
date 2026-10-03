@@ -462,6 +462,7 @@ function openAddModelModal() {
     capabilities: ['chat'],
     reasoning_effort: 'high',
     context_length: 128000,
+    max_tokens: 8192,
     description: '',
   }
   modelModalVisible.value = true
@@ -476,6 +477,7 @@ function openEditModelModal(m: any) {
     capabilities: m.capabilities || ['chat'],
     reasoning_effort: m.reasoning_effort || 'high',
     context_length: m.context_length || 128000,
+    max_tokens: m.max_tokens || 8192,
     description: m.description || '',
   }
   modelModalVisible.value = true
@@ -555,6 +557,7 @@ async function runTestModel(m: any) {
         base_url: prov?.base_url || m.base_url,
         api_format: prov?.api_format || m.api_format || 'openai_chat',
         reasoning_effort: m.reasoning_effort || 'auto',
+        max_tokens: m.max_tokens || 8192,
       }),
     })
   } catch (e: any) {

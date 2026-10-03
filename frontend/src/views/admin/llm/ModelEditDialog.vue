@@ -105,6 +105,21 @@ const title = computed(() =>
           class="field num"
         />
       </label>
+
+      <label class="field-stack me-field">
+        <span class="form-label">{{ t('admin.llm.maxTokensLabel') }}</span>
+        <span class="form-hint">{{ t('admin.llm.maxTokensHelp') }}</span>
+        <input
+          v-model.number="modelForm.max_tokens"
+          type="number"
+          inputmode="numeric"
+          min="256"
+          max="131072"
+          step="256"
+          placeholder="8192"
+          class="field num"
+        />
+      </label>
     </form>
 
     <template #footer>

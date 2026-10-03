@@ -331,6 +331,24 @@ class LlmTransportTailsTests(unittest.TestCase):
                 self.assertTrue(payload["stream"])
                 self.assertEqual(headers["Accept"], "text/event-stream")
 
+    def test_build_request_spec_honors_custom_max_tokens_for_all_protocols(self):
+        expected = {
+            "openai_chat": "max_tokens",
+            "openai_responses": "max_output_tokens",
+            "claude_messages": "max_tokens",
+        }
+        for api_format, key in expected.items():
+            with self.subTest(api_format=api_format):
+                _, _, payload = build_request_spec(
+                    "gpt-4o",
+                    [{"role": "user", "content": "hi"}],
+                    "https://api.example/v1",
+                    api_format=api_format,
+                    reasoning_effort="none" if api_format == "claude_messages" else "high",
+                    max_tokens=16384,
+                )
+                self.assertEqual(payload[key], 16384)
+
     def test_build_chat_payload_compatibility_wrapper(self):
         payload = build_chat_payload(
             model="gpt-4o",

@@ -39,6 +39,14 @@ class CouncilRosterTailsTests(unittest.TestCase):
             self.assertEqual(health[0]["mode"], "missing")
             self.assertFalse(health[0]["registered"])
 
+    def test_resolve_seat_model_preserves_model_max_tokens(self):
+        with patch("astra_backend.llm_manager.load_llm_config", return_value={
+            "models": [{"id": "deepseek", "base_url": "https://gw", "api_key": "k",
+                        "api_format": "openai_chat", "max_tokens": 16384}],
+        }):
+            res = resolve_seat_model({"model_id": "deepseek", "reasoning_effort": "low"})
+        self.assertEqual(res["max_tokens"], 16384)
+
     def test_resolve_seat_model_config_exception_returns_explicit_failure(self):
         # 模型配置读取异常时显式返回失败结构而不静默崩溃 (lines 54-57)
         with patch("astra_backend.llm_manager.load_llm_config", side_effect=RuntimeError("config broken")):

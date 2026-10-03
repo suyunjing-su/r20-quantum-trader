@@ -399,6 +399,16 @@ class ExecuteLlmRequestTests(unittest.TestCase):
         self.assertEqual(out, ("ok", "think", {"total_tokens": 1}, 5))
         self.assertEqual(rec, [], "成功且未回退 ⇒ 不记账")
 
+    def test_model_runtime_max_tokens_reaches_attempt(self):
+        seen = []
+        def attempt(cand, *args):
+            seen.append(cand)
+            return ("ok", "", {}, 1)
+        self._run(runtime={"model": "m1", "base_url": "https://a/v1",
+                           "api_key": "K", "api_format": "openai_chat",
+                           "max_tokens": 16384}, attempt=attempt)
+        self.assertEqual(seen[0]["max_tokens"], 16384)
+
     def test_an_unparsable_attempt_count_falls_back_to_the_default(self):
         # 第 236–238 行
         out, _ = self._run(runtime={"model": "m1", "request_attempts": "junk"})

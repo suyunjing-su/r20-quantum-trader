@@ -120,6 +120,8 @@ export const enAdminLlm = {
   capCotFull: 'Chain of thought (CoT)',
   effortLabel: 'Reasoning effort',
   contextLen: 'Context window (tokens)',
+  maxTokensLabel: 'Max output tokens',
+  maxTokensHelp: 'Maximum tokens generated per request; 256–131072. Blank uses 8192.',
   cancel: 'Cancel',
   saveModel: 'Save model',
   fallbackLimitErr: 'At most 5 fallback models, to avoid overrunning the whole round',

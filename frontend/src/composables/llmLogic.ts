@@ -223,6 +223,7 @@ export function buildRemoteModelPayload(
     reasoning_effort: m.default_effort || 'high',
     capabilities: m.capabilities || ['chat'],
     context_length: m.context_length,
+    max_tokens: m.max_tokens,
     description: m.description ? m.description.slice(0, 100) : t('admin.llm.remoteAutoCollected'),
   }
 }

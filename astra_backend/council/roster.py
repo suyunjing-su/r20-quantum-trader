@@ -61,14 +61,14 @@ def resolve_seat_model(role_spec: Dict[str, Any]) -> Dict[str, Any]:
     models = [i for i in (cfg.get("models") or []) if isinstance(i, dict)]
     if not requested:
         return {"model": "", "base_url": None, "api_key": None, "api_format": None,
-                "effort": effort, "requested": "",
+                "effort": effort, "max_tokens": None, "requested": "",
                 "registered": True, "fallback": False, "reason": "", "registered_ids": []}
     for item in models:
         if item.get("id") == requested:
             return {"model": item.get("id"), "base_url": item.get("base_url"),
                     "api_key": item.get("api_key"), "api_format": item.get("api_format"),
                     # 委员会席位的 reasoning_effort 是运行时覆盖，必须优先于模型库默认值。
-                    "effort": effort, "requested": requested,
+                    "effort": effort, "max_tokens": item.get("max_tokens"), "requested": requested,
                     "registered": True, "fallback": False, "reason": "", "registered_ids": []}
     return {"model": "", "base_url": None, "api_key": None, "api_format": None,
             "effort": effort, "requested": requested, "registered": False, "fallback": True,
