@@ -12,6 +12,7 @@
 def write_model_into_providers_local_list(*,
         caps,
         ctx_len,
+        max_tokens,
         default_effort,
         desc,
         mid,
@@ -28,6 +29,7 @@ def write_model_into_providers_local_list(*,
             p_existing["reasoning_type"] = reasoning_type
             p_existing["reasoning_effort"] = default_effort
             p_existing["context_length"] = ctx_len
+            p_existing["max_tokens"] = max_tokens
             p_existing["description"] = desc
         else:
             prov_models.append({
@@ -37,6 +39,7 @@ def write_model_into_providers_local_list(*,
                 "reasoning_type": reasoning_type,
                 "reasoning_effort": default_effort,
                 "context_length": ctx_len,
+                "max_tokens": max_tokens,
                 "description": desc,
             })
 
@@ -47,6 +50,7 @@ def write_model_into_top_level_list(*,
         base_url,
         caps,
         ctx_len,
+        max_tokens,
         default_effort,
         desc,
         existing,
@@ -68,6 +72,7 @@ def write_model_into_top_level_list(*,
         existing["reasoning_effort"] = default_effort
         existing["capabilities"] = caps
         existing["context_length"] = ctx_len
+        existing["max_tokens"] = max_tokens
         existing["description"] = desc
     else:
         models.append({
@@ -82,6 +87,7 @@ def write_model_into_top_level_list(*,
             "reasoning_effort": default_effort,
             "capabilities": caps,
             "context_length": ctx_len,
+            "max_tokens": max_tokens,
             "description": desc,
         })
 

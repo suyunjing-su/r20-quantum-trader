@@ -122,6 +122,8 @@ export const zhAdminLlm = {
   capCotFull: '链式思考 (CoT)',
   effortLabel: '思考推演强度',
   contextLen: '上下文上限长度 (Tokens)',
+  maxTokensLabel: '最大输出 Tokens',
+  maxTokensHelp: '每次请求允许模型输出的最大 Token 数；范围 256～131072，留空使用 8192。',
   cancel: '取消',
   saveModel: '保存模型',
   fallbackLimitErr: '回退模型最多 5 个，避免整轮推演超时',

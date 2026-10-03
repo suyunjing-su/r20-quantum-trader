@@ -117,6 +117,7 @@ class LLMTestRequest(BaseModel):
     api_format: str = "openai_chat"
     reasoning_effort: str = Field(default="auto", pattern=r"^(low|medium|high|minimal|none|auto)$")
     reasoning_type: str = "auto"
+    max_tokens: int | None = Field(default=None, ge=256, le=131072)
 
 
 class LLMProviderUpsertRequest(BaseModel):
@@ -152,6 +153,7 @@ class LLMModelUpsertRequest(BaseModel):
     reasoning_effort: str | None = None
     capabilities: list[str] | None = None
     context_length: int | None = None
+    max_tokens: int | None = Field(default=None, ge=256, le=131072)
     description: str | None = ""
 
 

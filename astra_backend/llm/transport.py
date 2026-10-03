@@ -328,6 +328,15 @@ def _read_stream_body(resp: Any) -> bytes:
     return resp.read()
 
 
+
+def _coerce_max_tokens(value: Any, default: int = 8192) -> int:
+    """Return a safe output-token budget for all supported provider protocols."""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(256, min(131072, parsed))
+
 def build_request_spec(
     model: str,
     messages: List[Dict[str, str]],
@@ -344,6 +353,7 @@ def build_request_spec(
     api_path: str = "",
 ) -> Tuple[str, Dict[str, str], Dict[str, Any]]:
     """Build endpoint URL, headers, and request payload according to the specific API protocol format."""
+    max_tokens = _coerce_max_tokens(max_tokens)
     cleaned_url = base_url.rstrip("/")
     # 「API 路径」字段生效：标准路径由协议格式决定；仅非标准自定义路径覆盖之。
     custom_path = str(api_path or "").strip()
@@ -519,6 +529,7 @@ def _attempt_llm_call(
     effective_timeout: float,
 ) -> Tuple[str, str, Dict[str, Any], int]:
     """单次请求一个模型；失败时抛 _LLMTransientError（可重试）或 _LLMHardError（换模型）。"""
+    max_tokens = _coerce_max_tokens(cand.get("max_tokens"))
     endpoint, headers, payload = build_request_spec(
         model=cand["model"],
         messages=messages,
@@ -529,6 +540,7 @@ def _attempt_llm_call(
         temperature=temperature,
         response_format=response_format,
         reasoning_type=cand.get("reasoning_type", "auto"),
+        max_tokens=max_tokens,
         api_path=cand.get("api_path", ""),
     )
 
@@ -551,7 +563,7 @@ def _attempt_llm_call(
             fb_payload = {
                 "model": cand["model"],
                 "messages": messages,
-                "max_tokens": 8192,
+                "max_tokens": max_tokens,
                 "stream": True,
             }
             fb_req = urllib.request.Request(endpoint, data=json.dumps(fb_payload).encode("utf-8"), headers=headers)

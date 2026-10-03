@@ -248,12 +248,18 @@ def execute_llm_request(
     response_format: Optional[Dict[str, Any]] = None,
     timeout: Optional[float] = None,
     allow_fallback: bool = True,
+    max_tokens: Optional[int] = None,
 ) -> Tuple[str, str, Dict[str, Any], int]:
     """薄壳：调用时解析门面模块全局（常量与函数），使测试的 patch / 直接赋值生效。
 
     实现已迁往 astra_backend.llm（结构优化阶段 2 / B4）。
     """
-    return _core_execute_llm_request(get_active_llm_runtime, resolve_model_runtime, record_failover_event, messages, model, base_url, api_key, api_format, reasoning_effort, temperature, response_format, timeout, allow_fallback)
+    args = (get_active_llm_runtime, resolve_model_runtime, record_failover_event,
+            messages, model, base_url, api_key, api_format, reasoning_effort,
+            temperature, response_format, timeout, allow_fallback)
+    if max_tokens is None:
+        return _core_execute_llm_request(*args)
+    return _core_execute_llm_request(*args, max_tokens)
 
 
 def _lookup_api_path(base_url: str, model_id: str) -> str:
@@ -273,9 +279,14 @@ def test_llm_connection(
     reasoning_type: str = "auto",
     timeout: float = 15.0,
     api_path: str = "",
+    max_tokens: Optional[int] = None,
 ) -> Dict[str, Any]:
     """薄壳：调用时解析门面模块全局（常量与函数），使测试的 patch / 直接赋值生效。
 
     实现已迁往 astra_backend.llm（结构优化阶段 2 / B4）。
     """
-    return _core_test_llm_connection(init_llm_config, base_url, api_key, model, api_format, reasoning_effort, reasoning_type, timeout, api_path)
+    args = (init_llm_config, base_url, api_key, model, api_format,
+            reasoning_effort, reasoning_type, timeout, api_path)
+    if max_tokens is None:
+        return _core_test_llm_connection(*args)
+    return _core_test_llm_connection(*args, max_tokens)

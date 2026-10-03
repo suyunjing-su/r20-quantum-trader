@@ -111,6 +111,7 @@ def _call_single_trader(resolve_seat: Callable[..., Any],
             reasoning_effort=override_effort,
             temperature=temperature,
             timeout=timeout,
+            max_tokens=resolved.get("max_tokens"),
             allow_fallback=False,  # 委员会成员优先以其登记模型作答
         )
         return {
@@ -144,6 +145,7 @@ def _call_single_trader(resolve_seat: Callable[..., Any],
                     reasoning_effort=retry_effort,
                     temperature=temperature,
                     timeout=max(20.0, timeout - 20.0),
+                    max_tokens=resolved.get("max_tokens"),
                     allow_fallback=True,
                 )
                 return {
@@ -242,6 +244,7 @@ def _call_single_trader_critique(resolve_seat: Callable[..., Any],
             reasoning_effort=override_effort,
             temperature=temperature,
             timeout=timeout,
+            max_tokens=resolved.get("max_tokens"),
             allow_fallback=False,  # 委员会成员必须以其登记模型作答，保住模型身份；只享重试
         )
         return {
@@ -587,6 +590,7 @@ def execute_council_debate(load_config: Callable[[], Dict[str, Any]], resolve_se
         temperature=cio_temperature,
         response_format={"type": "json_object"},
         timeout=cio_timeout,
+        max_tokens=cio_resolved.get("max_tokens"),
         allow_fallback=False,  # CIO 终审同理由登记模型作答；整链失败由上层降级单模型决策
     )
 
