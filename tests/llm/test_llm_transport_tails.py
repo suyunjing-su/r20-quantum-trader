@@ -16,6 +16,7 @@ import urllib.error
 from unittest.mock import MagicMock, patch
 
 from astra_backend.llm.transport import (
+    _consume_stream_response,
     _LLMHardError,
     _LLMTransientError,
     _attempt_llm_call,
@@ -40,6 +41,32 @@ def _make_mock_response(payload: dict | list | str | bytes, code: int = 200) -> 
     resp.__enter__ = lambda s: s
     resp.__exit__ = lambda *a: False
     return resp
+
+
+
+
+class _IncrementalResponse:
+    """HTTPResponse-like fixture that fails if callers buffer via read()."""
+
+    def __init__(self, body: str):
+        self._lines = [line.encode("utf-8") for line in body.splitlines(keepends=True)]
+
+    def readline(self):
+        return self._lines.pop(0) if self._lines else b""
+
+    def __iter__(self):
+        while self._lines:
+            yield self._lines.pop(0)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def read(self):
+        raise AssertionError("streaming path must not call read()")
+
 
 
 def _make_http_error(code: int, body: str | bytes = b"", msg: str = "HTTP Error") -> urllib.error.HTTPError:
@@ -318,7 +345,24 @@ class LlmTransportTailsTests(unittest.TestCase):
     # 4. 单次调用执行 (_attempt_llm_call)
     # -------------------------------------------------------------------------
     @patch("urllib.request.urlopen")
-    def test_attempt_llm_call_success(self, mock_urlopen):
+    def test_attempt_llm_call_consumes_chat_sse_incrementally(self, mock_urlopen):
+        mock_urlopen.return_value = _IncrementalResponse(
+            'data: {"choices":[{"delta":{"content":"{\\"ok\\":"}}]}\n\n'
+            'data: {"choices":[{"delta":{"content":"true}"},"finish_reason":"stop"}]}\n\n'
+            'data: {"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":2}}\n\n'
+            'data: [DONE]\n'
+        )
+        cand = {"model": "gpt-4o", "base_url": "https://api.openai.com/v1"}
+        content, reasoning, usage, _ = _attempt_llm_call(
+            cand, [{"role": "user", "content": "ping"}], 0.2, None, 10.0
+        )
+        self.assertEqual(content, '{"ok":true}')
+        self.assertEqual(reasoning, "")
+        self.assertEqual(usage["prompt_tokens"], 3)
+        request_payload = json.loads(mock_urlopen.call_args.args[0].data)
+        self.assertEqual(request_payload["stream_options"]["include_usage"], True)
+        self.assertEqual(request_payload["stream_options"]["include_obfuscation"], False)
+
         mock_urlopen.return_value = _make_mock_response({
             "choices": [{"message": {"content": "pong", "reasoning_content": "think"}}],
             "usage": {"total_tokens": 12},
