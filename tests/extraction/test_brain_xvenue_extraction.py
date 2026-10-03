@@ -34,9 +34,9 @@ SUBMODULE = ROOT / "scripts" / "brain" / "xvenue.py"
 
 # 只在子模块里存在、门面不应再有的实现体特征行
 _IMPL_ONLY_MARKERS = (
-    '            "bin_last": xv.get("bin_last"), "bin_basis_pct": _basis(xv.get("bin_last")),',
-    '                def _basis(v, _ref=okx_px):',
-    '        okx_ok = [p["name"] for p in packages if safe_float(p.get("price", 0)) > 0]',
+    '                    "bin_basis_pct": _basis(venue_prices["binance"]),',
+    '                def _basis(v, _ref=reference_price):',
+    '        okx_ok = [p["name"] for p in packages',
 )
 
 

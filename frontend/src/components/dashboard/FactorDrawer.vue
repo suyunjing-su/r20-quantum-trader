@@ -81,8 +81,13 @@ function _basis(v: unknown): string {
 }
 const cvRows = computed(() => {
   const s = cvSymbol.value;
+  const ref = String(s?.reference_venue || 'okx').toLowerCase();
+  const refLabel = ref === 'binance' ? 'Binance' : ref === 'gate' ? 'Gate' : 'OKX';
+  const refPrice = s?.reference_price ?? f.value.price;
+  const okxPrice = s?.okx_last ?? s?.okx ?? (ref === 'okx' ? refPrice : null);
   return [
-    row('OKX', fmtPrice(f.value.price), ''),
+    row(`${t('dash.matrix.venue.referencePrice')} · ${refLabel}`, _px(refPrice), ''),
+    row('OKX', s ? _px(okxPrice) + _basis(s.okx_basis_pct) : _px(okxPrice), dirClass(s?.okx_basis_pct)),
     row('Binance', s ? _px(s.bin_last) + _basis(s.bin_basis_pct) : '--', dirClass(s?.bin_basis_pct)),
     row('Gate', s ? _px(s.gate_last) + _basis(s.gate_basis_pct) : '--', dirClass(s?.gate_basis_pct)),
     row(t('dash.matrix.venue.crossLs'), s ? `${_num(s.bin_ls)} / ${_num(s.gate_ls)}` : '--', ''),

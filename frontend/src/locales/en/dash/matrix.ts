@@ -210,6 +210,7 @@ export const enMatrix = {
     thReason: 'Reason',
     noEvidence: 'No venue-decision evidence — this signal skipped the venue routing pipeline this cycle (appears automatically once generated).',
     crossTitle: 'Cross-venue · Binance / Gate',
+    referencePrice: 'Reference price',
     crossLs: 'L/S Binance/Gate',
     crossFund: 'Fund% Binance/Gate',
     crossEmpty: 'No cross-venue snapshot for this coin yet — generated on the next 15-minute decision cycle.',

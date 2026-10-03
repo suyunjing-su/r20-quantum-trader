@@ -113,6 +113,7 @@ from scripts.brain.xvenue import (
     _get_xvenue_adapter as _get_xvenue_adapter_impl,
     _xv_binance_snapshot as _xv_binance_snapshot_impl,
     _xv_gate_snapshot as _xv_gate_snapshot_impl,
+    _xv_okx_snapshot as _xv_okx_snapshot_impl,
     fetch_cross_venue_matrix as _fetch_cross_venue_matrix_impl,
     _xv_divergence_notes as _xv_divergence_notes_impl,
     _xvenue_prompt_line as _xvenue_prompt_line_impl,
@@ -595,6 +596,15 @@ def _xv_gate_snapshot(base: str):
     )
 
 
+def _xv_okx_snapshot(base: str):
+    """单点取 OKX 现价（非 OKX 参考所需要）。"""
+    return _xv_okx_snapshot_impl(
+        base,
+        get_adapter=_get_xvenue_adapter,
+        record=lambda venue, name, ok, ms, err="": _xv_record(venue, name, ok, ms, err),
+    )
+
+
 def fetch_cross_venue_matrix(packages: List[Dict[str, Any]]) -> None:
     """给每个 pkg 就地挂 xvenue（US-003 对称化）。实现见 scripts/brain/xvenue.py。"""
     _fetch_cross_venue_matrix_impl(
@@ -602,6 +612,7 @@ def fetch_cross_venue_matrix(packages: List[Dict[str, Any]]) -> None:
         enabled=_xvenue_enabled(),
         snapshot_binance=_xv_binance_snapshot,
         snapshot_gate=_xv_gate_snapshot,
+        snapshot_okx=_xv_okx_snapshot,
         flush_health=_xv_flush_health,
     )
 

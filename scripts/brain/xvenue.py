@@ -85,8 +85,11 @@ def _xv_flush_health(packages: List[Dict[str, Any]], *, health, safe_float,
             snapshot = {k: {"latency": dict(v.get("latency", {})),
                             "failed": dict(v.get("failed", {}))}
                         for k, v in health.items()}
-        okx_ok = [p["name"] for p in packages if safe_float(p.get("price", 0)) > 0]
-        okx_latencies = {p["name"]: int(p["okx_latency_ms"]) for p in packages if p.get("okx_latency_ms")}
+        okx_ok = [p["name"] for p in packages
+                  if _venue_prices(p, safe_float=safe_float).get("okx", 0) > 0]
+        okx_latencies = {p["name"]: int(p["okx_latency_ms"])
+                         for p in packages
+                         if _reference_venue(p) == "okx" and p.get("okx_latency_ms")}
         okx_avg = round(sum(okx_latencies.values()) / len(okx_latencies)) if okx_latencies else 0
         try:
             from scripts.okx_runtime import current_environment
@@ -97,7 +100,7 @@ def _xv_flush_health(packages: List[Dict[str, Any]], *, health, safe_float,
             "okx": {
                 "ok": okx_ok,
                 "failed": {p["name"]: "ticker/price unavailable" for p in packages
-                           if safe_float(p.get("price", 0)) <= 0},
+                           if _venue_prices(p, safe_float=safe_float).get("okx", 0) <= 0},
                 "latency_ms": okx_latencies,
                 "avg_ms": okx_avg,
                 "testnet": okx_testnet,
@@ -116,21 +119,32 @@ def _xv_flush_health(packages: List[Dict[str, Any]], *, health, safe_float,
         try:  # 逐币跨所快照（US-007 前端消费源）——纯附加，异常不影响健康度落盘
             for p in packages:
                 xv = p.get("xvenue") or {}
-                okx_px = safe_float(p.get("price", 0))
                 name = str(p.get("name") or "")
-                if okx_px <= 0 or not xv or not name:
+                reference_venue = _reference_venue(p)
+                reference_price = safe_float(p.get("price", 0))
+                if reference_price <= 0 or not xv or not name:
                     continue
 
-                def _basis(v, _ref=okx_px):
+                venue_prices = _venue_prices(p, safe_float=safe_float)
+                if not any(price > 0 for price in venue_prices.values()):
+                    continue
+
+                def _basis(v, _ref=reference_price):
                     try:
                         v = float(v)
                         return round((v - _ref) / _ref * 100, 3) if v > 0 else None
                     except (TypeError, ValueError):
                         return None
                 symbols[name] = {
-                    "okx": okx_px,
-                    "bin_last": xv.get("bin_last"), "bin_basis_pct": _basis(xv.get("bin_last")),
-                    "gate_last": xv.get("gate_last"), "gate_basis_pct": _basis(xv.get("gate_last")),
+                    "okx": venue_prices["okx"] or None,
+                    "reference_venue": reference_venue,
+                    "reference_price": reference_price,
+                    "okx_last": venue_prices["okx"] or None,
+                    "bin_last": xv.get("bin_last"),
+                    "bin_basis_pct": _basis(venue_prices["binance"]),
+                    "gate_last": xv.get("gate_last"),
+                    "gate_basis_pct": _basis(venue_prices["gate"]),
+                    "okx_basis_pct": _basis(venue_prices["okx"]),
                     "bin_ls": xv.get("bin_ls"), "gate_ls": xv.get("gate_ls"),
                     "bin_taker": xv.get("bin_taker"), "gate_taker": xv.get("gate_taker"),
                     "bin_funding_pct": xv.get("bin_funding_pct"),
@@ -153,6 +167,65 @@ def _xv_flush_health(packages: List[Dict[str, Any]], *, health, safe_float,
         atomic_write_json(venue_health_file, out)
     except Exception:
         pass
+
+
+def _reference_venue(p: Dict[str, Any]) -> str:
+    """Return the venue whose quote populated the package price."""
+    try:
+        xv = p.get("xvenue") or {}
+        value = p.get("market_data_venue") or xv.get("reference_venue") or "okx"
+        value = str(value).strip().lower()
+        return value if value in {"okx", "binance", "gate"} else "okx"
+    except Exception:
+        return "okx"
+
+
+def _venue_prices(p: Dict[str, Any], *, safe_float) -> Dict[str, float]:
+    """Normalize all venue prices and overlay the package reference quote."""
+    try:
+        xv = p.get("xvenue") or {}
+    except Exception:
+        xv = {}
+    reference = _reference_venue(p)
+
+    def _value(key: str) -> Any:
+        try:
+            return xv.get(key, 0)
+        except Exception:
+            return 0
+
+    def _positive(value: Any) -> float:
+        try:
+            parsed = float(safe_float(value))
+            return parsed if parsed > 0 else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+
+    reference_price = _positive(p.get("price", 0))
+    values = {
+        "okx": _positive(_value("okx_last")),
+        "binance": _positive(_value("bin_last")),
+        "gate": _positive(_value("gate_last")),
+    }
+    if reference_price > 0:
+        values[reference] = reference_price
+    return values
+
+
+def _xv_okx_snapshot(base: str, *, get_adapter, record):
+    """Fetch OKX when Binance or Gate is the package reference."""
+    t0 = time.time()
+    try:
+        ad = get_adapter("okx")
+        t = ad.fetch_ticker(base) or {}
+        if not t.get("last"):
+            record("okx", base, False, (time.time() - t0) * 1000, "empty ticker")
+            return None
+        record("okx", base, True, (time.time() - t0) * 1000)
+        return {"venue": "okx", "name": base, "last": t.get("last")}
+    except Exception as exc:
+        record("okx", base, False, (time.time() - t0) * 1000, str(exc))
+        return None
 
 
 def _get_xvenue_adapter(venue: str):
@@ -221,17 +294,29 @@ def _xv_gate_snapshot(base: str, *, get_adapter, record):
 
 
 def fetch_cross_venue_matrix(packages: List[Dict[str, Any]], *, enabled, snapshot_binance,
-                             snapshot_gate, flush_health) -> None:
-    """给每个 pkg 就地挂 xvenue：双所 现价/大户多空比/资金费率（US-003 对称化）。fail-soft。"""
+                             snapshot_gate, flush_health, snapshot_okx=None) -> None:
+    """给每个 pkg 挂其它场所的现价/指标，并保留实际参考所来源。"""
     if not enabled:
         return
     try:
         by_name = {p["name"]: p for p in packages if p.get("name")}
         with ThreadPoolExecutor(max_workers=6) as ex:
             futures = []
-            for name in by_name:
-                futures.append(ex.submit(snapshot_binance, name))
-                futures.append(ex.submit(snapshot_gate, name))
+            for name, package in by_name.items():
+                reference = _reference_venue(package)
+                if reference != "binance":
+                    futures.append(ex.submit(snapshot_binance, name))
+                if reference != "gate":
+                    futures.append(ex.submit(snapshot_gate, name))
+                if reference != "okx" and snapshot_okx is not None:
+                    futures.append(ex.submit(snapshot_okx, name))
+                if package.get("market_data_venue") or package.get("xvenue", {}).get("reference_venue"):
+                    xv = package.setdefault("xvenue", {})
+                    xv["reference_venue"] = reference
+                    xv["reference_price"] = package.get("price")
+                    reference_prefix = {"okx": "okx", "binance": "bin", "gate": "gate"}[reference]
+                    if package.get("price") is not None:
+                        xv.setdefault(f"{reference_prefix}_last", package.get("price"))
             for fut in futures:
                 try:
                     val = fut.result(timeout=6)
@@ -243,7 +328,10 @@ def fetch_cross_venue_matrix(packages: List[Dict[str, Any]], *, enabled, snapsho
                 if pkg is None:
                     continue
                 xv = pkg.setdefault("xvenue", {})
-                prefix = "bin" if val.get("venue") == "binance" else "gate"
+                venue = str(val.get("venue") or "").strip().lower()
+                prefix = {"binance": "bin", "gate": "gate", "okx": "okx"}.get(venue)
+                if not prefix:
+                    continue
                 if val.get("last") is not None:
                     xv[f"{prefix}_last"] = val["last"]
                 if val.get("ls") is not None:
@@ -305,17 +393,28 @@ def _xv_divergence_notes(xv: Dict[str, Any]) -> str:
 
 
 def _xvenue_prompt_line(p: Dict[str, Any], *, safe_float) -> str:
-    """归一跨所证据行（双所现价基差/大户比/费率+分歧标注）；数据不足返回空串。"""
+    """归一跨所证据行，基差始终相对实际参考交易所。"""
     xv = p.get("xvenue") or {}
-    okx_px = safe_float(p.get("price", 0))
-    bin_px = safe_float(xv.get("bin_last", 0))
-    gate_px = safe_float(xv.get("gate_last", 0))
-    if okx_px <= 0 or (bin_px <= 0 and gate_px <= 0):
+    reference = _reference_venue(p)
+    reference_px = safe_float(p.get("price", 0))
+    if reference_px <= 0:
         return ""
-    seg = [f"OKX:{okx_px:g}"]
-    for label, px in (("币安", bin_px), ("Gate", gate_px)):
-        if px > 0:
-            basis = (px - okx_px) / okx_px * 100
+    prices = _venue_prices(p, safe_float=safe_float)
+    venues = (("okx", "OKX"), ("binance", "币安"), ("gate", "Gate"))
+    label_by_venue = dict(venues)
+    ordered = [(reference, label_by_venue.get(reference, reference))]
+    ordered.extend((venue, label) for venue, label in venues if venue != reference)
+    if not any(prices.get(venue, 0) > 0 for venue, _ in ordered if venue != reference):
+        return ""
+    seg = []
+    for venue, label in ordered:
+        px = prices.get(venue, 0)
+        if px <= 0:
+            continue
+        if venue == reference:
+            seg.append(f"{label}:{px:g}(现价基准)")
+        else:
+            basis = (px - reference_px) / reference_px * 100
             seg.append(f"{label}:{px:g}(基差{basis:+.3f}%)")
     if xv.get("bin_ls") is not None:
         seg.append(f"币安大户比:{xv['bin_ls']}")
@@ -333,5 +432,7 @@ def _xvenue_prompt_line(p: Dict[str, Any], *, safe_float) -> str:
         seg.append(f"币安费率:{xv['bin_funding_pct']}%")
     if xv.get("gate_funding_pct") is not None:
         seg.append(f"Gate费率:{xv['gate_funding_pct']}%")
-    return ("- 🌐 跨所比对 (基差=对OKX偏离，>0.05% 警惕插针/流动性分层): "
+    reference_label = label_by_venue.get(reference, reference)
+    return (f"- 🌐 跨所比对 (现价基准={reference_label}，基差=相对{reference_label}偏离，"
+            ">0.05% 警惕插针/流动性分层): "
             + " | ".join(seg) + _xv_divergence_notes(xv))

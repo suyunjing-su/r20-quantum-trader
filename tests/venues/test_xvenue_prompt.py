@@ -55,6 +55,25 @@ class TestXVenueMatrix(unittest.TestCase):
     def _pkgs(self):
         return [{"name": "BTC", "instId": "BTC-USDT-SWAP", "price": 100.0}]
 
+    def test_matrix_fetches_only_non_reference_venues(self):
+        pkgs = [{"name": "BTC", "instId": "BTC-USDT-SWAP", "price": 100.0,
+                 "market_data_venue": "binance"}]
+        calls = []
+
+        class Ad(_FakeAd):
+            def fetch_ticker(self, base):
+                calls.append((self.venue, base))
+                return super().fetch_ticker(base)
+
+        with patch.object(abt, "_get_xvenue_adapter", lambda v: Ad(v)):
+            abt.fetch_cross_venue_matrix(pkgs)
+        xv = pkgs[0]["xvenue"]
+        self.assertEqual(xv["reference_venue"], "binance")
+        self.assertEqual(xv["bin_last"], 100.0)
+        self.assertEqual(xv["okx_last"], 99.99)
+        self.assertEqual(xv["gate_last"], 99.99)
+        self.assertEqual({venue for venue, _ in calls}, {"okx", "gate"})
+
     def test_matrix_attaches_fields(self):
         pkgs = self._pkgs()
         with patch.object(abt, "_get_xvenue_adapter", lambda v: _FakeAd(v)):
@@ -98,6 +117,24 @@ class TestXVenueMatrix(unittest.TestCase):
         self.assertIn("大户比分歧2.13vs1.19→币安大户更乐观", line)
         self.assertIn("费率背离3.2x→Gate费率更高(0.0032%),空向持仓为收费方向", line)
 
+    def test_binance_reference_computes_other_two_basis(self):
+        pkg = {"name": "BTC", "price": 100.0, "market_data_venue": "binance",
+               "xvenue": {"okx_last": "99.8", "gate_last": "100.2"}}
+        line = abt._xvenue_prompt_line(pkg)
+        self.assertIn("现价基准=币安", line)
+        self.assertIn("币安:100(现价基准)", line)
+        self.assertIn("OKX:99.8(基差-0.200%)", line)
+        self.assertIn("Gate:100.2(基差+0.200%)", line)
+        self.assertNotIn("币安:100(基差", line)
+
+    def test_gate_reference_computes_binance_and_okx_basis(self):
+        pkg = {"name": "ETH", "price": 200.0, "market_data_venue": "gate",
+               "xvenue": {"okx_last": 199.0, "bin_last": "201"}}
+        line = abt._xvenue_prompt_line(pkg)
+        self.assertIn("现价基准=Gate", line)
+        self.assertIn("OKX:199(基差-0.500%)", line)
+        self.assertIn("币安:201(基差+0.500%)", line)
+
     def test_prompt_line_partial_and_absent(self):
         only_bin = {"name": "ETH", "price": 3000.0, "xvenue": {"bin_last": 3001.0}}
         line = abt._xvenue_prompt_line(only_bin)
@@ -131,6 +168,23 @@ class TestXVenueMatrix(unittest.TestCase):
             self.assertEqual(doc["package_count"], 1)
             self.assertIn("writer_pid", doc)
             self.assertIsInstance(doc["venues"]["okx"]["failed"], dict)
+
+    def test_flush_symbols_uses_dynamic_reference_venue(self):
+        import json as _json
+        pkg = {"name": "BTC", "price": 100.0, "market_data_venue": "binance",
+               "xvenue": {"reference_venue": "binance", "okx_last": "99.8",
+                           "gate_last": "100.2"}}
+        with tempfile.TemporaryDirectory() as td:
+            f = os.path.join(td, "vh.json")
+            with patch.object(abt, "VENUE_HEALTH_FILE", f):
+                abt._xv_flush_health([pkg])
+            symbol = _json.load(open(f))["symbols"]["BTC"]
+        self.assertEqual(symbol["reference_venue"], "binance")
+        self.assertEqual(symbol["reference_price"], 100.0)
+        self.assertEqual(symbol["okx"], 99.8)
+        self.assertEqual(symbol["bin_basis_pct"], 0.0)
+        self.assertEqual(symbol["gate_basis_pct"], 0.2)
+        self.assertEqual(symbol["okx_basis_pct"], -0.2)
 
     def test_flush_symbols_cross_venue_snapshot(self):
         import json as _json

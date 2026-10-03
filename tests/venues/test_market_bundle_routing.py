@@ -86,6 +86,19 @@ class FetchMarketBundleRoutingTests(unittest.TestCase):
         self.assertTrue(all(call[1] == "1000PEPE" for call in self.adapters["binance"].calls
                             if call[0] != "funding"))
 
+    def test_single_route_uses_only_binance_as_market_reference(self):
+        with patch("astra_backend.exchanges.routing_policy.load_multi_venue_routing_enabled", return_value=False),                 patch("astra_backend.exchanges.routing_policy.active_execution_venue", return_value="binance"):
+            bundle = self._fetch(["okx", "binance", "gate"])
+        self.assertEqual(bundle["venue"], "binance")
+        self.assertEqual(self.adapters["okx"].calls, [])
+        self.assertEqual(self.adapters["gate"].calls, [])
+        self.assertTrue(self.adapters["binance"].calls)
+
+    def test_single_route_conflict_fails_closed_without_guessing_okx(self):
+        with patch("astra_backend.exchanges.routing_policy.load_multi_venue_routing_enabled", return_value=False),                 patch("astra_backend.exchanges.routing_policy.active_execution_venue", return_value=None):
+            self.assertIsNone(self._fetch(["okx", "binance", "gate"]))
+        self.assertTrue(all(not adapter.calls for adapter in self.adapters.values()))
+
     def test_all_allowed_venues_fail_returns_none(self):
         for adapter in self.adapters.values():
             adapter.ticker = None

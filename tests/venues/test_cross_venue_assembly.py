@@ -100,6 +100,25 @@ class CrossVenueAssemblyTests(unittest.TestCase):
         self.assertEqual(row["okx_last"], 2500.0)
         self.assertEqual(out["symbols"], {})
 
+    def test_dynamic_reference_venue_basis_is_preserved(self):
+        self._write(self.vh, {
+            "updated_utc": "u", "package_count": 1, "venues": {},
+            "symbols": {"BTC": {
+                "reference_venue": "binance", "reference_price": 100.0,
+                "okx": 99.8, "okx_last": 99.8, "bin_last": 100.0,
+                "bin_basis_pct": 0.0, "gate_last": 100.2,
+                "gate_basis_pct": 0.2, "okx_basis_pct": -0.2,
+            }},
+        })
+        out = self._load()
+        row = out["by_asset"]["BTC"]
+        self.assertEqual(row["reference_venue"], "binance")
+        self.assertEqual(row["reference_price"], 100.0)
+        self.assertEqual(row["okx_last"], 99.8)
+        self.assertEqual(row["okx_basis_pct"], -0.2)
+        self.assertEqual(row["bin_basis_pct"], 0.0)
+        self.assertEqual(row["gate_basis_pct"], 0.2)
+
     # ---- ③ US-009 前置容错：决策缓存无 xvenue 键 / 只有半成品 xvenue ----
     def test_decisions_missing_or_partial_xvenue(self):
         self._write(self.dec, {

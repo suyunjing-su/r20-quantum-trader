@@ -220,6 +220,7 @@ export const zhMatrix = {
     thReason: '原因',
     noEvidence: '暂无选所决策证据——该信号本周期未走选所路由链路（接线周期生成后自动展示）。',
     crossTitle: '跨所 · Binance / Gate',
+    referencePrice: '现价基准',
     crossLs: 'L/S 币安/Gate',
     crossFund: 'Fund% 币安/Gate',
     crossEmpty: '该币暂无跨所快照——等待下一个 15 分钟决策周期生成。',

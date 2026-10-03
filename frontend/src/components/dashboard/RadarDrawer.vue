@@ -61,7 +61,10 @@ const xvenueRows = computed(() => {
     || (dash.data as any)?.cross_venue?.symbols || {};
   return Object.entries(byAsset).map(([sym, data]: [string, any]) => ({
     symbol: sym,
+    reference_venue: data?.reference_venue || 'okx',
+    reference_price: data?.reference_price,
     okx_last: typeof data?.okx_last === 'number' ? data.okx_last : data?.okx,
+    okx_basis_pct: data?.okx_basis_pct,
     bin_last: data?.bin_last,
     bin_basis_pct: data?.bin_basis_pct,
     gate_last: data?.gate_last,
@@ -377,16 +380,20 @@ function posActionBadge(action: string): { label: string; class: string } {
           <thead>
             <tr>
               <th scope="col">{{ t('dash.radar.thSymbol') }}</th>
-              <th scope="col" class="col-num">{{ t('dash.radar.xvenue.okxPrice') }}</th>
-              <th scope="col" class="col-num">{{ t('dash.radar.thBasis') }}</th>
-              <th scope="col" class="col-num">{{ t('dash.radar.thBasisGate') }}</th>
+              <th scope="col" class="col-num">{{ t('dash.radar.xvenue.referencePrice') }}</th>
+              <th scope="col" class="col-num">{{ t('dash.radar.xvenue.okxBasis') }}</th>
+              <th scope="col" class="col-num">{{ t('dash.radar.xvenue.bnBasis') }}</th>
+              <th scope="col" class="col-num">{{ t('dash.radar.xvenue.gateBasis') }}</th>
               <th scope="col" class="col-num">{{ t('dash.radar.thLs') }}</th>
             </tr>
           </thead>
           <tbody>
             <tr v-for="xv in xvenueRows" :key="xv.symbol">
               <td class="font-mono font-bold text-xs text-[var(--ink-strong)]">{{ xv.symbol }}</td>
-              <td class="col-num font-mono">{{ fmtPrice(xv.okx_last) }}</td>
+              <td class="col-num font-mono">{{ fmtPrice(xv.reference_price || xv.okx_last) }}</td>
+              <td class="col-num font-mono" :class="Number(xv.okx_basis_pct || 0) >= 0 ? 'text-[var(--up)]' : 'text-[var(--down)]'">
+                {{ fmtNum(xv.okx_basis_pct, 3) }}%
+              </td>
               <td class="col-num font-mono" :class="Number(xv.bin_basis_pct || 0) >= 0 ? 'text-[var(--up)]' : 'text-[var(--down)]'">
                 {{ fmtNum(xv.bin_basis_pct, 3) }}%
               </td>

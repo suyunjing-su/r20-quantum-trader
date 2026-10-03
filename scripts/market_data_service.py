@@ -338,15 +338,38 @@ def _alt_funding_rate(inst_id: str) -> Optional[float]:
 # 1. Ticker & Bulk Tickers
 # ---------------------------------------------------------------------------
 
+def _market_bundle_order(allowed: set[str]) -> list[str]:
+    """Resolve the venue order without inventing a reference venue.
+
+    With multi-venue routing disabled, the only safe market reference is the
+    single raw execution gate that is currently open.  A conflict (or no gate)
+    returns an empty order so callers fail closed instead of silently using OKX.
+    """
+    try:
+        from astra_backend.exchanges import routing_policy
+        if not routing_policy.load_multi_venue_routing_enabled():
+            try:
+                from scripts.okx_runtime import current_environment
+                environment = str(current_environment().mode or "live").lower()
+            except Exception:
+                environment = "live"
+            active = routing_policy.active_execution_venue(environment)
+            return [active] if active in allowed else []
+    except Exception as exc:
+        logger.warning("Unable to resolve market routing policy: %s", exc)
+        return []
+    return [v for v in ("okx", "binance", "gate") if v in allowed]
+
+
 def fetch_market_bundle(inst_id: str, allowed_venues: Any,
                         candle_limits: Optional[Dict[str, int]] = None) -> Optional[Dict[str, Any]]:
-    """按标的池准入及 OKX→Binance→Gate 顺序取同一场所的 ticker 与 K 线。"""
+    """取同一场所的 ticker 与 K 线，并遵守当前撮合路由参考所。"""
     from astra_backend.exchanges.base import canonical_base
 
     if not isinstance(allowed_venues, (list, tuple, set)):
         return None
     allowed = {str(v).strip().lower() for v in allowed_venues}
-    order = [v for v in ("okx", "binance", "gate") if v in allowed]
+    order = _market_bundle_order(allowed)
     if not order:
         return None
 

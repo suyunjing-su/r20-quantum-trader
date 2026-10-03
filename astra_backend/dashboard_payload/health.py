@@ -104,8 +104,9 @@ def _load_cross_venue_data(data_dir: str | os.PathLike[str], decisions_file: str
       2) data/ai_brain_decisions.json —— 各币 xvenue（由 US-009 收尾者持久化，
          现在可能整键缺失，逐键位容错）。
     by_asset = 两路合并（symbols 优先，xvenue 补缺，缺价时现算基差），
-    键位恒为 {okx_last,bin_last,gate_last,bin_basis_pct,gate_basis_pct,
-    bin_ls,gate_ls,bin_funding_pct,gate_funding_pct}，缺值置 ""（前端渲染 "--"）。
+    键位包含 {reference_venue,reference_price,okx_last,bin_last,gate_last,
+    okx_basis_pct,bin_basis_pct,gate_basis_pct,bin_ls,gate_ls,
+    bin_funding_pct,gate_funding_pct}，缺值置 ""（前端渲染 "--"）。
     """
     out = {"updated_utc": "", "package_count": 0, "venues": {}, "symbols": {}, "by_asset": {}}
 
@@ -154,7 +155,8 @@ def _load_cross_venue_data(data_dir: str | os.PathLike[str], decisions_file: str
     except Exception:
         pass
 
-    XV_KEYS = ("bin_last", "gate_last", "bin_ls", "gate_ls",
+    XV_KEYS = ("reference_venue", "reference_price", "okx_last",
+               "bin_last", "gate_last", "bin_ls", "gate_ls",
                "bin_funding_pct", "gate_funding_pct")
     for asset in src.keys() | sym_rows.keys():
         xv = src.get(asset, {}).get("xv") or {}
@@ -165,14 +167,28 @@ def _load_cross_venue_data(data_dir: str | os.PathLike[str], decisions_file: str
             if v in (None, ""):
                 v = xv.get(k)
             row[k] = "" if v is None else v
-        okx = sym.get("okx") or src.get(asset, {}).get("okx_last") or ""
+        okx = row.get("okx_last") or sym.get("okx") or src.get(asset, {}).get("okx_last") or ""
         row["okx_last"] = okx
-        for tag in ("bin", "gate"):
-            b = sym.get(tag + "_basis_pct")
+        reference_venue = str(row.get("reference_venue") or "okx").strip().lower()
+        if reference_venue not in {"okx", "binance", "gate"}:
+            reference_venue = "okx"
+        row["reference_venue"] = reference_venue
+        reference_price = _pos(row.get("reference_price"))
+        if reference_price is None:
+            reference_price = _pos(row.get(reference_venue + "_last"))
+        if reference_price is None and reference_venue == "okx":
+            reference_price = _pos(okx)
+        row["reference_price"] = "" if reference_price is None else reference_price
+        for tag in ("okx", "bin", "gate"):
+            key = tag + "_basis_pct"
+            b = sym.get(key)
             if b in (None, ""):
-                p, ref = _pos(row[tag + "_last"]), _pos(okx)
-                if p is not None and ref is not None:
-                    b = round((p - ref) / ref * 100, 3)
-            row[tag + "_basis_pct"] = "" if b is None else b
+                venue_key = "okx_last" if tag == "okx" else tag + "_last"
+                price = _pos(row.get(venue_key))
+                if tag == reference_venue:
+                    b = ""
+                elif price is not None and reference_price is not None:
+                    b = round((price - reference_price) / reference_price * 100, 3)
+            row[key] = "" if b is None else b
         out["by_asset"][asset] = row
     return out
