@@ -11,6 +11,7 @@ from astra_gateway.channels import NotificationChannelAdapter
 from astra_gateway.publisher import DB_PATH
 from astra_gateway.scheduler import GatewayScheduler
 from astra_gateway.store import GatewayStore
+from scripts.market_stream import MarketStreamManager
 
 ROOT = Path(__file__).resolve().parents[1]
 from astra_gateway.pidfile import PID_FILE
@@ -134,6 +135,33 @@ def run() -> None:
     if _adopted:
         log(f"收编僵尸 running 作业行 {_adopted} 条（→ interrupted）")
     scheduler = GatewayScheduler(store)
+    try:
+        from scripts.instrument_pool import load_instruments
+        configured_symbols = tuple(
+            str(row.get("instId")) for row in load_instruments()
+            if isinstance(row, dict) and row.get("instId")
+        )
+    except Exception:
+        configured_symbols = ("BTC-USDT-SWAP",)
+    market_stream = MarketStreamManager(
+        symbols=configured_symbols or ("BTC-USDT-SWAP",),
+        snapshot_path=str(ROOT / "data" / "market_stream_health.json"),
+        on_tick=lambda tick: scheduler.trigger_fast_decision_event({
+            "venue": tick.get("venue"),
+            "symbol": tick.get("symbol"),
+            "price": tick.get("price"),
+            "kind": tick.get("kind"),
+            "exchange_timestamp": (
+                float(tick["exchange_ms"]) / 1000.0
+                if tick.get("exchange_ms") is not None else None
+            ),
+            "received_timestamp": (
+                float(tick["local_ms"]) / 1000.0
+                if tick.get("local_ms") is not None else time.time()
+            ),
+        }),
+    )
+    market_stream.start()
     scheduler.initialize_migration_baseline()
     try:
         from scripts.instrument_pool import POOL_FILE, save_instruments, DEFAULT_INSTRUMENTS
@@ -183,6 +211,7 @@ def run() -> None:
         except Exception as exc:
             store.fail(int(delivery["id"]), int(delivery["attempts"]), str(exc))
             log(f"delivery exception event={delivery['event_id']} channel={delivery['channel']} type={type(exc).__name__}")
+    market_stream.stop()
     scheduler.shutdown()
     log("gateway worker stopped")
 
