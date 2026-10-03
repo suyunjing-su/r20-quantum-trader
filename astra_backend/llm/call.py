@@ -31,6 +31,7 @@ from astra_backend.llm.transport import (
     _LLMHardError,
     _LLMTransientError,
     _attempt_llm_call,
+    _consume_stream_response,
     _parse_stream_response,
     _read_stream_body,
     build_request_spec,
@@ -395,8 +396,9 @@ def test_llm_connection(reload_config: Callable[[], Dict[str, Any]],
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             latency_ms = int((time.perf_counter() - t0) * 1000)
             status_code = resp.getcode()
-            body_bytes = _read_stream_body(resp)
-            content, reasoning_content, usage = _parse_stream_response(api_format, body_bytes)
+            content, reasoning_content, usage, finish_reason = _consume_stream_response(
+                api_format, resp
+            )
 
             reasoning_tokens = (
                 usage.get("completion_tokens_details", {}).get("reasoning_tokens")
@@ -443,8 +445,7 @@ def test_llm_connection(reload_config: Callable[[], Dict[str, Any]],
                 t1 = time.perf_counter()
                 with urllib.request.urlopen(fb_req, timeout=timeout) as fb_resp:
                     fb_latency = int((time.perf_counter() - t1) * 1000)
-                    fb_body = _read_stream_body(fb_resp)
-                    fb_content, _, _ = _parse_stream_response(api_format, fb_body)
+                    fb_content, _, _, _ = _consume_stream_response(api_format, fb_resp)
                     return {
                         "ok": True,
                         "status_code": 200,
