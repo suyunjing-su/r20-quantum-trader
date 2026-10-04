@@ -140,6 +140,8 @@ def fetch_single_instrument_package(item: Dict[str, Any], *,
         "recent_4h": [],
         "minimum_order_requirements": {},
         "market_data_venue": "",
+        "market_data_timestamp": 0,
+        "market_data_last": 0.0,
         "calculus": {"valid": False, "regime": "DATA_UNRELIABLE", "quality": 0.0},
         "data_quality": "invalid"
     }
@@ -154,6 +156,12 @@ def fetch_single_instrument_package(item: Dict[str, Any], *,
         pkg["chg24h"] = round(float(t.get("chg_24h_pct") or 0), 2)
         pkg["vol24h"] = round(float(t.get("vol_24h_base") or 0), 2)
         pkg["market_data_venue"] = str(market_bundle.get("venue") or "")
+        # Preserve the exchange timestamp instead of making execution infer freshness
+        # from the time the LLM cache happened to be written.
+        pkg["market_data_timestamp"] = int(
+            t.get("ts_ms") or time.time() * 1000
+        )
+        pkg["market_data_last"] = pkg["price"]
         pkg["market_data_latency_ms"] = max(1, int(round((time.time() - t_okx0) * 1000)))
         funding = market_bundle.get("funding_rate")
         if funding is not None:
@@ -171,6 +179,9 @@ def fetch_single_instrument_package(item: Dict[str, Any], *,
                     op = float(t.get("open24h", 0) or 0)
                     pkg["chg24h"] = round(((pkg["price"] - op) / op * 100) if op > 0 else 0, 2)
                     pkg["vol24h"] = round(float(t.get("vol24h", 0) or 0), 2)
+                    pkg["market_data_venue"] = "okx"
+                    pkg["market_data_timestamp"] = int(t.get("ts") or time.time() * 1000)
+                    pkg["market_data_last"] = pkg["price"]
                     pkg["okx_latency_ms"] = max(1, int(round((time.time() - t_okx0) * 1000)))
         except Exception as exc:
             note_failure("okx_ticker", exc)

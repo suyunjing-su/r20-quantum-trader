@@ -24,7 +24,9 @@ TestPriceSanityAnchor::test_guard_code_landed_in_submit_path` 原用
 """
 from __future__ import annotations
 
+import math
 import os
+import time
 from typing import Any, Dict, Optional, Tuple
 
 #: 走 `astra_backend.execution_router.open_protected_position` 落地下单的场所。
@@ -252,15 +254,43 @@ def submit_protected_limit_order(inst_id: str, side: str, pos_side: str, size: f
     effective_sl = sl_px
 
     # 审计④(2026-09-13)：现价单次读取，demo rescale 与幻觉锚共用——两次读可互相
-    # 错位，且旧代码只有 simulated+okx 才取价，live/外所永远拿不到锚（裸奔真身）。
+    # 错位。AI 入场必须读取**目标执行所**的最新 ticker；不能用决策生成时的
+    # 15M candle close，也不能用另一交易所的价格替代目标所价格。
     _tick_last_raw = None
     _anchor_last = 0.0
+    _anchor_ts_ms = 0
+    _execution_ticker_venue = target_venue
+    _price_context_required = bool(
+        isinstance(venue_ctx, dict) and venue_ctx.get("price_context_version")
+    )
     try:
-        _tick_last_raw = (fetch_ticker(inst_id) or {}).get("last")
-        if _tick_last_raw:
-            _anchor_last = float(_tick_last_raw)
+        _ticker = None
+        if target_venue != "okx" and hasattr(venue_registry, "get_adapter"):
+            _adapter = venue_registry.get_adapter(target_venue, environment=str(env.mode))
+            _ticker = _adapter.fetch_ticker(canonical_base(inst_id))
+        elif target_venue == "okx":
+            _ticker = fetch_ticker(inst_id)
+        if isinstance(_ticker, dict):
+            _tick_last_raw = _ticker.get("last")
+            _anchor_ts_ms = int(float(_ticker.get("ts_ms") or 0))
+            _execution_ticker_venue = str(_ticker.get("venue") or target_venue).lower()
+            if _tick_last_raw:
+                _anchor_last = float(_tick_last_raw)
+        if _anchor_last <= 0 and not _price_context_required:
+            # Preserve the non-AI generic path's historical best-effort fallback.
+            _ticker = fetch_ticker(inst_id)
+            if isinstance(_ticker, dict):
+                _tick_last_raw = _ticker.get("last")
+                _anchor_ts_ms = int(float(_ticker.get("ts_ms") or 0))
+                _anchor_last = float(_tick_last_raw or 0)
     except Exception as _ae:
-        print(f"[价格锚定] warn 现价获取失败，本单跳过锚定/rescale: {_ae}")
+        print(f"[价格锚定] warn {target_venue.upper()} 目标所现价获取失败: {_ae}")
+
+    if _price_context_required and _anchor_last <= 0:
+        _rej = f"无法读取目标执行所 {target_venue.upper()} 的最新价格，拒绝使用未经核验的 AI 入场价"
+        print(f"[价格锚定] 拒单 {inst_id}: {_rej}")
+        release_signal_reservation(_reservation, "目标所价格不可核验")
+        return False, f"价格锚定拒绝: {_rej}"
 
     if env.simulated and target_venue == "okx":
         try:
@@ -291,6 +321,72 @@ def submit_protected_limit_order(inst_id: str, side: str, pos_side: str, size: f
             # 交易照旧发出而**没有任何痕迹**（"算不出来 ≠ 没这回事"）。行为不变
             # （仍按原价/已算出的值提交、仍不阻断），但必须出声。
             print(f"[demo rescale] warn {inst_id} 沙盒报价重算失败，按当前值提交: {_rsc_exc}")
+
+    # AI 的时间戳和行情快照都必须在最终落单边界重新核验。缓存文件的 mtime
+    # 只能说明文件被写过，不能说明 entry_price 是基于多新的市场数据计算的。
+    if _price_context_required:
+        try:
+            _now_s = time.time()
+            _decision_ts = float(venue_ctx.get("decision_timestamp") or 0.0)
+            _market_ts_raw = float(venue_ctx.get("market_data_timestamp") or 0.0)
+            _market_ts_s = (_market_ts_raw / 1000.0
+                            if _market_ts_raw > 10_000_000_000 else _market_ts_raw)
+            _market_venue = str(venue_ctx.get("market_data_venue") or "").strip().lower()
+            if _market_venue and _market_venue != str(target_venue).strip().lower():
+                # Routing can legitimately choose a different venue after the
+                # parallel read.  The target-venue ticker fetched above is the
+                # execution authority; retain the mismatch for audit instead of
+                # silently using the source venue's price.
+                print(f"[价格锚定] {inst_id} 决策行情来自 {_market_venue.upper()}，"
+                      f"最终执行所为 {target_venue.upper()}；已使用目标所实时价格复核")
+            _max_decision_age = max(1.0, float(os.getenv(
+                "ASTRA_ENTRY_DECISION_MAX_AGE_SECONDS", "300") or 300))
+            _max_market_age = max(1.0, float(os.getenv(
+                "ASTRA_ENTRY_MARKET_MAX_AGE_SECONDS", "300") or 300))
+            _future_skew = max(1.0, float(os.getenv(
+                "ASTRA_ENTRY_TIMESTAMP_FUTURE_SKEW_SECONDS", "30") or 30))
+            if _decision_ts <= 0 or _now_s - _decision_ts > _max_decision_age:
+                _rej = (f"AI 决策已过期（age={_now_s - _decision_ts:.1f}s，"
+                        f"上限={_max_decision_age:g}s）")
+                print(f"[时间新鲜度] 拒单 {inst_id}: {_rej}")
+                release_signal_reservation(_reservation, "AI 决策过期")
+                return False, f"时间新鲜度拒绝: {_rej}"
+            if _market_ts_s <= 0 or _now_s - _market_ts_s > _max_market_age:
+                _rej = (f"AI 行情快照已过期或缺失（age={_now_s - _market_ts_s:.1f}s，"
+                        f"上限={_max_market_age:g}s）")
+                print(f"[时间新鲜度] 拒单 {inst_id}: {_rej}")
+                release_signal_reservation(_reservation, "AI 行情快照过期")
+                return False, f"时间新鲜度拒绝: {_rej}"
+            if _market_ts_s - _now_s > _future_skew:
+                _rej = f"AI 行情快照时间异常超前（skew={_market_ts_s - _now_s:.1f}s）"
+                print(f"[时间新鲜度] 拒单 {inst_id}: {_rej}")
+                release_signal_reservation(_reservation, "AI 行情快照时间异常")
+                return False, f"时间新鲜度拒绝: {_rej}"
+        except (TypeError, ValueError, OverflowError) as _ts_exc:
+            _rej = f"AI 决策/行情时间戳不可核验: {_ts_exc}"
+            print(f"[时间新鲜度] 拒单 {inst_id}: {_rej}")
+            release_signal_reservation(_reservation, "AI 时间戳不可核验")
+            return False, f"时间新鲜度拒绝: {_rej}"
+
+    # 允许小幅 Maker 回踩，但拒绝超出可执行回踩窗口的旧绝对价格；阈值可按
+    # 市场波动配置，默认 1% 以避免把数小时前的技术位当成当前入场价。
+    if _price_context_required and _anchor_last > 0 and effective_px > 0:
+        _entry_drift_pct = max(0.0, float(os.getenv(
+            "ASTRA_MAX_ENTRY_DRIFT_PCT", "0.01") or 0.01))
+        _drift = (abs(effective_px - _anchor_last) / _anchor_last
+                  if _anchor_last else 0.0)
+        _wrong_side = (
+            pos_side == "long" and effective_px < _anchor_last * (1.0 - _entry_drift_pct)
+        ) or (
+            pos_side != "long" and effective_px > _anchor_last * (1.0 + _entry_drift_pct)
+        )
+        if _wrong_side:
+            _rej = (f"AI 入场价距离目标所现价 {_drift * 100:.2f}% 超过允许回踩窗口 "
+                    f"{_entry_drift_pct * 100:.2f}%（entry={effective_px:g}, "
+                    f"market={_anchor_last:g}, venue={_execution_ticker_venue}）")
+            print(f"[价格新鲜度] 拒单 {inst_id}: {_rej}")
+            release_signal_reservation(_reservation, "AI 入场价过旧或偏离")
+            return False, f"价格新鲜度拒绝: {_rej}"
 
     # 委托订单模式（限价 / 市价）。**在此处读**而不是发单前才读：市价单必须先在
     # 这里按现价重锚保护价，才能进下面的几何复验与穿价闸。
@@ -359,6 +455,21 @@ def submit_protected_limit_order(inst_id: str, side: str, pos_side: str, size: f
         venue_ctx["submitted_sl"] = effective_sl
 
     # Final Non-Bypassable Verification: verify actual effective price, tp and sl
+    # Zero/NaN quotes must never reach an exchange adapter, even if a downstream
+    # geometry helper happens to return a less specific rejection.
+    try:
+        _quote_values = (float(effective_px), float(effective_tp), float(effective_sl))
+    except (TypeError, ValueError, OverflowError):
+        _quote_values = ()
+    if _price_context_required and (len(_quote_values) != 3
+                                    or not all(math.isfinite(v) and v > 0 for v in _quote_values)):
+        _rej = (f"最终订单三价不可用（entry={effective_px!r}, "
+                f"tp={effective_tp!r}, sl={effective_sl!r}）")
+        print(f"[Order Rejected] {inst_id}: {_rej}")
+        release_signal_reservation(_reservation, "最终订单三价为零或非有限值")
+        return False, f"最终订单三价拒绝: {_rej}"
+
+    # Final Non-Bypassable Verification: verify actual effective price, tp and sl
     from scripts.order_risk import validate_quote_geometry_and_rr
     action_type = "BUY_LONG" if pos_side == "long" else "SELL_SHORT"
     is_valid, reason, _ = validate_quote_geometry_and_rr(action_type, effective_px, effective_tp, effective_sl)
@@ -371,7 +482,7 @@ def submit_protected_limit_order(inst_id: str, side: str, pos_side: str, size: f
     # 从不比对现价。危险形态是「穿价」：BUY 限价挂在现价上方 → 即时成交于意外价，
     # 而配套 SL 触发价锚在幻觉 entry 上、相对真实成交价可能即刻触发 → 开-秒平循环
     # 放血（demo+okx 有 5% rescale 兜底，live 与外所此前裸奔）。回踩方向的远挂单
-    # 是合法策略（不穿价即放行，OKX 侧 4 分钟超时撤兜底）。_anchor_last 来自上方
+    # 是合法策略（不穿价即放行，OKX 侧一个 Trader 周期超时撤兜底）。_anchor_last 来自上方
     # 单次读价；取价失败不阻断（行情断时黑天鹅哨兵/熔断已另行 fail-closed），但必吼。
     if _anchor_last > 0 and effective_px > 0:
         _cross_pct = float(os.getenv("ASTRA_MAX_PRICE_CROSS_PCT", "0.005") or 0.005)

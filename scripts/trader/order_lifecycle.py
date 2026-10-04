@@ -53,7 +53,7 @@ def clean_stale_open_orders(keep_ord_ids: Optional[set] = None,
     适配器故障也绝不拖累主链）；核验/撤销失败与 OKX 同标准 fail-closed 拦本周期。
     """
     keep_ord_ids = keep_ord_ids or set()
-    STALE_MS = 240_000
+    STALE_MS = 15 * 60 * 1000
     try:
         open_orders = okx_rest.pending_orders()
     except Exception as exc:
@@ -67,7 +67,7 @@ def clean_stale_open_orders(keep_ord_ids: Optional[set] = None,
         order_age = now_ts - created_at
         # 对账接管只表示“这是本系统的单”，不表示它可以无限期存活。
         # 旧逻辑对 keep_ord_ids 直接 continue，导致有新鲜 intent 的一小时前
-        # 挂单绕过 4 分钟回收，并在后续周期继续占用 pending_inst_ids。
+        # 挂单绕过生命周期回收，并在后续周期继续占用 pending_inst_ids。
         # 只有仍在生命周期窗口内的接管单可以跳过清理；过期单必须先撤，再由
         # 当前周期的新鲜决策决定是否重新下单。
         if order_id and order_id in keep_ord_ids and order_age <= STALE_MS:
@@ -85,7 +85,7 @@ def clean_stale_open_orders(keep_ord_ids: Optional[set] = None,
     except Exception:
         _env_mode = ""
     # 仍读取活意图作为撤单安全前置条件：意图文件不可读时不能猜测归属。
-    # 但意图只负责归属与 fail-closed，不能让超过 STALE_MS 的挂单无限存活。
+    # 但意图只负责归属与 fail-closed，不能让超过 STALE_MS（一个 15 分钟 Trader 周期）的挂单无限存活。
     # ⚠️ 第一百三十四刀：**读不到意图 ⇒ 不撤任何单 + fail-closed**。
     # 旧写法 `except Exception: _live_intents = []` 把"文件坏了"当成"没有意图"
     # ⇒ 每笔挂单都失去归属 ⇒ 按孤儿/陈旧**撤销**（撤旧挂新循环的另一种成因），

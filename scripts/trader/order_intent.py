@@ -103,4 +103,14 @@ def build_order_intent(*, is_long, inst_id, actual_sz, ct_val, min_sz, limit_px,
         "intent_id": (f"{inst_id}:BUY_LONG" if is_long else f"{inst_id}:SELL_SHORT")
                      + f":{int(ai_info.get('timestamp') or time.time())}",
     }
+    # New cache entries carry a complete price provenance record.  Keep older
+    # injected/non-AI callers compatible until the next decision cache refresh.
+    if ai_info.get("market_data_timestamp") and ai_info.get("market_data_venue"):
+        venue_ctx.update({
+            "price_context_version": 1,
+            "decision_timestamp": ai_info.get("timestamp"),
+            "market_data_timestamp": ai_info.get("market_data_timestamp"),
+            "market_data_venue": ai_info.get("market_data_venue"),
+            "market_data_last": ai_info.get("market_data_last"),
+        })
     return side, pos_side, venue_ctx

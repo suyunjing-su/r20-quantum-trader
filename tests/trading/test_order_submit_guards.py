@@ -14,6 +14,7 @@
 
 import os
 import sys
+import time
 import types
 import unittest
 from types import SimpleNamespace
@@ -202,6 +203,51 @@ class PriceAnchorGateTest(unittest.TestCase):
     def test_far_but_plausible_pullback_is_allowed(self):
         rig, (ok, why) = self._run_with(price=97000.0)
         self.assertTrue(ok, f"回踩方向的远挂单是合法策略，不该被闸掉：{why}")
+
+    def test_ai_entry_beyond_five_percent_pullback_window_is_rejected(self):
+        rig = Rig(price=94000.0, ticker="100000")
+        now = time.time()
+        ctx = {
+            "notional_usdt": 1, "margin_usdt": 1,
+            "price_context_version": 1,
+            "decision_timestamp": now,
+            "market_data_timestamp": now * 1000,
+            "market_data_venue": "okx",
+        }
+        with patch.dict(os.environ, {"ASTRA_ORDER_MODE": "limit",
+                                     "ASTRA_MAX_ENTRY_DRIFT_PCT": "0.05"}), \
+             patch("scripts.order_risk.validate_quote_geometry_and_rr",
+                   return_value=(True, "", 1.0)), \
+             patch("astra_backend.exchanges.listing.ensure_contract_listed",
+                   return_value=SimpleNamespace(ok=True, reason="")), \
+             patch("scripts.trader.order_submit.time.time", return_value=now):
+            ok, why = rig.run(venue_ctx=ctx)
+        self.assertFalse(ok)
+        self.assertIn("价格新鲜度拒绝", why)
+        self.assertIn("允许回踩窗口", why)
+        self.assertEqual(rig.okx.orders, [])
+
+    def test_ai_market_snapshot_expiry_is_rejected(self):
+        rig = Rig(price=97000.0, ticker="100000")
+        now = time.time()
+        ctx = {
+            "notional_usdt": 1, "margin_usdt": 1,
+            "price_context_version": 1,
+            "decision_timestamp": now,
+            "market_data_timestamp": (now - 301) * 1000,
+            "market_data_venue": "okx",
+        }
+        with patch.dict(os.environ, {"ASTRA_ORDER_MODE": "limit"}), \
+             patch("scripts.order_risk.validate_quote_geometry_and_rr",
+                   return_value=(True, "", 1.0)), \
+             patch("astra_backend.exchanges.listing.ensure_contract_listed",
+                   return_value=SimpleNamespace(ok=True, reason="")), \
+             patch("scripts.trader.order_submit.time.time", return_value=now):
+            ok, why = rig.run(venue_ctx=ctx)
+        self.assertFalse(ok)
+        self.assertIn("时间新鲜度拒绝", why)
+        self.assertIn("行情快照已过期", why)
+        self.assertEqual(rig.okx.orders, [])
 
 
 class MultiVenueRouteTest(unittest.TestCase):

@@ -9,7 +9,7 @@
   不拿凭证错误拦全链（审计#4 教训：那等于交易停摆）；
 - **同向重复单收敛**：按创建时间只保最新一条为候选存活单，其余降级为重复单
   （修复外所"每轮重挂造成成对重复"）；
-- **新鲜意图只负责归属**；超过 4 分钟的入场挂单仍必须回收，避免旧价格长期占用在途名额。
+- **新鲜意图只负责归属**；超过一个 15 分钟 Trader 周期的入场挂单仍必须回收，避免旧价格长期占用在途名额。
 """
 
 import time
@@ -20,6 +20,7 @@ from unittest.mock import patch
 from scripts.trader.order_lifecycle import clean_stale_open_orders, reconcile_pending_orders
 
 NOW_MS = 1_700_000_000_000
+STALE_ORDER_MS = 15 * 60 * 1000
 
 
 class _Okx:
@@ -122,6 +123,17 @@ class OkxStaleLifecycleTest(unittest.TestCase):
         self.assertEqual(okx.cancelled, [("C-USDT-SWAP", "kept")],
                          "接管只代表归属，超龄 live 入场单仍必须撤")
 
+    def test_order_survives_the_old_four_minute_window_until_cycle_refresh(self):
+        """限价入场至少保留一个 15 分钟周期，不能在 4 分钟时提前杀掉。"""
+        fresh = {
+            "instId": "BTC-USDT-SWAP", "ordId": "o-fresh", "state": "live",
+            "cTime": NOW_MS - 4 * 60 * 1000 - 1,
+        }
+        okx = _Okx(pending=[fresh])
+        ok, _ = _clean(okx=okx, now_ms=NOW_MS)
+        self.assertTrue(ok)
+        self.assertEqual(okx.cancelled, [])
+
     def test_cancel_failure_blocks_the_cycle(self):
         stale = {"instId": "BTC-USDT-SWAP", "ordId": "o1", "state": "live", "cTime": 1}
         okx = _Okx(pending=[stale], cancel_raises=RuntimeError("撤单被拒"))
@@ -135,7 +147,7 @@ class IntentsUnreadableTest(unittest.TestCase):
         """**读不到 ≠ 没有意图**：意图读不出来 ⇒ **外所一张都不撤** + 拦本周期。
 
         ⚠️ 范围要读准：这条纪律管的是**外所**（代码里写的就是「本轮不撤任何**外所**挂单」）——
-        OKX 那一半是**纯时间**逻辑（超 240s 就撤），归属保护由上游对账的 `keep` 集提供
+        OKX 那一半是**纯时间**逻辑（超过 15 分钟 Trader 周期才撤），归属保护由上游对账的 `keep` 集提供
         （`reconcile_pending_orders` 先跑、判定接管的 ordId 传进来）。所以这里用外所来验。
         """
         ad = _Adapter(rows=[{"order_id": "x1", "side": "buy", "base": "BTC",
@@ -222,7 +234,7 @@ class CrossVenueTest(unittest.TestCase):
             {"order_id": "new", "side": "buy", "base": "BTC", "raw": {"symbol": "BTCUSDT", "time": 1_000}},
             {"order_id": "old", "side": "buy", "base": "BTC", "raw": {"symbol": "BTCUSDT", "time": 500}},
         ]
-        # now_ts 由 time.time() 决定 ⇒ 两条都远超 240s ⇒ 老的进 dupes、新的进 best
+        # now_ts 由 time.time() 决定 ⇒ 两条都远超 15 分钟周期 ⇒ 老的进 dupes、新的进 best
         ok, _, ad = self._run(rows=rows)
         self.assertTrue(ok)
         self.assertIn(("BTC", "old"), ad.cancelled, "重复单要被收敛撤销")
@@ -409,7 +421,7 @@ class CrossVenueNormalizationEdgeTest(unittest.TestCase):
         self.assertEqual(ad.cancelled, [], "方向不可判 ⇒ 跳过（不猜方向去撤单）")
 
     def test_duplicates_within_grace_period_are_left_alone(self):
-        """宽限期内（240s）的重复单不动手 —— 可能是同一轮的正常重挂。"""
+        """宽限期内（15 分钟）的重复单不动手 —— 可能是同一轮的正常重挂。"""
         rows = [
             {"order_id": "new", "side": "buy", "contract": "BTC_USDT", "create_time": NOW_MS / 1000},
             {"order_id": "old", "side": "buy", "contract": "BTC_USDT", "create_time": NOW_MS / 1000 - 1},

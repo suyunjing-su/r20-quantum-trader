@@ -219,8 +219,8 @@ class TestExternalVenueReclaim(unittest.TestCase):
     def test_reclaim_stale_and_keep(self):
         import scripts.ai_factor_trader as aft
         now_ts = int(time.time() * 1000)
-        old_s = (now_ts - 400_000) // 1000       # gate create_time 秒制
-        old_ms = now_ts - 400_000                # binance raw.time 毫秒制
+        old_s = (now_ts - 15 * 60 * 1000 - 1_000) // 1000  # gate create_time 秒制
+        old_ms = now_ts - 15 * 60 * 1000 - 1_000       # binance raw.time 毫秒制
 
         gate_cancelled, bin_cancelled = [], []
         gate = type("G", (), {

@@ -182,6 +182,11 @@ def assemble_decision_cache(
                 "chg24h": p.get("chg24h"),
                 "vol24h": p.get("vol24h", 0.0)
             },
+            # Execution must be able to distinguish a fresh decision from a fresh
+            # write of a decision that was built on an old market snapshot.
+            "market_data_venue": p.get("market_data_venue") or "",
+            "market_data_timestamp": int(p.get("market_data_timestamp") or 0),
+            "market_data_last": p.get("market_data_last", p.get("price")),
             "raw_funding_rate": f"{p['fundingRate']}%" if p.get('fundingRate') else "--",
             "raw_oi": p.get('oiUsd') or "--",
             "raw_taker_vol": p.get('takerNetUsd') or "--",

@@ -27,6 +27,7 @@
 """
 import json
 import os
+import time
 import urllib
 import warnings
 
@@ -70,6 +71,9 @@ def fetch_single_instrument_data(item, all_positions, usdt_available, *,
         "max_leverage": item.get("max_leverage", 3),
         "sl_atr_mult": item.get("sl_atr_mult", 2.2),
         "price": 0.0,
+        "market_data_timestamp": 0,
+        "market_data_venue": "okx",
+        "market_last": 0.0,
         "change24h": 0.0,
         "vol24h": 0.0,
         "rsi": 50.0,
@@ -145,6 +149,7 @@ def fetch_single_instrument_data(item, all_positions, usdt_available, *,
         vols = [float(c[5]) if len(c) > 5 else 1.0 for c in candles_15m]
         
         f["price"] = closes[-1]
+        f["market_last"] = f["price"]
         f["rsi"] = calc_rsi(closes, 14)
         f["rsi_7"] = calc_rsi(closes, 7)
         f["ema9"] = calc_ema(closes, 9)
@@ -193,6 +198,15 @@ def fetch_single_instrument_data(item, all_positions, usdt_available, *,
                 d_t = json.loads(response_t.read().decode("utf-8"))
                 if d_t.get("code") == "0" and "data" in d_t and len(d_t["data"]) > 0:
                     t_item = d_t["data"][0]
+                    _ticker_last = float(t_item.get("last", 0) or 0)
+                    if _ticker_last > 0:
+                        # Technical indicators continue to use candle closes, but
+                        # execution sizing/anchors must use the current ticker last.
+                        f["price"] = _ticker_last
+                        f["market_last"] = _ticker_last
+                    f["market_data_timestamp"] = int(float(
+                        t_item.get("ts") or time.time() * 1000
+                    ))
                     f["bidPx"] = float(t_item.get("bidPx", f["price"]) or f["price"])
                     f["askPx"] = float(t_item.get("askPx", f["price"]) or f["price"])
         except Exception as _bbo_err:
