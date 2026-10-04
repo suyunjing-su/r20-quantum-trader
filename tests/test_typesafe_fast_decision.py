@@ -16,6 +16,34 @@ def test_system_one_request_is_not_chat_payload():
     assert "messages" not in payload
 
 
+def test_validated_system_one_runtime_exposes_callable_model_name():
+    from astra_backend.llm.store import validate_model_runtime
+
+    runtime = validate_model_runtime(
+        {
+            "providers": [{
+                "id": "typesafe",
+                "enabled": True,
+                "api_format": "typesafe_system_one",
+                "base_url": "https://api.typesafe.ai/v1",
+                "api_key": "test-only-not-a-credential",
+                "models": [{"id": "jev-1.13.0"}],
+            }],
+            "models": [{
+                "id": "jev-1.13.0",
+                "provider_id": "typesafe",
+                "api_format": "typesafe_system_one",
+                "api_path": "/systemone",
+                "capabilities": ["structured_decision"],
+            }],
+        },
+        "jev-1.13.0",
+        required_capability="structured_decision",
+    )
+    assert runtime["model"] == "jev-1.13.0"
+    assert runtime["id"] == "jev-1.13.0"
+
+
 def test_system_one_response_preserves_typed_answers():
     result = parse_system_one_response({
         "model": "jev-1.13.0",

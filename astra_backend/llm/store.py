@@ -300,6 +300,11 @@ def validate_model_runtime(config: Dict[str, Any], model_id: str, *, required_ca
             raise ValueError(f"模型 {model_id} 未声明所需能力：{required_capability}")
     return {
         **target,
+        # Callers use the normalized runtime contract (`model`), while the
+        # persisted model record uses `id`.  Without this alias, Fast Decision
+        # validated the model successfully and then sent an empty model name
+        # to System One, so no HTTP request was made.
+        "model": str(target.get("id") or model_id),
         "provider_id": provider.get("id"),
         "provider_name": provider.get("name") or target.get("provider_name"),
         "base_url": str(provider.get("base_url") or target.get("base_url") or "").rstrip("/"),
