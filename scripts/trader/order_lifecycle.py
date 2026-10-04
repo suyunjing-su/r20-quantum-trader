@@ -62,11 +62,17 @@ def clean_stale_open_orders(keep_ord_ids: Optional[set] = None,
     for order in open_orders:
         inst_id = str(order.get("instId") or "")
         order_id = str(order.get("ordId") or "")
-        if order_id and order_id in keep_ord_ids:
-            continue  # 挂单对账已判定归属（接管），不受超时生命周期清理影响
         state = str(order.get("state", "live")).lower()
         created_at = int(order.get("cTime", now_ts) or now_ts)
-        if state not in {"live", "partially_filled"} or not order_id or now_ts - created_at <= STALE_MS:
+        order_age = now_ts - created_at
+        # 对账接管只表示“这是本系统的单”，不表示它可以无限期存活。
+        # 旧逻辑对 keep_ord_ids 直接 continue，导致有新鲜 intent 的一小时前
+        # 挂单绕过 4 分钟回收，并在后续周期继续占用 pending_inst_ids。
+        # 只有仍在生命周期窗口内的接管单可以跳过清理；过期单必须先撤，再由
+        # 当前周期的新鲜决策决定是否重新下单。
+        if order_id and order_id in keep_ord_ids and order_age <= STALE_MS:
+            continue
+        if state not in {"live", "partially_filled"} or not order_id or order_age <= STALE_MS:
             continue
         try:
             okx_rest.cancel_order(inst_id, order_id)
@@ -78,7 +84,8 @@ def clean_stale_open_orders(keep_ord_ids: Optional[set] = None,
         _env_mode = str(current_environment().mode or "demo")
     except Exception:
         _env_mode = ""
-    # 外所接管判定用活意图集（与 OKX 对账同一把尺：新鲜意图归属 → 保留）
+    # 仍读取活意图作为撤单安全前置条件：意图文件不可读时不能猜测归属。
+    # 但意图只负责归属与 fail-closed，不能让超过 STALE_MS 的挂单无限存活。
     # ⚠️ 第一百三十四刀：**读不到意图 ⇒ 不撤任何单 + fail-closed**。
     # 旧写法 `except Exception: _live_intents = []` 把"文件坏了"当成"没有意图"
     # ⇒ 每笔挂单都失去归属 ⇒ 按孤儿/陈旧**撤销**（撤旧挂新循环的另一种成因），
@@ -130,8 +137,8 @@ def clean_stale_open_orders(keep_ord_ids: Optional[set] = None,
             # 其余不可核验（网络/未知）：与 OKX 同尺 fail-closed 拦本轮
             return False, f"{_v} 挂单回收不可用: {type(exc).__name__}: {_msg[:120]}"
         # 归一 (base, dir) → 按创建时间**只保最新**一条为候选存活单，其余降级为重复单；
-        # 存活候选再按新鲜意图归属决定保留/超时撤销（修复：外所单此前既无人回收也无
-        # 接管语义，每轮重挂造成 BTC/SUI 成对重复）。
+        # 候选单仍受 STALE_MS 生命周期回收，意图只用于归属/安全前置，不再豁免超龄单。
+        # （修复：外所单此前既无人回收也无接管语义，每轮重挂造成 BTC/SUI 成对重复。）
         best: Dict[tuple, tuple] = {}
         dupes: List[tuple] = []
         for o in _rows:
@@ -139,7 +146,7 @@ def clean_stale_open_orders(keep_ord_ids: Optional[set] = None,
                 continue
             _raw = o.get("raw") if isinstance(o.get("raw"), dict) else {}
             order_id = str(o.get("order_id") or o.get("id") or _raw.get("id") or "")
-            if not order_id or order_id in keep_ord_ids:
+            if not order_id:
                 continue
             _side = str(o.get("side") or _raw.get("side") or "").lower()
             if not _side:
@@ -162,6 +169,10 @@ def clean_stale_open_orders(keep_ord_ids: Optional[set] = None,
             else:
                 inst_disp = str(o.get("contract") or _raw.get("contract") or "")
                 created_ms = int(float(o.get("create_time") or _raw.get("create_time") or (now_ts / 1000)) * 1000)
+            # 与 OKX 一致：keep 只豁免生命周期窗口内的已归属单。
+            # 超龄 keep 单仍进入 best/dupes，随后按 STALE_MS 回收。
+            if order_id in keep_ord_ids and now_ts - created_ms <= STALE_MS:
+                continue
             _b = str(o.get("base") or "").upper() or inst_disp.replace("_USDT", "").replace("USDT", "").split("-")[0].upper()
             if not _b or _side not in ("buy", "sell"):
                 continue
@@ -183,10 +194,11 @@ def clean_stale_open_orders(keep_ord_ids: Optional[set] = None,
             except Exception as exc:
                 return False, f"failed to cancel duplicate order {_v} {inst_disp}/{order_id}: {exc}"
         for (venue_base, dir_word), (created_ms, order_id, inst_disp) in best.items():
+            # intent 只用于归属判断，不能让过期挂单绕过生命周期回收。
+            # 否则一条仍在 TTL 内的 6 小时 intent 会让外所挂单存活数小时，
+            # 下一轮仍会被 pending_inst_ids 当作有效在途单而不更新价格。
             if now_ts - created_ms <= STALE_MS:
                 continue
-            if _intent_covers(venue_base, dir_word):
-                continue  # 新鲜意图归属 → 保留（与 OKX kept 同语义）
             try:
                 _ad.cancel_order(venue_base, order_id)
                 print(f"[挂单生命周期管理] 自动撤销超时挂单({_v.upper()}): {inst_disp} (id={order_id})")
