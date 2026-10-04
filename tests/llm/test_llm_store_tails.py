@@ -291,6 +291,24 @@ class LlmStoreTailsTests(unittest.TestCase):
         self.assertEqual(p2["api_path"], "/responses")
         self.assertTrue(p2["response_api_enabled"])
 
+    def test_upsert_provider_persists_bounded_concurrency_limit(self):
+        self._write_config({})
+        upsert_provider(self.config_file, self._reload, {
+            "id": "parallel-prov",
+            "base_url": "https://api.parallel.test/v1",
+            "concurrency_limit": 4,
+        })
+        cfg = self._reload()
+        prov = next(x for x in cfg["providers"] if x["id"] == "parallel-prov")
+        self.assertEqual(prov["concurrency_limit"], 4)
+
+        upsert_provider(self.config_file, self._reload, {
+            "id": "parallel-prov",
+            "base_url": "https://api.parallel.test/v1",
+            "concurrency_limit": 1000,
+        })
+        self.assertEqual(self._reload()["providers"][0]["concurrency_limit"], 64)
+
     def test_upsert_provider_auto_generates_pid_from_name(self):
         self._write_config({})
         upsert_provider(self.config_file, self._reload, {

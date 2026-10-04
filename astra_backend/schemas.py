@@ -133,6 +133,7 @@ class LLMProviderUpsertRequest(BaseModel):
     api_format: str | None = "openai_chat"
     api_path: str | None = "/chat/completions"
     description: str | None = ""
+    concurrency_limit: int | None = Field(default=1, ge=1, le=64)
     models: list[dict[str, Any]] | None = None
 
 

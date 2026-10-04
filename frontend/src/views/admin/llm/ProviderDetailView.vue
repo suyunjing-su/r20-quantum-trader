@@ -200,6 +200,19 @@ function monogram(name: string): string {
           </label>
 
           <label class="field-stack">
+            <span class="form-label">{{ t('admin.llm.providerConcurrencyLimit') }}</span>
+            <input
+              v-model.number="providerForm.concurrency_limit"
+              type="number"
+              min="1"
+              max="64"
+              step="1"
+              class="field num"
+            />
+            <span class="pd-field-hint">{{ t('admin.llm.providerConcurrencyLimitDesc') }}</span>
+          </label>
+
+          <label class="field-stack">
             <span class="form-label">{{ t('admin.llm.apiPath') }}</span>
             <input v-model="providerForm.api_path" placeholder="/chat/completions" class="field mono" />
           </label>

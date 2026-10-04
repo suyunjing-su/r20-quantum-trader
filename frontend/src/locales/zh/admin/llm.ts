@@ -70,6 +70,8 @@ export const zhAdminLlm = {
   baseUrlPlaceholder: '按供应商要求原样填写，如 https://open.bigmodel.cn/api/paas/v4',
   baseUrlDesc: '已取消自动补 /v1：带版本路径（/v1、/v4、/v1beta 等）以填写内容为准，直接拼接请求端点；仅裸域名自动兼容补 /v1。',
   apiPath: 'API 路径',
+  providerConcurrencyLimit: 'Provider 并发上限',
+  providerConcurrencyLimitDesc: '同一供应商允许同时进行的请求数；必须按供应商实际限额设置，未知时保持 1。',
   systemOneExampleTitle: 'TypeSafe System One 原生请求',
   systemOneExampleDesc: '该协议不是 Chat Completions，也不是 Claude Messages；页面不会渲染真实密钥。',
   systemOneExample: `POST /v1/systemone

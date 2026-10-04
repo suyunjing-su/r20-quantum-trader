@@ -68,6 +68,8 @@ export const enAdminLlm = {
   baseUrlPlaceholder: 'Enter exactly as required by the provider, e.g. https://open.bigmodel.cn/api/paas/v4',
   baseUrlDesc: 'Automatic /v1 appending has been removed: versioned paths (/v1, /v4, /v1beta, etc.) are used verbatim and appended directly to the request endpoint; only bare hostnames still get /v1 for compatibility.',
   apiPath: 'API path',
+  providerConcurrencyLimit: 'Provider concurrency limit',
+  providerConcurrencyLimitDesc: 'Maximum simultaneous requests for this provider. Set it to the provider\'s actual limit; keep 1 when unknown.',
   systemOneExampleTitle: 'Native TypeSafe System One request',
   systemOneExampleDesc: 'This protocol is not Chat Completions or Claude Messages. The key is never rendered here.',
   systemOneExample: `POST /v1/systemone

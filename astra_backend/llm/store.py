@@ -872,6 +872,11 @@ def upsert_provider(config_file: Path, reload_config: Callable[[], Dict[str, Any
     api_format = str(provider_data.get("api_format", "openai_chat")).strip()
     api_path = str(provider_data.get("api_path", "/chat/completions")).strip()
     desc = str(provider_data.get("description", "")).strip()
+    raw_concurrency = provider_data.get("concurrency_limit", 1)
+    try:
+        concurrency_limit = max(1, min(64, int(raw_concurrency)))
+    except (TypeError, ValueError):
+        concurrency_limit = 1
 
     if not api_format:
         api_format = "claude_messages" if "claude" in pid or "anthropic" in base_url.lower() else "openai_chat"
@@ -914,6 +919,7 @@ def upsert_provider(config_file: Path, reload_config: Callable[[], Dict[str, Any
         existing["api_format"] = api_format
         existing["api_path"] = api_path
         existing["description"] = desc
+        existing["concurrency_limit"] = concurrency_limit
     else:
         providers.append({
             "id": pid,
@@ -928,6 +934,7 @@ def upsert_provider(config_file: Path, reload_config: Callable[[], Dict[str, Any
             "api_format": api_format,
             "api_path": api_path,
             "description": desc,
+            "concurrency_limit": concurrency_limit,
             "models": [],
         })
 

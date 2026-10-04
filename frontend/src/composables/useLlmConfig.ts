@@ -66,6 +66,7 @@ const providerForm = ref<any>({
   base_url: '',
   api_key: '',
   api_path: '/chat/completions',
+  concurrency_limit: 1,
   description: '',
 })
 
@@ -232,6 +233,7 @@ function openAddProviderModal() {
     base_url: '',
     api_key: '',
     api_path: '/chat/completions',
+    concurrency_limit: 1,
     description: '',
   }
   detailTab.value = 'config'
@@ -255,6 +257,7 @@ function selectProvider(p: any) {
     base_url: p.base_url || '',
     api_key: '',
     api_path: p.api_path || (format === 'claude_messages' ? '/messages' : (format === 'openai_responses' ? '/responses' : '/chat/completions')),
+    concurrency_limit: Number(p.concurrency_limit) || 1,
     description: p.description || '',
   }
   detailTab.value = 'config'

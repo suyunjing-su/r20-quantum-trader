@@ -189,12 +189,15 @@ def _bounded_parallel_calls(
 
 def _max_council_concurrency(config: Dict[str, Any], task_count: int) -> int:
     """Resolve one bounded provider-safe concurrency budget for this cycle."""
-    raw = config.get("max_concurrency") or os.getenv("ASTRA_COUNCIL_MAX_CONCURRENCY", "4")
+    raw = config.get("max_concurrency") or os.getenv("ASTRA_COUNCIL_MAX_CONCURRENCY", "16")
     try:
         limit = int(raw)
     except (TypeError, ValueError):
-        limit = 4
-    return max(1, min(limit, max(1, task_count)))
+        limit = 16
+    # Keep a bounded executor, but do not impose the old four-worker ceiling on
+    # multi-group fan-out. Provider/model gates remain the authoritative safety
+    # limit for actual HTTP concurrency.
+    return max(1, min(limit, 16, max(1, task_count)))
 
 
 def _timeout_trader_result(key: str, role_spec: Dict[str, Any], reason: str) -> Dict[str, Any]:
