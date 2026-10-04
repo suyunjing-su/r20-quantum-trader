@@ -554,6 +554,7 @@ async function runTestModel(m: any) {
       method: 'POST',
       body: JSON.stringify({
         model: m.id,
+        provider_id: prov?.id || m.provider_id,
         base_url: prov?.base_url || m.base_url,
         api_format: prov?.api_format || m.api_format || 'openai_chat',
         reasoning_effort: m.reasoning_effort || 'auto',
