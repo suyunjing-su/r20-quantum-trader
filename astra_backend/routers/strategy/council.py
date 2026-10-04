@@ -45,6 +45,7 @@ def admin_update_council_config(payload: CouncilConfigUpdateRequest, x_astra_ses
         "enabled": payload.enabled,
         "consensus_mode": payload.consensus_mode,
         "timeout_seconds": payload.timeout_seconds,
+        "max_symbols_per_group": payload.max_symbols_per_group,
         "roles": payload.roles,
     })
     audit_record("council.config.update", "success", {
@@ -52,6 +53,7 @@ def admin_update_council_config(payload: CouncilConfigUpdateRequest, x_astra_ses
         "enabled": payload.enabled,
         "consensus_mode": payload.consensus_mode,
         "timeout_seconds": payload.timeout_seconds,
+        "max_symbols_per_group": payload.max_symbols_per_group,
     })
     return {"status": "ok", "config": saved}
 

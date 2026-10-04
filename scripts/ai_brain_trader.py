@@ -50,7 +50,11 @@ import datetime
 import urllib.request
 import subprocess
 import tempfile
-import fcntl
+try:
+    import fcntl
+except ImportError:  # Windows
+    fcntl = None
+    import msvcrt
 from typing import Dict, Any, List, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -219,8 +223,21 @@ def single_brain_cycle(func):
     def wrapped(*args, **kwargs):
         os.makedirs(DATA_DIR, exist_ok=True)
         lock_handle = open(AI_BRAIN_LOCK_FILE, "a+", encoding="utf-8")
+        fd = lock_handle.fileno()
         try:
-            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if fcntl is not None:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            else:
+                if os.fstat(fd).st_size == 0:
+                    lock_handle.write("\\0")
+                    lock_handle.flush()
+                os.lseek(fd, 0, os.SEEK_SET)
+                try:
+                    msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                except OSError:
+                    lock_handle.close()
+                    print("[AI Brain Batch] Skip: another inference cycle is still running")
+                    return None
         except BlockingIOError:
             lock_handle.close()
             print("[AI Brain Batch] Skip: another inference cycle is still running")
@@ -232,8 +249,14 @@ def single_brain_cycle(func):
             lock_handle.flush()
             return func(*args, **kwargs)
         finally:
-            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
-            lock_handle.close()
+            try:
+                if fcntl is not None:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                else:
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            finally:
+                lock_handle.close()
     return wrapped
 
 
@@ -1126,6 +1149,8 @@ def execute_batch_ai_brain_cycle(
     telemetry = ModelCallTelemetry(
         "trading_brain", model_name, str(effort), effective_system_prompt, prompt
     )
+    from astra_backend.council_manager import execute_council_debate
+    from astra_backend.council.debate import is_council_cycle_current
     return dispatch_llm_and_persist_decisions(
         AI_DECISION_CACHE_FILE=AI_DECISION_CACHE_FILE,
         AI_DECISION_HISTORY_FILE=AI_DECISION_HISTORY_FILE,
@@ -1162,7 +1187,10 @@ def execute_batch_ai_brain_cycle(
         thinking_timeout=thinking_timeout,
         time=time,
         time_str=time_str,
-        urllib=urllib    )
+        urllib=urllib,
+        execute_council_debate=execute_council_debate,
+        is_council_cycle_current=is_council_cycle_current,
+    )
 
 def get_latest_ai_decision(inst_id: str, max_age_seconds: int = DECISION_MAX_AGE_SECONDS) -> Optional[Dict[str, Any]]:
     """Read a validated decision only while its cache timestamp is fresh."""

@@ -238,6 +238,8 @@ def execute_llm_request(get_active_runtime: Callable[[], Dict[str, Any]], resolv
     timeout: Optional[float] = None,
     allow_fallback: bool = True,
     max_tokens: Optional[int] = None,
+    deadline: Optional[float] = None,
+    cancellation_event=None,
 ) -> Tuple[str, str, Dict[str, Any], int]:
     """Unified resilient executor for LLM calls across all 3 protocols.
 
@@ -271,6 +273,11 @@ def execute_llm_request(get_active_runtime: Callable[[], Dict[str, Any]], resolv
         "model": target_model,
         "name": runtime.get("name") or target_model,
         "provider_name": runtime.get("provider_name", ""),
+        "provider_id": runtime.get("provider_id", ""),
+        "concurrency_limit": runtime.get("concurrency_limit") or runtime.get("provider_concurrency_limit"),
+        "provider_concurrency_limit": runtime.get("provider_concurrency_limit"),
+        "rate_limit_per_minute": runtime.get("rate_limit_per_minute") or runtime.get("provider_rate_limit_per_minute"),
+        "provider_rate_limit_per_minute": runtime.get("provider_rate_limit_per_minute"),
         "base_url": target_url,
         "api_key": target_key,
         "api_format": target_format,
@@ -299,19 +306,52 @@ def execute_llm_request(get_active_runtime: Callable[[], Dict[str, Any]], resolv
     last_error: Optional[BaseException] = None
     last_timed_out = False
     deadline_hit = False
+    total_wait_hit = False
+
+    def deadline_remaining() -> Optional[float]:
+        return None if deadline is None else float(deadline) - time.time()
 
     for cand_idx, cand in enumerate(candidates):
         cand_timeout = effective_timeout if cand_idx == 0 else float(cand.get("thinking_timeout") or effective_timeout)
         for attempt in range(attempts):
+            remaining = deadline_remaining()
+            if cancellation_event is not None and cancellation_event.is_set():
+                deadline_hit = True
+                break
+            if remaining is not None and remaining <= 0:
+                deadline_hit = True
+                break
             if attempt > 0:
                 if (time.perf_counter() - call_started) > FAILOVER_MAX_TOTAL_WAIT:
+                    total_wait_hit = True
+                    break
+                backoff = min(2.0 * attempt, 8.0)
+                if remaining is not None:
+                    backoff = min(backoff, max(0.0, remaining))
+                if backoff > 0:
+                    if cancellation_event is not None:
+                        # Event.wait is both deadline-bounded and immediately
+                        # wakeable when the Council closes this cycle.
+                        cancellation_event.wait(timeout=backoff)
+                    else:
+                        time.sleep(backoff)
+                if cancellation_event is not None and cancellation_event.is_set():
                     deadline_hit = True
                     break
-                time.sleep(min(2.0 * attempt, 8.0))
+                remaining = deadline_remaining()
+                if remaining is not None and remaining <= 0:
+                    deadline_hit = True
+                    break
             try:
-                content, reasoning, usage, latency = _attempt_llm_call(
-                    cand, messages, temperature, response_format, cand_timeout
-                )
+                if cancellation_event is None:
+                    content, reasoning, usage, latency = _attempt_llm_call(
+                        cand, messages, temperature, response_format, cand_timeout, deadline
+                    )
+                else:
+                    content, reasoning, usage, latency = _attempt_llm_call(
+                        cand, messages, temperature, response_format, cand_timeout, deadline,
+                        cancellation_event,
+                    )
                 if cand_idx > 0:
                     print(
                         f"[LLM Failover] ✅ 主模型 {primary['model']} 请求失败，已回退至模型 {cand['model']}"
@@ -345,12 +385,22 @@ def execute_llm_request(get_active_runtime: Callable[[], Dict[str, Any]], resolv
                 failures.append(f"模型 {cand['model']} 未预期异常：{type(exc).__name__}: {str(exc)[:200]}")
                 last_error = exc
                 last_timed_out = False
+            remaining = deadline_remaining()
+            if remaining is not None and remaining <= 0:
+                deadline_hit = True
+                break
         if deadline_hit:
             break
 
     summary_tail = " | ".join(failures[-6:]) if failures else (str(last_error) if last_error else "无响应")
+    if deadline_hit:
+        last_timed_out = True
     if len(candidates) == 1:
         # 单模型（未配置回退）：保持旧版异常语义，前端提示文案不变
+        if deadline_hit:
+            raise TimeoutError(
+                f"LLM 请求已超过绝对截止时间（模型 {primary['model']}）"
+            ) from last_error
         if isinstance(last_error, _LLMHardError):
             raise RuntimeError(str(last_error)) from last_error
         if isinstance(last_error, _LLMTransientError):
@@ -368,6 +418,7 @@ def execute_llm_request(get_active_runtime: Callable[[], Dict[str, Any]], resolv
         "errors": [f[:220] for f in failures[-8:]],
         "elapsed_seconds": round(time.perf_counter() - call_started, 1),
         "deadline_hit": deadline_hit,
+        "total_wait_hit": total_wait_hit,
         "succeeded": False,
     })
     chain_names = " → ".join(c["model"] for c in candidates)

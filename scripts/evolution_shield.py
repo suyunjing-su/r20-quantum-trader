@@ -23,7 +23,11 @@ import json
 import math
 import re
 import copy
-import fcntl
+try:
+    import fcntl
+except ImportError:  # Windows uses the CRT byte-range lock equivalent.
+    fcntl = None
+    import msvcrt
 import hashlib
 import os
 import tempfile
@@ -354,12 +358,24 @@ def sync_markdown_mirror() -> bool:
 @contextmanager
 def _memory_lock():
     STRUCTURED_MEMORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(str(STRUCTURED_MEMORY_FILE) + ".lock", "a") as handle:
-        fcntl.flock(handle, fcntl.LOCK_EX)
+    with open(str(STRUCTURED_MEMORY_FILE) + ".lock", "a+b") as handle:
+        if fcntl is not None:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+        else:
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(bytes([0]))
+                handle.flush()
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
         try:
             yield
         finally:
-            fcntl.flock(handle, fcntl.LOCK_UN)
+            if fcntl is not None:
+                fcntl.flock(handle, fcntl.LOCK_UN)
+            else:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
 
 
 def _commit(lessons):

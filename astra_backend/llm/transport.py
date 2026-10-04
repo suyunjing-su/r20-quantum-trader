@@ -8,7 +8,9 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -39,6 +41,132 @@ class _LLMTransientError(Exception):
         super().__init__(message)
         self.timed_out = timed_out
         self.fail_over_now = fail_over_now
+
+
+_LLM_GATES: dict[str, tuple[threading.BoundedSemaphore, int]] = {}
+_LLM_GATES_LOCK = threading.Lock()
+_RATE_BUCKETS: dict[str, tuple[float, float, float]] = {}
+_RATE_BUCKETS_LOCK = threading.Lock()
+
+
+def _candidate_gate_limit(cand: Dict[str, Any]) -> int:
+    raw = (
+        cand.get("concurrency_limit")
+        or cand.get("provider_concurrency_limit")
+        or os.getenv("ASTRA_LLM_PROVIDER_CONCURRENCY", "1")
+    )
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _candidate_key(cand: Dict[str, Any]) -> str:
+    provider = str(
+        cand.get("provider_id")
+        or cand.get("provider_name")
+        or cand.get("base_url")
+        or "default"
+    ).strip().lower()
+    model = str(cand.get("model") or "default").strip().lower()
+    return f"{provider}:{model}"
+
+
+def _candidate_gate(cand: Dict[str, Any]) -> threading.BoundedSemaphore:
+    key = _candidate_key(cand)
+    limit = _candidate_gate_limit(cand)
+    with _LLM_GATES_LOCK:
+        current = _LLM_GATES.get(key)
+        if current is None or current[1] != limit:
+            current = (threading.BoundedSemaphore(limit), limit)
+            _LLM_GATES[key] = current
+        return current[0]
+
+
+def _candidate_rate_limit(cand: Dict[str, Any]) -> float:
+    raw = (
+        cand.get("rate_limit_per_minute")
+        or cand.get("provider_rate_limit_per_minute")
+        or os.getenv("ASTRA_LLM_PROVIDER_RPM", "")
+    )
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _acquire_candidate_rate(cand: Dict[str, Any], deadline: Optional[float], cancellation_event=None) -> None:
+    """Consume one shared provider/model token without crossing the deadline."""
+    rate = _candidate_rate_limit(cand)
+    if rate <= 0:
+        return
+    key = _candidate_key(cand)
+    # Conservative capacity-one bucket: no burst above the configured RPM.
+    capacity = 1.0
+    while True:
+        now = time.monotonic()
+        with _RATE_BUCKETS_LOCK:
+            old_rate, tokens, last = _RATE_BUCKETS.get(key, (rate, capacity, now))
+            if old_rate != rate:
+                old_rate, tokens, last = rate, capacity, now
+            tokens = min(capacity, tokens + max(0.0, now - last) * rate / 60.0)
+            if tokens >= 1.0:
+                _RATE_BUCKETS[key] = (rate, tokens - 1.0, now)
+                return
+            wait_for = (1.0 - tokens) * 60.0 / rate
+            _RATE_BUCKETS[key] = (rate, tokens, now)
+        if cancellation_event is not None and cancellation_event.is_set():
+            raise _LLMTransientError(
+                f"LLM provider rate gate 已被委员会 cycle 取消（模型 {cand.get('model', '')}）",
+                timed_out=True, fail_over_now=True,
+            )
+        remaining = None if deadline is None else float(deadline) - time.time()
+        if remaining is not None and remaining <= 0:
+            raise _LLMTransientError(
+                f"LLM provider rate gate 已超过委员会绝对截止时间（模型 {cand.get('model', '')}）",
+                timed_out=True, fail_over_now=True,
+            )
+        wait_for = min(wait_for, remaining) if remaining is not None else wait_for
+        if cancellation_event is not None:
+            cancellation_event.wait(timeout=max(0.0, wait_for))
+        else:
+            time.sleep(max(0.0, wait_for))
+
+
+def _acquire_candidate_gate(cand: Dict[str, Any], deadline: Optional[float], cancellation_event=None) -> threading.BoundedSemaphore:
+    gate = _candidate_gate(cand)
+    if cancellation_event is not None and cancellation_event.is_set():
+        raise _LLMTransientError(
+            f"LLM 请求已被委员会 cycle 取消（模型 {cand.get('model', '')}）",
+            timed_out=True, fail_over_now=True,
+        )
+    remaining = None if deadline is None else float(deadline) - time.time()
+    if remaining is not None and remaining <= 0:
+        raise _LLMTransientError(
+            f"LLM provider gate 已超过委员会绝对截止时间（模型 {cand.get('model', '')}）",
+            timed_out=True, fail_over_now=True,
+        )
+    acquired = gate.acquire(timeout=max(0.0, remaining) if remaining is not None else None)
+    if not acquired:
+        raise _LLMTransientError(
+            f"LLM provider gate 等待超过委员会绝对截止时间（模型 {cand.get('model', '')}）",
+            timed_out=True, fail_over_now=True,
+        )
+    # A semaphore wake-up can race the wall clock.  Never let a permit acquired
+    # after the absolute deadline start an HTTP request.
+    if cancellation_event is not None and cancellation_event.is_set():
+        gate.release()
+        raise _LLMTransientError(
+            f"LLM provider gate 获取后 cycle 已取消（模型 {cand.get('model', '')}）",
+            timed_out=True, fail_over_now=True,
+        )
+    if deadline is not None and float(deadline) - time.time() <= 0:
+        gate.release()
+        raise _LLMTransientError(
+            f"LLM provider gate 获取后已超过委员会绝对截止时间（模型 {cand.get('model', '')}）",
+            timed_out=True, fail_over_now=True,
+        )
+    return gate
 
 
 class _LLMHardError(Exception):
@@ -245,7 +373,19 @@ def _parse_sse_data(data_lines: List[str]) -> Optional[Dict[str, Any]]:
     return event if isinstance(event, dict) else None
 
 
-def _consume_sse_lines(target_format: str, lines: Iterable[bytes]) -> Tuple[str, str, Dict[str, Any], Optional[str]]:
+def _check_stream_control(deadline: Optional[float], cancellation_event=None) -> None:
+    if cancellation_event is not None and cancellation_event.is_set():
+        raise TimeoutError("LLM 流式响应已被委员会 cycle 取消")
+    if deadline is not None and float(deadline) - time.time() <= 0:
+        raise TimeoutError("LLM 流式响应已超过绝对截止时间")
+
+
+def _consume_sse_lines(
+    target_format: str,
+    lines: Iterable[bytes],
+    deadline: Optional[float] = None,
+    cancellation_event=None,
+) -> Tuple[str, str, Dict[str, Any], Optional[str]]:
     """Consume an SSE stream line-by-line and return the completed response."""
     accumulator = _StreamAccumulator(target_format)
     data_lines: List[str] = []
@@ -258,6 +398,9 @@ def _consume_sse_lines(target_format: str, lines: Iterable[bytes]) -> Tuple[str,
             accumulator.feed(event)
 
     for raw_line in lines:
+        _check_stream_control(deadline, cancellation_event)
+        if deadline is not None and float(deadline) - time.time() <= 0:
+            raise TimeoutError("LLM 流式响应已超过绝对截止时间")
         line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
         if not line:
             dispatch()
@@ -266,22 +409,64 @@ def _consume_sse_lines(target_format: str, lines: Iterable[bytes]) -> Tuple[str,
         # event:, id:, retry: and comment lines are framing metadata. The JSON
         # data field is authoritative across all three provider protocols.
     dispatch()
+    _check_stream_control(deadline, cancellation_event)
     return accumulator.finish()
 
 
-def _consume_stream_response(target_format: str, resp: Any) -> Tuple[str, str, Dict[str, Any], Optional[str]]:
+def _set_response_read_timeout(resp: Any, deadline: Optional[float]) -> None:
+    """Refresh the underlying socket timeout before each potentially blocking read."""
+    if deadline is None:
+        return
+    remaining = float(deadline) - time.time()
+    if remaining <= 0:
+        raise TimeoutError("LLM 流式响应已超过绝对截止时间")
+    candidates = [resp]
+    for attr in ("fp", "raw", "_sock"):
+        expanded: List[Any] = []
+        for item in candidates:
+            value = getattr(item, attr, None)
+            if value is not None:
+                expanded.append(value)
+        candidates.extend(expanded)
+    for candidate in candidates:
+        setter = getattr(candidate, "settimeout", None)
+        if callable(setter):
+            try:
+                setter(remaining)
+            except (AttributeError, OSError, ValueError):
+                pass
+            return
+
+
+def _consume_stream_response(
+    target_format: str,
+    resp: Any,
+    deadline: Optional[float] = None,
+    cancellation_event=None,
+) -> Tuple[str, str, Dict[str, Any], Optional[str]]:
     """Consume a real HTTP stream incrementally, with JSON-only compatibility."""
     readline = getattr(resp, "readline", None)
     if not callable(readline):
+        _check_stream_control(deadline, cancellation_event)
+        _set_response_read_timeout(resp, deadline)
         body = resp.read()
+        _check_stream_control(deadline, cancellation_event)
+        _check_stream_control(deadline, cancellation_event)
         try:
             return (*_parse_llm_response(target_format, json.loads(body.decode("utf-8", errors="replace") if isinstance(body, bytes) else body)), None)
         except (TypeError, ValueError) as exc:
             raise ValueError("流式响应体非 JSON/SSE") from exc
 
+    _check_stream_control(deadline, cancellation_event)
+    _set_response_read_timeout(resp, deadline)
     first = readline()
+    _check_stream_control(deadline, cancellation_event)
     if not isinstance(first, (bytes, bytearray)):
+        _check_stream_control(deadline, cancellation_event)
+        _set_response_read_timeout(resp, deadline)
         body = resp.read()
+        _check_stream_control(deadline, cancellation_event)
+        _check_stream_control(deadline, cancellation_event)
         try:
             return (*_parse_llm_response(target_format, json.loads(body.decode("utf-8", errors="replace") if isinstance(body, bytes) else body)), None)
         except (TypeError, ValueError) as exc:
@@ -292,9 +477,18 @@ def _consume_stream_response(target_format: str, resp: Any) -> Tuple[str, str, D
     is_sse = first_stripped.startswith((b"data:", b"event:", b":"))
     if not is_sse:
         body = bytearray(first)
-        for raw_line in resp:
+        iterator = iter(resp)
+        while True:
+            _check_stream_control(deadline, cancellation_event)
+            _set_response_read_timeout(resp, deadline)
+            try:
+                raw_line = next(iterator)
+            except StopIteration:
+                break
             if isinstance(raw_line, (bytes, bytearray)):
                 body.extend(raw_line)
+        if deadline is not None and float(deadline) - time.time() <= 0:
+            raise TimeoutError("LLM 响应已超过绝对截止时间")
         try:
             return (*_parse_llm_response(target_format, json.loads(bytes(body).decode("utf-8", errors="replace"))), None)
         except (TypeError, ValueError) as exc:
@@ -302,11 +496,21 @@ def _consume_stream_response(target_format: str, resp: Any) -> Tuple[str, str, D
 
     def remaining_lines() -> Iterable[bytes]:
         yield first
-        for raw_line in resp:
+        iterator = iter(resp)
+        while True:
+            _check_stream_control(deadline, cancellation_event)
+            _set_response_read_timeout(resp, deadline)
+            try:
+                raw_line = next(iterator)
+            except StopIteration:
+                break
             if isinstance(raw_line, (bytes, bytearray)):
                 yield bytes(raw_line)
 
-    return _consume_sse_lines(target_format, remaining_lines())
+    return _consume_sse_lines(
+        target_format, remaining_lines(), deadline=deadline,
+        cancellation_event=cancellation_event,
+    )
 
 
 def _parse_stream_response(target_format: str, body: bytes | str) -> Tuple[str, str, Dict[str, Any]]:
@@ -526,10 +730,33 @@ def build_chat_payload(
 
 def _attempt_llm_call(
     cand: Dict[str, Any],
+    messages: List[Dict[str, Any]],
+    temperature: Optional[float],
+    response_format: Optional[Dict[str, Any]],
+    effective_timeout: float,
+    deadline: Optional[float] = None,
+    cancellation_event=None,
+) -> Tuple[str, str, Dict[str, Any], int]:
+    """Run one attempt behind the shared provider/model concurrency gate."""
+    _acquire_candidate_rate(cand, deadline, cancellation_event)
+    gate = _acquire_candidate_gate(cand, deadline, cancellation_event)
+    try:
+        return _attempt_llm_call_unbounded(
+            cand, messages, temperature, response_format, effective_timeout,
+            deadline, cancellation_event,
+        )
+    finally:
+        gate.release()
+
+
+def _attempt_llm_call_unbounded(
+    cand: Dict[str, Any],
     messages: List[Dict[str, str]],
     temperature: Optional[float],
     response_format: Optional[Dict[str, Any]],
     effective_timeout: float,
+    deadline: Optional[float] = None,
+    cancellation_event=None,
 ) -> Tuple[str, str, Dict[str, Any], int]:
     """单次请求一个模型；失败时抛 _LLMTransientError（可重试）或 _LLMHardError（换模型）。"""
     max_tokens = _coerce_max_tokens(cand.get("max_tokens"))
@@ -549,8 +776,32 @@ def _attempt_llm_call(
 
     t0 = time.perf_counter()
     req = urllib.request.Request(endpoint, data=json.dumps(payload).encode("utf-8"), headers=headers)
+
+    def request_timeout() -> float:
+        if cancellation_event is not None and cancellation_event.is_set():
+            raise _LLMTransientError(
+                f"LLM 请求已被委员会 cycle 取消（模型 {cand['model']}）",
+                timed_out=True, fail_over_now=True,
+            )
+        if deadline is None:
+            return effective_timeout
+        remaining = float(deadline) - time.time()
+        if remaining <= 0:
+            raise _LLMTransientError(
+                f"LLM 请求已超过委员会绝对截止时间（模型 {cand['model']}）",
+                timed_out=True,
+                fail_over_now=True,
+            )
+        return min(effective_timeout, remaining)
+
     try:
-        resp_handle = urllib.request.urlopen(req, timeout=effective_timeout)
+        resp_handle = urllib.request.urlopen(req, timeout=request_timeout())
+        if cancellation_event is not None and cancellation_event.is_set():
+            resp_handle.close()
+            raise _LLMTransientError(
+                f"LLM 响应已被委员会 cycle 取消（模型 {cand['model']}）",
+                timed_out=True, fail_over_now=True,
+            )
     except urllib.error.HTTPError as exc:
         err_b = ""
         try:
@@ -571,10 +822,11 @@ def _attempt_llm_call(
             }
             fb_req = urllib.request.Request(endpoint, data=json.dumps(fb_payload).encode("utf-8"), headers=headers)
             try:
-                with urllib.request.urlopen(fb_req, timeout=effective_timeout) as fb_resp:
+                with urllib.request.urlopen(fb_req, timeout=request_timeout()) as fb_resp:
                     latency_ms = int((time.perf_counter() - t0) * 1000)
                     content, reasoning, usage, finish_reason = _consume_stream_response(
-                        cand.get("api_format", "openai_chat"), fb_resp
+                        cand.get("api_format", "openai_chat"), fb_resp,
+                        deadline=deadline, cancellation_event=cancellation_event,
                     )
                 if finish_reason in ("length", "max_tokens"):
                     raise _LLMTransientError(
@@ -582,9 +834,17 @@ def _attempt_llm_call(
                     )
                 if not content and not reasoning:
                     raise _LLMTransientError(f"模型 {cand['model']} 返回空正文（已自适应去参数重试）")
+                if deadline is not None and float(deadline) - time.time() <= 0:
+                    raise TimeoutError("LLM 自适应重试响应已超过绝对截止时间")
                 return content, reasoning, usage, latency_ms
             except (urllib.error.URLError, TimeoutError, socket.timeout, ValueError) as fb_exc:
                 fb_code = getattr(fb_exc, "code", 0) or 0
+                if isinstance(fb_exc, (TimeoutError, socket.timeout)):
+                    raise _LLMTransientError(
+                        f"LLM 自适应重试超时（模型 {cand['model']}）",
+                        timed_out=True,
+                        fail_over_now=True,
+                    ) from fb_exc
                 if fb_code and not _is_transient_http(fb_code, str(getattr(fb_exc, "msg", "") or fb_exc)):
                     raise _LLMHardError(f"LLM 网关返回 HTTP {fb_code}（模型 {cand['model']}）：{str(fb_exc)[:280]}") from fb_exc
                 raise _LLMTransientError(f"LLM 网关返回 HTTP {exc.code}（模型 {cand['model']}）：{(err_b or '')[:280]}") from fb_exc
@@ -618,13 +878,25 @@ def _attempt_llm_call(
         latency_ms = int((time.perf_counter() - t0) * 1000)
         try:
             content, reasoning, usage, finish_reason = _consume_stream_response(
-                cand.get("api_format", "openai_chat"), resp
+                cand.get("api_format", "openai_chat"), resp,
+                deadline=deadline, cancellation_event=cancellation_event,
             )
-        except ValueError as exc:
+        except (ValueError, TimeoutError, socket.timeout) as exc:
+            if isinstance(exc, (TimeoutError, socket.timeout)):
+                raise _LLMTransientError(
+                    f"LLM 流式响应超时（模型 {cand['model']}）",
+                    timed_out=True,
+                    fail_over_now=True,
+                ) from exc
             raise _LLMTransientError(
                 f"LLM 响应体非 JSON/SSE（模型 {cand['model']}）：{str(exc)[:200]}"
             ) from exc
-    if finish_reason in ("length", "max_tokens"):
+    if deadline is not None and float(deadline) - time.time() <= 0:
+        raise _LLMTransientError(
+            f"LLM 响应已超过绝对截止时间（模型 {cand['model']}）",
+            timed_out=True,
+            fail_over_now=True,
+        )
         raise _LLMTransientError(
             f"模型 {cand['model']} 流式输出达到长度上限（finish_reason={finish_reason}）",
             fail_over_now=True,

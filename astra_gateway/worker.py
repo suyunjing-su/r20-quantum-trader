@@ -1,6 +1,10 @@
 """Single-owner ASTRA Gateway delivery worker."""
 from __future__ import annotations
-import fcntl
+try:
+    import fcntl
+except ImportError:  # Windows uses the CRT byte-range lock equivalent.
+    fcntl = None
+    import msvcrt
 import os
 import signal
 import time
@@ -113,10 +117,18 @@ def format_message(row: dict[str, object]) -> str:
 
 def run() -> None:
     LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
-    lock_handle = LOCK_FILE.open("w", encoding="utf-8")
+    lock_handle = LOCK_FILE.open("a+b")
     try:
-        fcntl.flock(lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
+        if fcntl is not None:
+            fcntl.flock(lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        else:
+            lock_handle.seek(0, os.SEEK_END)
+            if lock_handle.tell() == 0:
+                lock_handle.write(bytes([0]))
+                lock_handle.flush()
+            lock_handle.seek(0)
+            msvcrt.locking(lock_handle.fileno(), msvcrt.LK_NBLCK, 1)
+    except (BlockingIOError, OSError):
         log("gateway worker already running; exiting")
         return
     # 审计风暴修复：抢到锁者自我登记为权威 PID（唯一确知「我持锁」的实体）。

@@ -171,11 +171,11 @@ console.log('consensusModeName / roleDisplayName / roleTitleOf:');
 console.log('buildCouncilSavePayload:');
 {
   const full = M.buildCouncilSavePayload({
-    enabled: true, consensus_mode: 'debate', timeout_seconds: 300, roles: { a: 1 } });
+    enabled: true, consensus_mode: 'debate', timeout_seconds: 300, max_symbols_per_group: 14, roles: { a: 1 } });
   eq('完整配置', full, { enabled: true, consensus_mode: 'debate',
-                        timeout_seconds: 300, roles: { a: 1 } });
+                        timeout_seconds: 300, max_symbols_per_group: 14, roles: { a: 1 } });
   eq('字段顺序', Object.keys(full),
-     ['enabled', 'consensus_mode', 'timeout_seconds', 'roles']);
+     ['enabled', 'consensus_mode', 'timeout_seconds', 'max_symbols_per_group', 'roles']);
   const empty = M.buildCouncilSavePayload({});
   eq('consensus_mode 回落 standard', empty.consensus_mode, 'standard');
   eq('timeout 回落 240', empty.timeout_seconds, 240.0);
@@ -188,8 +188,13 @@ console.log('buildCouncilSavePayload:');
      M.buildCouncilSavePayload({ timeout_seconds: '450' }).timeout_seconds, 450);
   eq('timeout 非数字回落 240',
      M.buildCouncilSavePayload({ timeout_seconds: 'abc' }).timeout_seconds, 240.0);
+  eq('group size default 7', M.buildCouncilSavePayload({}).max_symbols_per_group, 7);
+  eq('group size manual 14', M.buildCouncilSavePayload({ max_symbols_per_group: 14 }).max_symbols_per_group, 14);
+  eq('group size lower clamp 1', M.buildCouncilSavePayload({ max_symbols_per_group: -1 }).max_symbols_per_group, 1);
+  eq('group size upper clamp 100', M.buildCouncilSavePayload({ max_symbols_per_group: 101 }).max_symbols_per_group, 100);
   eq('cfg 为 null 不崩', M.buildCouncilSavePayload(null),
-     { enabled: undefined, consensus_mode: 'standard', timeout_seconds: 240.0, roles: undefined });
+     { enabled: undefined, consensus_mode: 'standard', timeout_seconds: 240.0,
+       max_symbols_per_group: 7, roles: undefined });
   check('roles 原样透传（不深拷贝 —— 后端要完整席位）',
         M.buildCouncilSavePayload({ roles: { z: 9 } }).roles.z === 9);
 }
@@ -211,4 +216,4 @@ eq('列表含空串时取空串（原实现即如此）',
    M.nextExpandedRole([''], 'x'), '');
 
 console.log(`\n${pass} passed, ${fail} failed`);
-process.exit(fail === 0 ? 0 : 1);
+process.exitCode = fail === 0 ? 0 : 1;

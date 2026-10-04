@@ -52,7 +52,9 @@ def dispatch_llm_and_persist_decisions(*,
         thinking_timeout,
         time,
         time_str,
-        urllib):
+        urllib,
+        execute_council_debate=None,
+        is_council_cycle_current=None):
     """主脑批次：LLM 请求派发 → 决策解析归一 → 缓存/历史/持仓指令落盘 → 健康记录。
 
     原为 `ai_brain_trader.execute_batch_ai_brain_cycle` 末尾的 173 行 `try` 块
@@ -75,11 +77,18 @@ def dispatch_llm_and_persist_decisions(*,
         # Transparent check: is Multi-Agent Council enabled?
         council_enabled = False
         try:
-            from astra_backend.council_manager import load_council_config, execute_council_debate
-            c_cfg = load_council_config(
-                equity=(runtime_context or {}).get("calculation_equity")
-                if isinstance(runtime_context, dict) else None
-            )
+            from astra_backend.council_manager import load_council_config
+            if execute_council_debate is None:
+                from astra_backend.council_manager import execute_council_debate
+            try:
+                c_cfg = load_council_config(
+                    equity=(runtime_context or {}).get("calculation_equity")
+                    if isinstance(runtime_context, dict) else None
+                )
+            except TypeError as exc:
+                if "equity" not in str(exc):
+                    raise
+                c_cfg = load_council_config()
             council_enabled = bool(c_cfg.get("enabled"))
         except Exception:
             council_enabled = False
@@ -94,12 +103,31 @@ def dispatch_llm_and_persist_decisions(*,
                 # 审计 P1-4d：席位提示词里的 {{account_balance}}/{{market_matrix}}/{{trading_memory}}
                 # 等占位符此前从不渲染（render_variables 在委员会全文 0 次）→ 模型只看得到花括号。
                 # 这里把本轮真实运行上下文交给委员会，让席位提示词与交易提示词同源渲染。
-                brain_output, council_transcript = execute_council_debate(
-                    market_prompt=prompt,
-                    original_system_prompt=effective_system_prompt,
-                    timeout=float(c_cfg.get("timeout_seconds", 240.0)),
-                    runtime_context=runtime_context,
-                )
+                # Grouping is limited to trader proposal generation.  The CIO
+                # still receives the original full-market prompt exactly once.
+                group_prompts = None
+                try:
+                    from astra_backend.council.groups import build_group_prompts
+                    group_prompts = build_group_prompts(
+                        prompt,
+                        packages,
+                        max_symbols=c_cfg.get("max_symbols_per_group", 7),
+                    )
+                except (ImportError, TypeError, ValueError) as group_exc:
+                    print(f"[AI Brain Council] ⚠️ 分组提示词构造失败，回退单一全市场提案: {group_exc}")
+                    group_prompts = None
+                debate_kwargs = {
+                    "market_prompt": prompt,
+                    "original_system_prompt": effective_system_prompt,
+                    "timeout": float(c_cfg.get("timeout_seconds", 240.0)),
+                    "runtime_context": runtime_context,
+                }
+                if group_prompts:
+                    debate_kwargs["group_prompts"] = group_prompts
+                brain_output, council_transcript = execute_council_debate(**debate_kwargs)
+                cycle_token = council_transcript.get("cycle_token") if isinstance(council_transcript, dict) else None
+                if cycle_token and callable(is_council_cycle_current) and not is_council_cycle_current(cycle_token):
+                    raise TimeoutError("Council cycle became stale before decision persistence")
                 council_status = {
                     "ran": True,
                     "duration_ms": int(council_transcript.get("total_duration_ms") or 0),

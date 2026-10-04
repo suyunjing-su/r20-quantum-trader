@@ -11,7 +11,23 @@ from __future__ import annotations
 
 import asyncio
 import datetime
-import fcntl
+try:
+    import fcntl
+    _WINDOWS_LOCK_BACKEND = False
+except ImportError:  # Windows uses the CRT byte-range lock equivalent.
+    import msvcrt
+
+    class _WindowsFcntlCompat:
+        LOCK_EX = 1
+        LOCK_NB = 2
+
+        @staticmethod
+        def flock(fd: int, operation: int) -> None:
+            mode = msvcrt.LK_NBLCK if operation & _WindowsFcntlCompat.LOCK_NB else msvcrt.LK_LOCK
+            msvcrt.locking(fd, mode, 1)
+
+    fcntl = _WindowsFcntlCompat()
+    _WINDOWS_LOCK_BACKEND = True
 import json
 import os
 import signal
@@ -45,15 +61,32 @@ def acquire_single_instance_lock() -> bool:
     fd: Optional[int] = None
     try:
         LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(str(LOCK_FILE), os.O_RDWR | os.O_CREAT, 0o644)
+        # Keep the human-readable PID file separate from the Windows byte-range
+        # lock.  CRT locking denies a second open of the locked byte, which
+        # would otherwise make health checks unable to read the PID.
+        lock_path = (
+            LOCK_FILE.with_name(LOCK_FILE.name + ".guard")
+            if _WINDOWS_LOCK_BACKEND else LOCK_FILE
+        )
+        if _WINDOWS_LOCK_BACKEND:
+            lock_path.touch(exist_ok=True)
+            if lock_path.stat().st_size == 0:
+                with lock_path.open("ab") as guard_file:
+                    guard_file.write(bytes([0]))
+        fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o644)
+        if _WINDOWS_LOCK_BACKEND:
+            os.lseek(fd, 0, os.SEEK_SET)
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         if fd is not None:
             os.close(fd)
         return False
     try:
-        os.ftruncate(fd, 0)
-        os.write(fd, f"{os.getpid()}\n".encode())
+        if _WINDOWS_LOCK_BACKEND:
+            LOCK_FILE.write_text(f"{os.getpid()}\n", encoding="utf-8")
+        else:
+            os.ftruncate(fd, 0)
+            os.write(fd, f"{os.getpid()}\n".encode())
     except OSError:
         pass
     _LOCK_FD = fd

@@ -73,7 +73,8 @@ class CouncilAdminRoutesTest(unittest.TestCase):
     # ── 改配置（超管）─────────────────────────────────────
     def test_update_requires_superadmin_and_saves_the_whitelist(self):
         payload = CouncilConfigUpdateRequest(enabled=True, consensus_mode="cross_examination",
-                                             timeout_seconds=300.0, roles={"a": {"name": "甲"}})
+                                             timeout_seconds=300.0, max_symbols_per_group=7,
+                                             roles={"a": {"name": "甲"}})
         with mock.patch("astra_backend.council_manager.save_council_config",
                         return_value={"saved": True}) as saver:
             out = C.admin_update_council_config(payload, x_astra_session="t")
@@ -83,7 +84,8 @@ class CouncilAdminRoutesTest(unittest.TestCase):
         self.assertEqual(sent["timeout_seconds"], 300.0)
         self.assertEqual(sent["consensus_mode"], "cross_examination")
         self.assertEqual(sent["roles"], {"a": {"name": "甲"}})
-        self.assertEqual(sorted(sent), ["consensus_mode", "enabled", "roles",
+        self.assertEqual(sent["max_symbols_per_group"], 7)
+        self.assertEqual(sorted(sent), ["consensus_mode", "enabled", "max_symbols_per_group", "roles",
                                         "timeout_seconds"], "只落这几项，不把请求体整包塞进去")
 
     # ── 套用套件 / 重置角色 ────────────────────────────────

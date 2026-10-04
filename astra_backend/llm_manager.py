@@ -265,6 +265,8 @@ def execute_llm_request(
     timeout: Optional[float] = None,
     allow_fallback: bool = True,
     max_tokens: Optional[int] = None,
+    deadline: Optional[float] = None,
+    cancellation_event=None,
 ) -> Tuple[str, str, Dict[str, Any], int]:
     """薄壳：调用时解析门面模块全局（常量与函数），使测试的 patch / 直接赋值生效。
 
@@ -273,9 +275,13 @@ def execute_llm_request(
     args = (get_active_llm_runtime, resolve_model_runtime, record_failover_event,
             messages, model, base_url, api_key, api_format, reasoning_effort,
             temperature, response_format, timeout, allow_fallback)
-    if max_tokens is None:
+    if max_tokens is None and deadline is None and cancellation_event is None:
         return _core_execute_llm_request(*args)
-    return _core_execute_llm_request(*args, max_tokens)
+    if cancellation_event is not None:
+        return _core_execute_llm_request(*args, max_tokens, deadline, cancellation_event)
+    if deadline is None:
+        return _core_execute_llm_request(*args, max_tokens)
+    return _core_execute_llm_request(*args, max_tokens, deadline)
 
 
 def _lookup_api_path(base_url: str, model_id: str) -> str:

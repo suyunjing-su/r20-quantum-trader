@@ -4,7 +4,11 @@ It owns scheduling but deliberately invokes existing scripts as isolated process
 which preserves each script's file lock and fail-closed behavior.
 """
 from __future__ import annotations
-import fcntl
+try:
+    import fcntl
+except ImportError:  # Windows equivalent is provided by the CRT below.
+    fcntl = None
+    import msvcrt
 import logging
 import subprocess
 import sys
@@ -78,10 +82,17 @@ def main() -> None:
     configure_logging()
     DATA.mkdir(exist_ok=True)
     lock_path = DATA / ".astra_scheduler.lock"
-    with lock_path.open("a+") as lock:
+    with lock_path.open("a+b") as lock:
         try:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
+            if fcntl is not None:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            else:
+                if lock.seek(0, 2) == 0:
+                    lock.write(b"\0")
+                    lock.flush()
+                lock.seek(0)
+                msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+        except (BlockingIOError, OSError):
             raise SystemExit("ASTRA standalone scheduler already running")
 
         tz = timezone(timedelta(hours=8))

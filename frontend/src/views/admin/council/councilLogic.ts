@@ -172,6 +172,7 @@ export function buildCouncilSavePayload(cfg: any): Record<string, any> {
     enabled: cfg?.enabled,
     consensus_mode: cfg?.consensus_mode || 'standard',
     timeout_seconds: Number(cfg?.timeout_seconds) || 240.0,
+    max_symbols_per_group: Math.max(1, Math.min(100, Number(cfg?.max_symbols_per_group) || 7)),
     roles: cfg?.roles,
   }
 }

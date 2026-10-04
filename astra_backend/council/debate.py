@@ -8,9 +8,12 @@
 from __future__ import annotations
 
 import concurrent.futures
+import inspect
 import json
 import os
+import threading
 import time
+import uuid
 from typing import Any, Callable, Dict, Optional, Tuple
 
 from astra_backend.council.role_normalizer import (
@@ -23,6 +26,188 @@ from astra_backend.council.policy import (
     MIN_SAFE_REASONING_TIME,
     VALID_CONSENSUS_MODES,
 )
+
+
+_CYCLE_STATE_LOCK = threading.Lock()
+_ACTIVE_CYCLE: Optional[Tuple[str, threading.Event]] = None
+_LAST_COMPLETED_CYCLE_TOKEN: Optional[str] = None
+
+
+def _begin_council_cycle(external_event=None) -> Tuple[str, threading.Event]:
+    global _ACTIVE_CYCLE, _LAST_COMPLETED_CYCLE_TOKEN
+    token = uuid.uuid4().hex
+    event = external_event or threading.Event()
+    with _CYCLE_STATE_LOCK:
+        previous = _ACTIVE_CYCLE
+        if previous is not None:
+            previous[1].set()
+        _LAST_COMPLETED_CYCLE_TOKEN = None
+        _ACTIVE_CYCLE = (token, event)
+    return token, event
+
+
+def _is_active_council_cycle(token: str, event: threading.Event) -> bool:
+    with _CYCLE_STATE_LOCK:
+        return _ACTIVE_CYCLE == (token, event) and not event.is_set()
+
+
+def is_council_cycle_current(cycle_token: Optional[str]) -> bool:
+    """Validate the last committed Council generation before persistence."""
+    if not cycle_token:
+        return False
+    with _CYCLE_STATE_LOCK:
+        return cycle_token == _LAST_COMPLETED_CYCLE_TOKEN
+
+
+def _finish_council_cycle(token: str, event: threading.Event) -> None:
+    global _ACTIVE_CYCLE
+    event.set()
+    with _CYCLE_STATE_LOCK:
+        if _ACTIVE_CYCLE == (token, event):
+            _ACTIVE_CYCLE = None
+
+
+def _supports_keyword(target: Callable[..., Any], keyword: str) -> bool:
+    """Return whether a legacy callback can accept an optional keyword."""
+    try:
+        signature = inspect.signature(target)
+    except (TypeError, ValueError):
+        return True
+    return keyword in signature.parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    )
+
+
+def _deadline_task_kwargs(target: Callable[..., Any], deadline: float, cancellation_event=None) -> Dict[str, Any]:
+    kwargs: Dict[str, Any] = {"deadline": deadline}
+    if cancellation_event is not None and _supports_keyword(target, "cancellation_event"):
+        kwargs["cancellation_event"] = cancellation_event
+    return kwargs
+
+
+def _bounded_parallel_calls(
+    tasks: list[tuple[str, tuple[Any, ...], Dict[str, Any]]],
+    *,
+    deadline: float,
+    max_workers: int,
+    stagger_seconds: float = 0.8,
+    cancellation_event=None,
+) -> tuple[Dict[str, Any], set[str], Dict[str, Dict[str, Any]]]:
+    """Run bounded calls without waiting past the absolute Council deadline.
+
+    The third return value is raw task timing telemetry.  A worker records its
+    own completion timestamp so a late sibling cannot cause an on-time result
+    to be discarded (and so the Council can report real, not inferred, timing).
+    """
+    if not tasks:
+        return {}, set(), {}
+    pool = concurrent.futures.ThreadPoolExecutor(
+        max_workers=max(1, min(int(max_workers), len(tasks))),
+        thread_name_prefix="astra-council",
+    )
+    future_keys: Dict[concurrent.futures.Future, str] = {}
+    results: Dict[str, Any] = {}
+    task_metrics: Dict[str, Dict[str, Any]] = {}
+    task_started_at: Dict[str, float] = {}
+    task_start_lock = threading.Lock()
+    unfinished = {key for key, _args, _kwargs in tasks}
+    def _invoke(task_key: str, call_args: tuple[Any, ...], call_kwargs: Dict[str, Any]):
+        target, *positional = call_args
+        started_at = time.time()
+        with task_start_lock:
+            task_started_at[task_key] = started_at
+        try:
+            if cancellation_event is not None and cancellation_event.is_set():
+                return started_at, time.time(), True, TimeoutError("Council cycle cancelled before callback start")
+            payload = target(*positional, **call_kwargs)
+            return started_at, time.time(), False, payload
+        except Exception as exc:
+            return started_at, time.time(), True, exc
+
+    try:
+        for index, (key, args, kwargs) in enumerate(tasks):
+            if cancellation_event is not None and cancellation_event.is_set():
+                break
+            if index and stagger_seconds > 0:
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    if cancellation_event is not None:
+                        cancellation_event.set()
+                    break
+                time.sleep(min(stagger_seconds, remaining))
+                if deadline - time.time() <= 0:
+                    if cancellation_event is not None:
+                        cancellation_event.set()
+                    break
+            future_keys[pool.submit(_invoke, key, args, kwargs)] = key
+        remaining = max(0.0, deadline - time.time())
+        done, _pending = concurrent.futures.wait(
+            future_keys, timeout=remaining,
+            return_when=concurrent.futures.ALL_COMPLETED,
+        )
+        if cancellation_event is not None and time.time() >= deadline:
+            cancellation_event.set()
+        for future in done:
+            key = future_keys[future]
+            started_at, finished_at, failed, payload = future.result()
+            late = finished_at > deadline
+            task_metrics[key] = {
+                "started_at": started_at,
+                "ended_at": finished_at,
+                "latency_ms": max(0, int(round((finished_at - started_at) * 1000))),
+                "status": "timeout" if late else ("error" if failed else "ok"),
+            }
+            if late:
+                continue
+            unfinished.discard(key)
+            results[key] = payload
+        timed_out_at = time.time()
+        for key in unfinished:
+            started_at = task_started_at.get(key)
+            task_metrics[key] = {
+                "started_at": started_at,
+                "ended_at": min(timed_out_at, deadline),
+                "latency_ms": (
+                    max(0, int(round((min(timed_out_at, deadline) - started_at) * 1000)))
+                    if started_at is not None else 0
+                ),
+                "status": "timeout" if started_at is not None else "not_started",
+            }
+        return results, unfinished, task_metrics
+    finally:
+        if cancellation_event is not None and time.time() >= deadline:
+            cancellation_event.set()
+        for future in future_keys:
+            if not future.done():
+                future.cancel()
+        try:
+            pool.shutdown(wait=False, cancel_futures=True)
+        except TypeError:
+            pool.shutdown(wait=False)
+
+
+def _max_council_concurrency(config: Dict[str, Any], task_count: int) -> int:
+    """Resolve one bounded provider-safe concurrency budget for this cycle."""
+    raw = config.get("max_concurrency") or os.getenv("ASTRA_COUNCIL_MAX_CONCURRENCY", "4")
+    try:
+        limit = int(raw)
+    except (TypeError, ValueError):
+        limit = 4
+    return max(1, min(limit, max(1, task_count)))
+
+
+def _timeout_trader_result(key: str, role_spec: Dict[str, Any], reason: str) -> Dict[str, Any]:
+    return {
+        "proposal_id": f"{key}_prop",
+        "role_id": key,
+        "role_name": role_spec.get("name", key),
+        "status": "timeout" if "timeout" in reason.lower() else "error",
+        "content": reason,
+        "reasoning": "",
+        "latency_ms": 0,
+        "weight": 0.0,
+    }
 
 
 def _render_seat_prompt(prompt: str, runtime_context: Optional[Dict[str, Any]]) -> str:
@@ -47,13 +232,15 @@ def _render_seat_prompt(prompt: str, runtime_context: Optional[Dict[str, Any]]) 
     return render_variables(prompt, runtime_context)
 
 
-def _call_single_trader(resolve_seat: Callable[..., Any], 
+def _call_single_trader(resolve_seat: Callable[..., Any],
     role_id: str,
     role_spec: Dict[str, Any],
     market_prompt: str,
     master_constitutional_rules: str,
     timeout: float = 20.0,
     runtime_context: Optional[Dict[str, Any]] = None,
+    deadline: Optional[float] = None,
+    cancellation_event=None,
 ) -> Dict[str, Any]:
     """Invokes a senior trader role to pitch their complete trade proposal and account review."""
     from astra_backend.llm_manager import execute_llm_request, get_active_llm_runtime, load_llm_config
@@ -113,6 +300,8 @@ def _call_single_trader(resolve_seat: Callable[..., Any],
             timeout=timeout,
             max_tokens=resolved.get("max_tokens"),
             allow_fallback=False,  # 委员会成员优先以其登记模型作答
+            deadline=deadline,
+            **({"cancellation_event": cancellation_event} if cancellation_event is not None else {}),
         )
         return {
             "proposal_id": proposal_id,
@@ -134,7 +323,15 @@ def _call_single_trader(resolve_seat: Callable[..., Any],
         err_str = str(e)
         if ("504" in err_str or "502" in err_str or "timeout" in err_str.lower()) and timeout > 35.0:
             try:
+                if deadline is not None:
+                    remaining = float(deadline) - time.time()
+                    if remaining <= MIN_SAFE_REASONING_TIME:
+                        raise TimeoutError(
+                            f"Trader retry deadline exhausted: {remaining:.2f}s remaining"
+                        )
                 time.sleep(1.5)
+                if deadline is not None and float(deadline) - time.time() <= 0:
+                    raise TimeoutError("Trader retry deadline exhausted after backoff")
                 retry_effort = override_effort
                 c_retry, r_retry, _, lat_retry = execute_llm_request(
                     messages=messages,
@@ -147,6 +344,8 @@ def _call_single_trader(resolve_seat: Callable[..., Any],
                     timeout=max(20.0, timeout - 20.0),
                     max_tokens=resolved.get("max_tokens"),
                     allow_fallback=True,
+                    deadline=deadline,
+                    **({"cancellation_event": cancellation_event} if cancellation_event is not None else {}),
                 )
                 return {
                     "proposal_id": proposal_id,
@@ -183,7 +382,7 @@ def _call_single_trader(resolve_seat: Callable[..., Any],
         }
 
 
-def _call_single_trader_critique(resolve_seat: Callable[..., Any], 
+def _call_single_trader_critique(resolve_seat: Callable[..., Any],
     role_id: str,
     role_spec: Dict[str, Any],
     my_proposal: str,
@@ -191,6 +390,8 @@ def _call_single_trader_critique(resolve_seat: Callable[..., Any],
     master_constitutional_rules: str,
     timeout: float = 15.0,
     runtime_context: Optional[Dict[str, Any]] = None,
+    deadline: Optional[float] = None,
+    cancellation_event=None,
 ) -> Dict[str, Any]:
     """Invokes a senior trader role to cross-examine peer proposals for hidden risks, timing, or sizing flaws."""
     from astra_backend.llm_manager import execute_llm_request, get_active_llm_runtime, load_llm_config
@@ -246,6 +447,8 @@ def _call_single_trader_critique(resolve_seat: Callable[..., Any],
             timeout=timeout,
             max_tokens=resolved.get("max_tokens"),
             allow_fallback=False,  # 委员会成员必须以其登记模型作答，保住模型身份；只享重试
+            deadline=deadline,
+            **({"cancellation_event": cancellation_event} if cancellation_event is not None else {}),
         )
         return {
             "role_id": role_id,
@@ -272,11 +475,13 @@ def _call_single_trader_critique(resolve_seat: Callable[..., Any],
         }
 
 
-def execute_council_debate(load_config: Callable[[], Dict[str, Any]], resolve_seat: Callable[..., Any], call_trader: Callable[..., Any], call_critique: Callable[..., Any], 
+def _execute_council_debate_impl(load_config: Callable[[], Dict[str, Any]], resolve_seat: Callable[..., Any], call_trader: Callable[..., Any], call_critique: Callable[..., Any],
     market_prompt: str,
     original_system_prompt: str,
     timeout: float = 240.0,
     runtime_context: Optional[Dict[str, Any]] = None,
+    group_prompts: Optional[Tuple[Any, ...]] = None,
+    cancellation_event=None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """Execute Hedge Fund Investment Committee Deliberation:
 
@@ -320,9 +525,12 @@ def execute_council_debate(load_config: Callable[[], Dict[str, Any]], resolve_se
     # 委员会预算只受调用方/网关任务超时约束，不再人为夹到 420 秒。
     effective_timeout = max(0.0, float(effective_timeout))
     deadline = t_start + effective_timeout
+    # Every Council cycle owns one cancellation signal shared by all stages.
+    cancellation_event = cancellation_event or threading.Event()
 
     rem = deadline - time.time()
     if rem < MIN_SAFE_REASONING_TIME:
+        cancellation_event.set()
         raise TimeoutError(
             f"Council deliberation timeout: remaining time {rem:.2f}s is below safety threshold {MIN_SAFE_REASONING_TIME}s"
         )
@@ -340,6 +548,31 @@ def execute_council_debate(load_config: Callable[[], Dict[str, Any]], resolve_se
 
     trader_proposals: Dict[str, Dict[str, Any]] = {}
     trader_critiques: Dict[str, Dict[str, Any]] = {}
+    proposal_task_metrics: Dict[str, Dict[str, Any]] = {}
+    critique_task_metrics: Dict[str, Dict[str, Any]] = {}
+    proposal_unfinished: set[str] = set()
+    critique_unfinished: set[str] = set()
+    proposal_stage_started_at: Optional[float] = None
+    proposal_stage_ended_at: Optional[float] = None
+    critique_stage_started_at: Optional[float] = None
+    critique_stage_ended_at: Optional[float] = None
+    group_mode = bool(group_prompts)
+    if group_mode:
+        proposal_groups = []
+        for group_pos, group in enumerate(group_prompts or ()):
+            group_index = getattr(group, "index", group_pos)
+            group_prompt = getattr(group, "prompt", str(group))
+            group_symbols = tuple(getattr(group, "symbols", ()) or ())
+            proposal_groups.append((group_index, group_prompt, group_symbols))
+    else:
+        proposal_groups = [(None, market_prompt, ())]
+    proposal_order = [
+        (f"group_{group_index}:{key}" if group_index is not None else key,
+         group_index, key, group_prompt, group_symbols)
+        for group_index, group_prompt, group_symbols in proposal_groups
+        for key in trader_keys
+    ]
+    concurrency = _max_council_concurrency(config, len(proposal_order))
 
     if not trader_keys:
         # Fallback: Solo CIO decision if no active traders enabled
@@ -348,6 +581,7 @@ def execute_council_debate(load_config: Callable[[], Dict[str, Any]], resolve_se
         # === MODE: Cross-Examination (Double-Round Real Debate) ===
         rem = deadline - time.time()
         if rem < MIN_SAFE_REASONING_TIME * 2.0:
+            cancellation_event.set()
             raise TimeoutError(
                 f"Council timeout: remaining time {rem:.2f}s insufficient for cross-examination mode (requires >= {MIN_SAFE_REASONING_TIME * 2.0}s)"
             )
@@ -358,90 +592,113 @@ def execute_council_debate(load_config: Callable[[], Dict[str, Any]], resolve_se
         # 审计 P2-14：跨审模式同样为 CIO 预留（两轮之后仍要有裁决时间）
         cio_reserve = min(CIO_MIN_ARBITRATION_TIME, max(MIN_SAFE_REASONING_TIME * 2.0, rem * 0.35))
         round1_budget = max(2.0, min(max(rem * 0.55, 90.0), rem - cio_reserve))
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(trader_keys))) as pool:
-            futures = {}
-            for idx, key in enumerate(trader_keys):
-                if idx > 0:
-                    time.sleep(0.8)  # 错峰 0.8s 提交，防毫秒级并发打穿代理连接池
-                fut = pool.submit(
-                    call_trader,
-                    key,
-                    roles[key],
-                    market_prompt,
-                    original_system_prompt,
-                    round1_budget,
-                    runtime_context,
-                )
-                futures[fut] = key
-            for fut in concurrent.futures.as_completed(futures):
-                key = futures[fut]
-                try:
-                    trader_proposals[key] = fut.result()
-                except Exception as exc:
-                    trader_proposals[key] = {
-                        "proposal_id": f"{key}_prop",
-                        "role_id": key,
-                        "role_name": roles[key].get("name", key),
-                        "status": "error",
-                        "content": f"Proposal exception: {exc}",
-                        "weight": 0.0,
-                    }
+        tasks = [
+            (composite,
+             (call_trader, key, roles[key], group_prompt, original_system_prompt,
+              round1_budget, runtime_context),
+             _deadline_task_kwargs(call_trader, deadline, cancellation_event))
+            for composite, _group_index, key, group_prompt, _symbols in proposal_order
+        ]
+        proposal_stage_started_at = time.time()
+        completed, unfinished, proposal_task_metrics = _bounded_parallel_calls(
+            tasks, deadline=deadline, max_workers=concurrency,
+            stagger_seconds=0.0 if group_mode else 0.8,
+            cancellation_event=cancellation_event)
+        proposal_stage_ended_at = time.time()
+        proposal_unfinished = set(unfinished)
+        for composite, _group_index, key, _group_prompt, _symbols in proposal_order:
+            result = completed.get(composite)
+            if composite in unfinished:
+                trader_proposals[composite] = _timeout_trader_result(
+                    key, roles[key], "Trader proposal timeout: Committee deadline exhausted")
+            elif isinstance(result, Exception):
+                trader_proposals[composite] = _timeout_trader_result(
+                    key, roles[key], f"Proposal exception: {result}")
+            else:
+                trader_proposals[composite] = result or _timeout_trader_result(
+                    key, roles[key], "Trader proposal error: empty result")
 
         # Stage 2: Round 2 Cross-Examination Critiques
+        critique_stage_started_at = time.time()
         rem = deadline - time.time()
         if rem < MIN_SAFE_REASONING_TIME + 2.0:
             # Insufficient budget for second round -> safe degradation: skip critiques to preserve CIO verdict
-            for k in trader_keys:
-                trader_critiques[k] = {
+            for composite, group_index, k, _group_prompt, group_symbols in proposal_order:
+                trader_critiques[composite] = {
                     "role_id": k,
                     "role_name": roles[k].get("name", k),
                     "status": "skipped",
                     "content": f"时间预算紧缺 (剩余 {rem:.2f}s < 7.0s)，安全降级跳过交叉质询以确保 CIO 终审",
                     "latency_ms": 0,
+                    "group_index": group_index,
+                    "group_symbols": tuple(group_symbols),
                 }
+            critique_stage_ended_at = time.time()
         else:
             round2_budget = max(2.0, min(rem * 0.40, rem - min(CIO_MIN_ARBITRATION_TIME, max(MIN_SAFE_REASONING_TIME, rem * 0.5))))
-            with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(trader_keys))) as pool:
-                critique_futures = {}
-                for k in trader_keys:
-                    my_prop = trader_proposals.get(k, {}).get("content", "（该交易员第一轮未提交有效提案）")
-                    peers_text_list = []
-                    for pk in trader_keys:
-                        if pk != k:
-                            p_res = trader_proposals.get(pk, {})
-                            p_id = p_res.get("proposal_id", f"{pk}_prop")
-                            p_name = p_res.get("role_name", pk)
-                            peers_text_list.append(
-                                f"=== 【{p_name}】(提案标识: {p_id}) ===\n"
-                                f"{p_res.get('content', '（未提交）')}"
-                            )
-                    peers_text = "\n\n".join(peers_text_list) if peers_text_list else "（无其他同行提案）"
-                    critique_futures[pool.submit(
-                        call_critique,
-                        k,
-                        roles[k],
-                        my_prop,
-                        peers_text,
-                        original_system_prompt,
-                        round2_budget,
-                        runtime_context,
-                    )] = k
-                for fut in concurrent.futures.as_completed(critique_futures):
-                    k = critique_futures[fut]
-                    try:
-                        trader_critiques[k] = fut.result()
-                    except Exception as exc:
-                        trader_critiques[k] = {
-                            "role_id": k,
-                            "role_name": roles[k].get("name", k),
-                            "status": "error",
-                            "content": f"质询异常: {exc}",
-                            "latency_ms": 0,
-                        }
+            critique_tasks = []
+            for composite, group_index, key, _group_prompt, _symbols in proposal_order:
+                peer_entries = [
+                    (other_composite, other_key)
+                    for other_composite, other_group_index, other_key, _p, _s in proposal_order
+                    if other_group_index == group_index and other_key != key
+                ]
+                my_prop = trader_proposals.get(composite, {}).get(
+                    "content", "（该交易员第一轮未提交有效提案）")
+                peers_text_list = []
+                for other_composite, other_key in peer_entries:
+                    p_res = trader_proposals.get(other_composite, {})
+                    p_id = p_res.get("proposal_id", f"{other_key}_prop")
+                    p_name = p_res.get("role_name", other_key)
+                    peers_text_list.append(
+                        f"=== 【{p_name}】(提案标识: {p_id}) ===\n"
+                        f"{p_res.get('content', '（未提交）')}"
+                    )
+                peers_text = "\n\n".join(peers_text_list) if peers_text_list else "（无其他同行提案）"
+                critique_tasks.append(
+                    (
+                        composite,
+                        (call_critique, key, roles[key], my_prop, peers_text,
+                         original_system_prompt, round2_budget, runtime_context),
+                        _deadline_task_kwargs(call_trader, deadline, cancellation_event),
+                    )
+                )
+            completed, unfinished, critique_task_metrics = _bounded_parallel_calls(
+                critique_tasks, deadline=deadline, max_workers=concurrency,
+                stagger_seconds=0.0)
+            critique_stage_ended_at = time.time()
+            critique_unfinished = set(unfinished)
+            for composite, _group_index, key, _group_prompt, _symbols in proposal_order:
+                result = completed.get(composite)
+                if composite in unfinished:
+                    trader_critiques[composite] = {
+                        "role_id": key,
+                        "role_name": roles[key].get("name", key),
+                        "status": "timeout",
+                        "content": "质询超时：委员会截止时间已耗尽",
+                        "latency_ms": 0,
+                    }
+                elif isinstance(result, Exception):
+                    trader_critiques[composite] = {
+                        "role_id": key,
+                        "role_name": roles[key].get("name", key),
+                        "status": "error",
+                        "content": f"质询异常: {result}",
+                        "latency_ms": 0,
+                    }
+                else:
+                    trader_critiques[composite] = result or {
+                        "role_id": key,
+                        "role_name": roles[key].get("name", key),
+                        "status": "error",
+                        "content": "质询返回为空",
+                        "latency_ms": 0,
+                    }
     else:
         # === MODE: Standard (Single-Round Proposals -> CIO Verdict) ===
         rem = deadline - time.time()
         if rem < MIN_SAFE_REASONING_TIME + 2.0:
+            cancellation_event.set()
             raise TimeoutError(
                 f"Council timeout: remaining time {rem:.2f}s insufficient for standard deliberation (requires >= {MIN_SAFE_REASONING_TIME + 2.0}s)"
             )
@@ -450,43 +707,48 @@ def execute_council_debate(load_config: Callable[[], Dict[str, Any]], resolve_se
         # MIN_SAFE_REASONING_TIME(5s)，四席思考型模型吃满后 CIO 只能在几秒内草率定稿。
         cio_reserve = min(CIO_MIN_ARBITRATION_TIME, max(MIN_SAFE_REASONING_TIME, rem * 0.35))
         member_timeout = max(2.0, min(max(rem * 0.55, 90.0), rem - cio_reserve))
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(trader_keys))) as pool:
-            futures = {}
-            for idx, key in enumerate(trader_keys):
-                if idx > 0:
-                    time.sleep(0.8)  # 错峰 0.8s 提交，防毫秒级并发打穿代理连接池
-                fut = pool.submit(
-                    call_trader,
-                    key,
-                    roles[key],
-                    market_prompt,
-                    original_system_prompt,
-                    member_timeout,
-                    runtime_context,
-                )
-                futures[fut] = key
-            for fut in concurrent.futures.as_completed(futures):
-                key = futures[fut]
-                try:
-                    trader_proposals[key] = fut.result()
-                except Exception as exc:
-                    trader_proposals[key] = {
-                        "proposal_id": f"{key}_prop",
-                        "role_id": key,
-                        "role_name": roles[key].get("name", key),
-                        "status": "error",
-                        "content": f"Proposal exception: {exc}",
-                        "weight": 0.0,
-                    }
+        tasks = [
+            (composite,
+             (call_trader, key, roles[key], group_prompt, original_system_prompt,
+              member_timeout, runtime_context),
+             _deadline_task_kwargs(call_trader, deadline, cancellation_event))
+            for composite, _group_index, key, group_prompt, _symbols in proposal_order
+        ]
+        proposal_stage_started_at = time.time()
+        completed, unfinished, proposal_task_metrics = _bounded_parallel_calls(
+            tasks, deadline=deadline, max_workers=concurrency,
+            stagger_seconds=0.0 if group_mode else 0.8,
+            cancellation_event=cancellation_event)
+        proposal_stage_ended_at = time.time()
+        proposal_unfinished = set(unfinished)
+        for composite, _group_index, key, _group_prompt, _symbols in proposal_order:
+            result = completed.get(composite)
+            if composite in unfinished:
+                trader_proposals[composite] = _timeout_trader_result(
+                    key, roles[key], "Trader proposal timeout: Committee deadline exhausted")
+            elif isinstance(result, Exception):
+                trader_proposals[composite] = _timeout_trader_result(
+                    key, roles[key], f"Proposal exception: {result}")
+            else:
+                trader_proposals[composite] = result or _timeout_trader_result(
+                    key, roles[key], "Trader proposal error: empty result")
 
     # Compile the Structured Investment Committee Docket
     transcript_blocks = []
-    for k in trader_keys:
-        res = trader_proposals.get(k, {})
+    docket_order = proposal_order if group_mode else [
+        (key, None, key, market_prompt, ()) for key in trader_keys
+    ]
+    for composite, group_index, k, _group_prompt, group_symbols in docket_order:
+        res = trader_proposals.get(composite, {})
         weight_str = f" [绩效权重: {res.get('weight', 1.0)}]" if res.get("weight") is not None else ""
         p_id = res.get("proposal_id", f"{k}_prop")
+        group_label = (
+            f" [Group {group_index}; 主责标的: {', '.join(group_symbols) or '未指定'}]"
+            if group_index is not None else ""
+        )
         transcript_blocks.append(
-            f"=== 【{res.get('role_name', k)}】实操审查与作战提案 [提案标识: {p_id}]（模型：{res.get('model_used', 'default')}"
+            f"=== 【{res.get('role_name', k)}】实操审查与作战提案{group_label} "
+            f"[提案标识: {p_id}]（模型：{res.get('model_used', 'default')}"
             f"{'（⚠ 席位绑定模型未登记，本席由主脑代答）' if res.get('model_fallback') else ''}{weight_str}）===\n"
             f"{res.get('content', '（该交易员本轮未提交有效提案）')}\n"
         )
@@ -494,10 +756,14 @@ def execute_council_debate(load_config: Callable[[], Dict[str, Any]], resolve_se
 
     if consensus_mode == "cross_examination" and trader_critiques:
         critique_blocks = []
-        for k in trader_keys:
-            c_res = trader_critiques.get(k, {})
+        for composite, group_index, k, _group_prompt, group_symbols in docket_order:
+            c_res = trader_critiques.get(composite, {})
+            group_label = (
+                f" [Group {group_index}; 主责标的: {', '.join(group_symbols) or '未指定'}]"
+                if group_index is not None else ""
+            )
             critique_blocks.append(
-                f"=== 【{c_res.get('role_name', k)}】针对同行方案的交叉漏洞质询 ===\n"
+                f"=== 【{c_res.get('role_name', k)}】针对同行方案的交叉漏洞质询{group_label} ===\n"
                 f"{c_res.get('content', '（该交易员未提交质询）')}\n"
             )
         compiled_critiques = "\n".join(critique_blocks)
@@ -512,6 +778,7 @@ def execute_council_debate(load_config: Callable[[], Dict[str, Any]], resolve_se
     # CIO Final Review & Funding Verdict
     rem = deadline - time.time()
     if rem < MIN_SAFE_REASONING_TIME:
+        cancellation_event.set()
         raise TimeoutError(
             f"Council deliberation timeout before CIO arbitration: {rem:.2f}s remaining is below safety threshold {MIN_SAFE_REASONING_TIME}s"
         )
@@ -576,23 +843,38 @@ def execute_council_debate(load_config: Callable[[], Dict[str, Any]], resolve_se
         "3. 在 decisions 中对标的池全部标的逐一下达方案采纳或驳回批复（包含 adopted_role 与 reasoning），并给出完整四维点位！"
     )
 
-    cio_timeout = max(MIN_SAFE_REASONING_TIME, deadline - time.time())
-    content, reasoning, usage, latency = execute_llm_request(
-        messages=[
-            {"role": "system", "content": cio_system_prompt},
-            {"role": "user", "content": cio_user_prompt},
-        ],
-        model=override_model,
-        base_url=override_url,
-        api_key=override_key,
-        api_format=override_format,
-        reasoning_effort=override_effort,
-        temperature=cio_temperature,
-        response_format={"type": "json_object"},
-        timeout=cio_timeout,
-        max_tokens=cio_resolved.get("max_tokens"),
-        allow_fallback=False,  # CIO 终审同理由登记模型作答；整链失败由上层降级单模型决策
-    )
+    cio_started_at = time.time()
+    cio_start_remaining = max(0.0, deadline - cio_started_at)
+    cio_timeout = cio_start_remaining
+    try:
+        content, reasoning, usage, latency = execute_llm_request(
+            messages=[
+                {"role": "system", "content": cio_system_prompt},
+                {"role": "user", "content": cio_user_prompt},
+            ],
+            model=override_model,
+            base_url=override_url,
+            api_key=override_key,
+            api_format=override_format,
+            reasoning_effort=override_effort,
+            temperature=cio_temperature,
+            response_format={"type": "json_object"},
+            timeout=cio_timeout,
+            max_tokens=cio_resolved.get("max_tokens"),
+            allow_fallback=False,  # CIO 终审同理由登记模型作答；整链失败由上层降级单模型决策
+            deadline=deadline,
+            cancellation_event=cancellation_event,
+        )
+    except BaseException:
+        cancellation_event.set()
+        raise
+    cio_ended_at = time.time()
+    cio_end_remaining = max(0.0, deadline - cio_ended_at)
+    if cio_ended_at > deadline:
+        cancellation_event.set()
+        raise TimeoutError(
+            "Council deliberation timeout: CIO returned after the absolute deadline"
+        )
 
     clean_content = content.strip()
     if clean_content.startswith("```json"):
@@ -611,11 +893,77 @@ def execute_council_debate(load_config: Callable[[], Dict[str, Any]], resolve_se
     # （阶段 4·B3 第二十八刀：迁至 council/role_normalizer.py）
     _normalize_cio_adopted_roles(brain_output, roles, trader_keys)
 
+    council_end_at = time.time()
+
+    def _stage_telemetry(started_at: Optional[float], ended_at: Optional[float]) -> Dict[str, Any]:
+        if started_at is None or ended_at is None:
+            return {"start_ts": None, "end_ts": None, "latency_ms": 0}
+        return {
+            "start_ts": started_at,
+            "end_ts": ended_at,
+            "latency_ms": max(0, int(round((ended_at - started_at) * 1000))),
+        }
+
+    group_telemetry = []
+    for group_pos, (group_index, _group_prompt, group_symbols) in enumerate(proposal_groups):
+        group_key_set = {
+            composite for composite, candidate_index, _key, _prompt, _symbols in proposal_order
+            if candidate_index == group_index
+        }
+        metrics = [proposal_task_metrics[key] for key in group_key_set if key in proposal_task_metrics]
+        starts = [item["started_at"] for item in metrics if item.get("started_at") is not None]
+        ends = [item["ended_at"] for item in metrics if item.get("ended_at") is not None]
+        group_timeout = bool(group_key_set & proposal_unfinished) or any(
+            item.get("status") == "timeout" for item in metrics
+        )
+        group_error = any(item.get("status") == "error" for item in metrics)
+        if group_timeout:
+            group_status = "timeout"
+        elif group_error:
+            group_status = "error"
+        elif metrics:
+            group_status = "ok"
+        else:
+            group_status = "not_started"
+        group_telemetry.append({
+            "index": group_index if group_index is not None else group_pos,
+            "primary_symbols": list(group_symbols),
+            "start_ts": min(starts) if starts else None,
+            "end_ts": max(ends) if ends else None,
+            "latency_ms": (
+                max(0, int(round((max(ends) - min(starts)) * 1000)))
+                if starts and ends else 0
+            ),
+            "status": group_status,
+            "timeout": group_timeout,
+            "error": group_error,
+        })
+
     council_transcript = {
         "council_mode": True,
         "council_architecture": "Hedge Fund Investment Committee",
         "consensus_mode": consensus_mode,
-        "total_duration_ms": int((time.time() - t_start) * 1000),
+        "total_duration_ms": int((council_end_at - t_start) * 1000),
+        "telemetry": {
+            "global_council_start_ts": t_start,
+            "global_council_deadline_ts": deadline,
+            "global_council_end_ts": council_end_at,
+            "total_cycle_time_ms": max(0, int(round((council_end_at - t_start) * 1000))),
+            "group_count": len(group_telemetry),
+            "symbols_per_group": [item["primary_symbols"] for item in group_telemetry],
+            "groups": group_telemetry,
+            "trader_stage": _stage_telemetry(proposal_stage_started_at, proposal_stage_ended_at),
+            "critique_stage": _stage_telemetry(critique_stage_started_at, critique_stage_ended_at),
+            "cio_stage": {
+                "start_ts": cio_started_at,
+                "end_ts": cio_ended_at,
+                "latency_ms": max(0, int(round((cio_ended_at - cio_started_at) * 1000))),
+                "start_remaining_budget_ms": max(0, int(round(cio_start_remaining * 1000))),
+                "end_remaining_budget_ms": max(0, int(round(cio_end_remaining * 1000))),
+            },
+            "proposal_tasks": proposal_task_metrics,
+            "critique_tasks": critique_task_metrics,
+        },
         "arbitrator": {
             "role_name": cio_spec.get("name", "首席投资官 (CIO)"),
             "model_used": override_model or get_active_llm_runtime().get("model", "default"),
@@ -632,3 +980,39 @@ def execute_council_debate(load_config: Callable[[], Dict[str, Any]], resolve_se
 
     brain_output["council_transcript"] = council_transcript
     return brain_output, council_transcript
+
+
+def execute_council_debate(
+    load_config: Callable[[], Dict[str, Any]],
+    resolve_seat: Callable[..., Any],
+    call_trader: Callable[..., Any],
+    call_critique: Callable[..., Any],
+    market_prompt: str,
+    original_system_prompt: str,
+    timeout: float = 240.0,
+    runtime_context: Optional[Dict[str, Any]] = None,
+    group_prompts: Optional[Tuple[Any, ...]] = None,
+    cancellation_event=None,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """Own one cycle generation and reject stale results at the return boundary."""
+    cycle_token, cycle_event = _begin_council_cycle(cancellation_event)
+    try:
+        if cycle_event.is_set():
+            raise TimeoutError("Council cycle was cancelled before it started")
+        brain_output, transcript = _execute_council_debate_impl(
+            load_config, resolve_seat, call_trader, call_critique,
+            market_prompt, original_system_prompt, timeout, runtime_context,
+            group_prompts, cycle_event,
+        )
+        if not _is_active_council_cycle(cycle_token, cycle_event):
+            raise TimeoutError("Council cycle became stale before persistence")
+        transcript["cycle_token"] = cycle_token
+        brain_output["council_transcript"] = transcript
+        global _LAST_COMPLETED_CYCLE_TOKEN
+        with _CYCLE_STATE_LOCK:
+            if _ACTIVE_CYCLE != (cycle_token, cycle_event):
+                raise TimeoutError("Council cycle became stale before commit")
+            _LAST_COMPLETED_CYCLE_TOKEN = cycle_token
+        return brain_output, transcript
+    finally:
+        _finish_council_cycle(cycle_token, cycle_event)

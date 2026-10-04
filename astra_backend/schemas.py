@@ -169,6 +169,7 @@ class CouncilConfigUpdateRequest(BaseModel):
     consensus_mode: str = Field(default="standard")
     # 仅保留最低安全预算；委员会超时不再人为设置 420 秒上限。
     timeout_seconds: float = Field(default=240.0, ge=30.0)
+    max_symbols_per_group: int = Field(default=7, ge=1, le=100)
     roles: dict[str, Any]
 
 

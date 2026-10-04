@@ -38,6 +38,10 @@ from astra_backend.council.roster import (
     validate_council_roles,
     validate_seat_model_bindings,
 )
+from astra_backend.council.groups import (
+    DEFAULT_MAX_SYMBOLS_PER_GROUP,
+    normalize_max_symbols_per_group,
+)
 from astra_backend.council.policy import (
     DEFAULT_CONSENSUS_MODE,
     ALL_AVAILABLE_PRESETS,
@@ -178,6 +182,9 @@ def load_council_config(equity: float | None = None) -> Dict[str, Any]:
                 if problem:
                     # 保留用户数据，只标记（旧实现在这里直接覆盖成工厂默认）
                     data["config_warning"] = f"委员会配置结构异常：{problem}；已保留原文件，请在面板补齐仲裁官席位"
+                data["max_symbols_per_group"] = normalize_max_symbols_per_group(
+                    data.get("max_symbols_per_group", DEFAULT_MAX_SYMBOLS_PER_GROUP)
+                )
                 if _migrate_untouched_preset_prompts(data):
                     data["updated_at"] = datetime.now(_BJ).isoformat(sep=" ", timespec="seconds")
                     _atomic_write_json(COUNCIL_CONFIG_FILE, data)
@@ -198,6 +205,7 @@ def load_council_config(equity: float | None = None) -> Dict[str, Any]:
         "enabled": False,
         "consensus_mode": DEFAULT_CONSENSUS_MODE,
         "timeout_seconds": DEFAULT_COUNCIL_TIMEOUT,
+        "max_symbols_per_group": DEFAULT_MAX_SYMBOLS_PER_GROUP,
         "roles": {k: dict(v) for k, v in DEFAULT_PRESET_TEMPLATES.items()},
         "updated_at": datetime.now(_BJ).isoformat(sep=" ", timespec="seconds"),
     }
@@ -264,6 +272,9 @@ def save_council_config(config: Dict[str, Any], *, enforce_models: bool = True) 
     config["consensus_mode"] = mode
     # 审计 P2-13：超时预算在任何写入口都夹到 [MIN, MAX]（含直接改文件后保存的路径）
     config["timeout_seconds"] = clamp_council_timeout(config.get("timeout_seconds", DEFAULT_COUNCIL_TIMEOUT))
+    config["max_symbols_per_group"] = normalize_max_symbols_per_group(
+        config.get("max_symbols_per_group", DEFAULT_MAX_SYMBOLS_PER_GROUP)
+    )
 
     config["updated_at"] = datetime.now(_BJ).isoformat(sep=" ", timespec="seconds")
     _atomic_write_json(COUNCIL_CONFIG_FILE, config)
@@ -313,6 +324,7 @@ def export_council_config() -> Dict[str, Any]:
             "enabled": bool(config.get("enabled", False)),
             "consensus_mode": config.get("consensus_mode", DEFAULT_CONSENSUS_MODE),
             "timeout_seconds": config.get("timeout_seconds", DEFAULT_COUNCIL_TIMEOUT),
+            "max_symbols_per_group": config.get("max_symbols_per_group", DEFAULT_MAX_SYMBOLS_PER_GROUP),
             "roles": config.get("roles", {}),
         },
     }
@@ -387,6 +399,9 @@ def import_council_config(payload: Dict[str, Any]) -> Dict[str, Any]:
         "enabled": bool(src.get("enabled", False)),
         "consensus_mode": src.get("consensus_mode", DEFAULT_CONSENSUS_MODE),
         "timeout_seconds": timeout_seconds,
+        "max_symbols_per_group": normalize_max_symbols_per_group(
+            src.get("max_symbols_per_group", DEFAULT_MAX_SYMBOLS_PER_GROUP)
+        ),
         "roles": clean_roles,
     }, enforce_models=False)
     return {
@@ -441,6 +456,9 @@ def _validate_council_profile_config(config: Dict[str, Any]) -> Dict[str, Any]:
         "enabled": bool(config.get("enabled", False)),
         "consensus_mode": mode,
         "timeout_seconds": clamp_council_timeout(config.get("timeout_seconds", DEFAULT_COUNCIL_TIMEOUT)),
+        "max_symbols_per_group": normalize_max_symbols_per_group(
+            config.get("max_symbols_per_group", DEFAULT_MAX_SYMBOLS_PER_GROUP)
+        ),
         "roles": json.loads(json.dumps(roles, ensure_ascii=False)),
     }
 
@@ -541,12 +559,20 @@ def _call_single_trader(
     master_constitutional_rules: str,
     timeout: float = 20.0,
     runtime_context: Optional[Dict[str, Any]] = None,
+    deadline: Optional[float] = None,
+    cancellation_event=None,
 ) -> Dict[str, Any]:
     """薄壳：调用时解析门面模块全局，使测试的 patch / 直接赋值生效。
 
     实现已迁往 astra_backend.council.debate（结构优化阶段 2 / B5）。
     """
-    return _core__call_single_trader(resolve_seat_model, role_id, role_spec, market_prompt, master_constitutional_rules, timeout, runtime_context)
+    args = (resolve_seat_model, role_id, role_spec, market_prompt,
+            master_constitutional_rules, timeout, runtime_context)
+    if deadline is not None:
+        args = args + (deadline,)
+    if cancellation_event is not None:
+        args = args + (cancellation_event,)
+    return _core__call_single_trader(*args)
 
 
 def _call_single_trader_critique(
@@ -557,12 +583,20 @@ def _call_single_trader_critique(
     master_constitutional_rules: str,
     timeout: float = 15.0,
     runtime_context: Optional[Dict[str, Any]] = None,
+    deadline: Optional[float] = None,
+    cancellation_event=None,
 ) -> Dict[str, Any]:
     """薄壳：调用时解析门面模块全局，使测试的 patch / 直接赋值生效。
 
     实现已迁往 astra_backend.council.debate（结构优化阶段 2 / B5）。
     """
-    return _core__call_single_trader_critique(resolve_seat_model, role_id, role_spec, my_proposal, peer_proposals, master_constitutional_rules, timeout, runtime_context)
+    args = (resolve_seat_model, role_id, role_spec, my_proposal,
+            peer_proposals, master_constitutional_rules, timeout, runtime_context)
+    if deadline is not None:
+        args = args + (deadline,)
+    if cancellation_event is not None:
+        args = args + (cancellation_event,)
+    return _core__call_single_trader_critique(*args)
 
 
 def execute_council_debate(
@@ -570,9 +604,20 @@ def execute_council_debate(
     original_system_prompt: str,
     timeout: float = 240.0,
     runtime_context: Optional[Dict[str, Any]] = None,
+    group_prompts: Optional[Tuple[Any, ...]] = None,
+    cancellation_event=None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """薄壳：调用时解析门面模块全局，使测试的 patch / 直接赋值生效。
 
     实现已迁往 astra_backend.council.debate（结构优化阶段 2 / B5）。
     """
-    return _core_execute_council_debate(load_council_config, resolve_seat_model, _call_single_trader, _call_single_trader_critique, market_prompt, original_system_prompt, timeout, runtime_context)
+    args = (
+        load_council_config, resolve_seat_model, _call_single_trader,
+        _call_single_trader_critique, market_prompt, original_system_prompt,
+        timeout, runtime_context,
+    )
+    if group_prompts is not None:
+        args = args + (group_prompts,)
+    if cancellation_event is not None:
+        args = args + (cancellation_event,)
+    return _core_execute_council_debate(*args)

@@ -54,6 +54,7 @@ const { api } = useApi()
 const auth = useAuthStore()
 const { t } = useI18n()
 const config = ref<any>(null)
+const councilConfig = ref<any>({ max_symbols_per_group: 7 })
 const runtime = ref<any>(null)
 /**
  * 注册/返佣通道：**由后端出值**（`/api/v1/admin/referral-channels`，管理员版）。
@@ -107,6 +108,7 @@ const keys = ref({ live_key: '', live_secret: '', live_pass: '', demo_key: '', d
 const newCapital = ref<string>('')
 const capitalConfirm = ref<string>('')
 const savingCapital = ref(false)
+const savingCouncilGroupSize = ref(false)
 const capitalAmountOk = computed(() => {
   const n = Number(newCapital.value)
   return !Number.isNaN(n) && n > 0
@@ -237,8 +239,12 @@ async function loadAll() {
     }
     newCapital.value = String(cfg.editable?.initial_capital ?? '')
     manualClose.value = !!cfg.editable?.manual_close_enabled
-    const inst = await api('/api/v1/admin/instruments')
+    const [inst, cCfg] = await Promise.all([
+      api('/api/v1/admin/instruments'),
+      api('/api/v1/admin/council/config'),
+    ])
     instruments.value = inst.instruments || []
+    councilConfig.value = cCfg || { max_symbols_per_group: 7 }
     instLimits.value = inst.limits || instLimits.value
   } catch (e: any) {
     // 批 24：除了 toast，还要把错误留在页面上（toast 3 秒即消失，用户回来只看到空白页）
@@ -310,6 +316,34 @@ async function saveOrderMode() {
     toast.err(t('admin.security.errSaveFailed', undefined, { msg: e.message }))
   } finally {
     savingOrderMode.value = false
+  }
+}
+
+async function saveCouncilGroupSize() {
+  if (!auth.isSuperadmin) return
+  const value = Number(councilConfig.value?.max_symbols_per_group)
+  if (!Number.isInteger(value) || value < 1 || value > 100) {
+    toast.err(t('admin.security.councilGroupSizeInvalid'))
+    return
+  }
+  savingCouncilGroupSize.value = true
+  try {
+    const res = await api('/api/v1/admin/council/config', {
+      method: 'PUT',
+      body: JSON.stringify({
+        enabled: !!councilConfig.value.enabled,
+        consensus_mode: councilConfig.value.consensus_mode || 'standard',
+        timeout_seconds: Number(councilConfig.value.timeout_seconds) || 240,
+        max_symbols_per_group: value,
+        roles: councilConfig.value.roles || {},
+      }),
+    })
+    councilConfig.value = res.config || councilConfig.value
+    toast.ok(t('admin.security.councilGroupSizeSaved'))
+  } catch (e: any) {
+    toast.err(t('admin.security.councilGroupSizeSaveFailed', undefined, { msg: e.message }))
+  } finally {
+    savingCouncilGroupSize.value = false
   }
 }
 
@@ -1533,6 +1567,36 @@ onMounted(() => { loadAll(); loadMx(); loadChannels(); loadPlazaSettings() })
           </div>
 
           <p class="sc-hint pad">{{ t('admin.security.capitalFooter') }}</p>
+        </SettingsSection>
+
+        <SettingsSection :title="t('admin.security.councilGroupSizeTitle')" :description="t('admin.security.councilGroupSizeDesc')" :icon="Layers">
+          <template #actions>
+            <button
+              type="button"
+              class="btn btn-primary btn-sm"
+              :disabled="savingCouncilGroupSize || !auth.isSuperadmin"
+              @click="saveCouncilGroupSize"
+            >
+              <Loader2 v-if="savingCouncilGroupSize" :size="13" class="animate-spin shrink-0" />
+              <Save v-else :size="13" />
+              <span>{{ savingCouncilGroupSize ? t('admin.security.saving') : t('admin.security.councilGroupSizeSave') }}</span>
+            </button>
+          </template>
+          <div class="sc-form-2">
+            <label class="field-stack">
+              <span class="form-label">{{ t('admin.security.councilGroupSizeLabel') }}</span>
+              <input
+                v-model.number="councilConfig.max_symbols_per_group"
+                type="number"
+                min="1"
+                max="100"
+                step="1"
+                class="field num"
+                :disabled="!auth.isSuperadmin"
+              />
+            </label>
+          </div>
+          <p class="sc-hint pad">{{ t('admin.security.councilGroupSizeFooter') }}</p>
         </SettingsSection>
 
         <SettingsSection :title="t('admin.security.poolTitle')" :description="t('admin.security.poolDesc')" :icon="Layers">

@@ -479,7 +479,7 @@ class ExportImportTests(_Base):
         self.assertRegex(package["exported_at"],
                          r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\+08:00$")
         self.assertEqual(sorted(package["config"]),
-                         ["consensus_mode", "enabled", "roles", "timeout_seconds"])
+                         ["consensus_mode", "enabled", "max_symbols_per_group", "roles", "timeout_seconds"])
         self.assertIs(package["config"]["enabled"], True)
 
     def test_export_defaults_when_keys_are_absent(self):
@@ -488,6 +488,23 @@ class ExportImportTests(_Base):
         self.assertIs(package["config"]["enabled"], False)
         self.assertEqual(package["config"]["timeout_seconds"],
                          policy.DEFAULT_COUNCIL_TIMEOUT)
+
+    def test_import_normalises_configured_group_size(self):
+        CM.import_council_config({
+            "roles": {"cio": {"prompt": "p"}},
+            "max_symbols_per_group": 14,
+        })
+        self.assertEqual(CM.load_council_config()["max_symbols_per_group"], 14)
+
+        CM.import_council_config({
+            "roles": {"cio": {"prompt": "p"}},
+            "max_symbols_per_group": 0,
+        })
+        self.assertEqual(CM.load_council_config()["max_symbols_per_group"], 1)
+
+    def test_legacy_config_defaults_group_size_to_seven(self):
+        self._write({"roles": {"cio": {"prompt": "p"}}})
+        self.assertEqual(CM.load_council_config()["max_symbols_per_group"], 7)
 
     def test_import_requires_a_dict(self):
         with self.assertRaises(ValueError) as ctx:

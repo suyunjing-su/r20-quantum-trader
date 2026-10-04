@@ -324,6 +324,8 @@ def get_active_llm_runtime(config: Dict[str, Any]) -> Dict[str, Any]:
     provider_id = target_model.get("provider_id", "") if target_model else ""
     provider_name = target_model.get("provider_name", "") if target_model else "默认"
     prov_api_path = str((target_model or {}).get("api_path", "") or "")
+    provider_concurrency_limit = None
+    provider_rate_limit_per_minute = None
 
     if target_model:
         t_base = target_model.get("base_url", "").rstrip("/")
@@ -345,6 +347,11 @@ def get_active_llm_runtime(config: Dict[str, Any]) -> Dict[str, Any]:
                 provider_id = prov.get("id", "openai")
             if not prov_api_path:
                 prov_api_path = str(prov.get("api_path", "") or "")
+            provider_concurrency_limit = prov.get("concurrency_limit") or prov.get("provider_concurrency_limit")
+            provider_rate_limit_per_minute = (
+                prov.get("rate_limit_per_minute")
+                or prov.get("requests_per_minute")
+            )
 
     base_url = (base_url or os.getenv("LLM_BASE_URL", "")).rstrip("/")
     if not base_url:
@@ -378,6 +385,10 @@ def get_active_llm_runtime(config: Dict[str, Any]) -> Dict[str, Any]:
         "reasoning_effort": active_effort,
         "reasoning_type": reasoning_type,
         "max_tokens": target_model.get("max_tokens") if target_model else None,
+        "concurrency_limit": (target_model or {}).get("concurrency_limit") or provider_concurrency_limit,
+        "provider_concurrency_limit": provider_concurrency_limit,
+        "rate_limit_per_minute": (target_model or {}).get("rate_limit_per_minute") or provider_rate_limit_per_minute,
+        "provider_rate_limit_per_minute": provider_rate_limit_per_minute,
         "thinking_timeout": thinking_timeout,
         "request_attempts": config.get("request_attempts", DEFAULT_REQUEST_ATTEMPTS),
         "fallback_model_ids": config.get("fallback_model_ids", []),
@@ -401,8 +412,10 @@ def resolve_model_runtime(config: Dict[str, Any], model_id: str) -> Optional[Dic
             return None
     base_url = (target.get("base_url") or "").rstrip("/")
     api_key = target.get("api_key") or ""
+    # Resolve provider metadata even when the model already carries its own
+    # endpoint/credentials; runtime limits are provider-owned policy as well.
+    prov = next((p for p in config.get("providers", []) if p.get("id") == target.get("provider_id")), None)
     if not api_key or not base_url:
-        prov = next((p for p in config.get("providers", []) if p.get("id") == target.get("provider_id")), None)
         if prov:
             base_url = base_url or (prov.get("base_url") or "").rstrip("/")
             api_key = api_key or prov.get("api_key", "")
@@ -428,6 +441,18 @@ def resolve_model_runtime(config: Dict[str, Any], model_id: str) -> Optional[Dic
         "reasoning_effort": effort if effort in STANDARD_REASONING_EFFORTS else "high",
         "reasoning_type": reasoning_type,
         "max_tokens": target.get("max_tokens"),
+        "concurrency_limit": target.get("concurrency_limit") or (prov.get("concurrency_limit") if prov else None),
+        "provider_concurrency_limit": (
+            (prov.get("concurrency_limit") or prov.get("provider_concurrency_limit"))
+            if prov else None
+        ),
+        "rate_limit_per_minute": target.get("rate_limit_per_minute") or (
+            prov.get("rate_limit_per_minute") or prov.get("requests_per_minute")
+        ) if prov else None,
+        "provider_rate_limit_per_minute": (
+            (prov.get("rate_limit_per_minute") or prov.get("requests_per_minute"))
+            if prov else None
+        ),
         "thinking_timeout": thinking_timeout,
     }
 
