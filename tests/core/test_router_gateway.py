@@ -189,6 +189,15 @@ class GatewayOpsTests(_GatewayBase):
         self.assertEqual(out["scheduler"], {"sch": 1})
         self.store.recent.assert_called_once_with(7)
 
+    def test_status_uses_shared_heartbeat_for_cross_container_gateway(self):
+        self._start(mock.patch.object(GO, "heartbeat_age", return_value=3))
+        self._start(mock.patch.object(GO, "heartbeat_fresh", return_value=True))
+        self._start(mock.patch.object(GO, "process_running", side_effect=AssertionError("PID probe must not cross containers")))
+        out = GO.gateway_status(x_astra_admin_token="tok")
+        self.assertTrue(out["running"])
+        self.assertEqual(out["heartbeat_age_seconds"], 3)
+        self.assertEqual(out["health_source"], "heartbeat")
+
     def test_status_without_a_pid_reports_none(self):
         self._start(mock.patch.object(GO, "read_pid", return_value=None))
         self._start(mock.patch.object(GO, "process_running", return_value=False))

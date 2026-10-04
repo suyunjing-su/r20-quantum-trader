@@ -15,7 +15,7 @@ from astra_backend.schemas import GatewayReplayRequest
 from astra_gateway import __version__ as GATEWAY_VERSION
 from astra_gateway.publisher import DB_PATH as GATEWAY_DB_PATH
 from astra_gateway.scheduler import scheduler_snapshot
-from astra_gateway.pidfile import process_running, read_pid
+from astra_gateway.pidfile import heartbeat_age, heartbeat_fresh, process_running, read_pid
 from astra_gateway.store import GatewayStore
 
 from fastapi import APIRouter
@@ -29,8 +29,28 @@ def gateway_status(x_astra_admin_token: str | None = Header(default=None), limit
     require_admin_header(x_astra_admin_token)
     store = GatewayStore(GATEWAY_DB_PATH)
     pid = read_pid()
-    running = process_running(pid)
-    return {"version": GATEWAY_VERSION, "running": running, "pid": pid or None, "stats": store.stats(), "event_health": store.event_health(), "deliveries": store.recent(limit), "scheduler": scheduler_snapshot(store)}
+    age = heartbeat_age()
+    # Backend and Gateway are separate Docker PID namespaces.  A shared PID file
+    # is useful for display, but os.kill() here cannot probe the Gateway process.
+    # Prefer the shared worker heartbeat; retain the PID probe only for legacy
+    # single-container deployments that have not written a heartbeat yet.
+    if age is None:
+        running = process_running(pid)
+        health_source = "pid"
+    else:
+        running = heartbeat_fresh()
+        health_source = "heartbeat"
+    return {
+        "version": GATEWAY_VERSION,
+        "running": running,
+        "pid": pid or None,
+        "heartbeat_age_seconds": age,
+        "health_source": health_source,
+        "stats": store.stats(),
+        "event_health": store.event_health(),
+        "deliveries": store.recent(limit),
+        "scheduler": scheduler_snapshot(store),
+    }
 
 
 @router.post("/api/v1/admin/gateway/deliveries/{delivery_id}/replay")

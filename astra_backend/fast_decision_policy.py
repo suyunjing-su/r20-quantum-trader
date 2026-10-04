@@ -54,8 +54,8 @@ def build_typed_questions() -> dict[str, dict[str, Any]]:
             "criteria": {action: None for action in sorted(ALLOWED_ACTIONS)},
         },
         "protection_reason": {
-            "type": "noul",
-            "instructions": "Is an immediate protective intervention required?",
+            "type": "choice",
+            "instructions": "Choose whether an immediate protective intervention is required.",
             "criteria": {
                 "true": "The current state requires immediate protective action.",
                 "false": "No immediate protective action is required.",

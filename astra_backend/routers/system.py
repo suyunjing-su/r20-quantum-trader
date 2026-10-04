@@ -24,7 +24,7 @@ from astra_gateway.publisher import DB_PATH as GATEWAY_DB_PATH
 from astra_gateway.plugins import plugin_statuses
 from astra_gateway.agents import agent_statuses
 from astra_gateway.secrets import save_secrets, status as secret_store_status
-from astra_gateway.pidfile import process_running, read_pid
+from astra_gateway.pidfile import heartbeat_age, heartbeat_fresh, process_running, read_pid
 from astra_gateway.store import GatewayStore
 from astra_gateway.scheduler import scheduler_snapshot
 
@@ -451,9 +451,24 @@ def admin_about(
     require_admin_header(x_astra_admin_token, x_astra_session)
     refresh_settings()
     pid = read_pid()
-    gw_running = process_running(pid)
+    age = heartbeat_age()
+    if age is None:
+        gw_running = process_running(pid)
+        health_source = "pid"
+    else:
+        gw_running = heartbeat_fresh()
+        health_source = "heartbeat"
     store = GatewayStore(GATEWAY_DB_PATH)
-    gw_status = {"version": GATEWAY_VERSION, "running": gw_running, "pid": pid or None, "stats": store.stats(), "event_health": store.event_health(), "scheduler": scheduler_snapshot(store)}
+    gw_status = {
+        "version": GATEWAY_VERSION,
+        "running": gw_running,
+        "pid": pid or None,
+        "heartbeat_age_seconds": age,
+        "health_source": health_source,
+        "stats": store.stats(),
+        "event_health": store.event_health(),
+        "scheduler": scheduler_snapshot(store),
+    }
     current_v = get_version()
     return {
         "product": {"name": APP_NAME, "version": current_v, "control_plane": "ASTRA Gateway Runtime", "gateway_version": GATEWAY_VERSION},

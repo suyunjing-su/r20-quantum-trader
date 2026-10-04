@@ -188,7 +188,11 @@ class SchedulerSnapshotTests(unittest.TestCase):
         self.store.set_state("job.last.news", "2026-09-20 10:00:00+08:00")
         self.assertIn("2026-09-20", self._job("news")["last_scheduled_at"])
 
-    def test_the_timezone_is_declared(self):
+    def test_gateway_view_field_matches_scheduler_snapshot_contract(self):
+        source = (Path(__file__).resolve().parents[2] / "frontend" / "src" / "views" / "admin" / "GatewayPage.vue").read_text(encoding="utf-8")
+        self.assertIn("j.last_scheduled_at", source)
+        self.assertNotIn("j.last_run ?", source)
+
         self.assertEqual(self._job("news")["timezone"], "Asia/Shanghai")
 
     def test_an_interval_job_describes_its_period(self):

@@ -230,7 +230,7 @@ function statusLabel(s: string): string {
             <span class="gw-job-name mono truncate" :title="j.name">{{ j.name }}</span>
             <span class="gw-job-cell mono">{{ j.interval_seconds }}s</span>
             <span class="gw-job-cell mono">
-              {{ j.last_run ? fmtJobTime(j.last_run) : t('admin.gateway.scheduler.notScheduled') }}
+              {{ j.last_scheduled_at ? fmtJobTime(j.last_scheduled_at) : t('admin.gateway.scheduler.notScheduled') }}
             </span>
             <span>
               <span class="badge" :class="j.overdue ? 'badge-down' : 'badge-up'">

@@ -18,7 +18,7 @@ from astra_gateway.store import GatewayStore
 from scripts.market_stream import MarketStreamManager
 
 ROOT = Path(__file__).resolve().parents[1]
-from astra_gateway.pidfile import PID_FILE
+from astra_gateway.pidfile import HEARTBEAT_FILE, PID_FILE
 
 LOCK_FILE = ROOT / "data" / ".astra_gateway.lock"
 
@@ -40,7 +40,6 @@ LOCK_FILE = ROOT / "data" / ".astra_gateway.lock"
 #: `scheduler.tick()` 把作业提交到线程池后**立即返回**（`subprocess.run` 另有
 #: `spec.timeout_seconds` 兜底），故循环每轮耗时在秒级、空闲时约 1 秒一轮。
 #: 心跳一旦停更，就是循环真的卡住了 —— 90 秒阈值足够宽松也不会误报。
-HEARTBEAT_FILE = ROOT / "data" / ".astra_gateway_heartbeat"
 
 #: 心跳写入失败只报第一次，避免磁盘故障时每秒钟刷一条日志。
 _heartbeat_failed_once = False

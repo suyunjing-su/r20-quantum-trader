@@ -31,13 +31,23 @@
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 from typing import Union
 
 ROOT = Path(__file__).resolve().parents[1]
 PID_FILE = ROOT / "data" / "astra_gateway.pid"
+HEARTBEAT_FILE = ROOT / "data" / ".astra_gateway_heartbeat"
+DEFAULT_HEARTBEAT_TIMEOUT_SECONDS = 90
 
-__all__ = ["PID_FILE", "read_pid", "process_running"]
+__all__ = [
+    "PID_FILE",
+    "HEARTBEAT_FILE",
+    "read_pid",
+    "process_running",
+    "heartbeat_age",
+    "heartbeat_fresh",
+]
 
 
 def read_pid(path: Union[str, Path, None] = None) -> int:
@@ -48,6 +58,27 @@ def read_pid(path: Union[str, Path, None] = None) -> int:
     except (OSError, UnicodeDecodeError, ValueError):
         return 0
     return int(text) if text.isdigit() else 0
+
+
+def heartbeat_age(path: Union[str, Path, None] = None) -> int | None:
+    """Return heartbeat age in seconds; missing/corrupt files return ``None``."""
+    target = HEARTBEAT_FILE if path is None else Path(path)
+    try:
+        raw = target.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+    if not raw.isdigit():
+        return None
+    return max(0, int(time.time()) - int(raw))
+
+
+def heartbeat_fresh(
+    path: Union[str, Path, None] = None,
+    timeout: int = DEFAULT_HEARTBEAT_TIMEOUT_SECONDS,
+) -> bool:
+    """Return whether the shared gateway heartbeat is within its freshness window."""
+    age = heartbeat_age(path)
+    return age is not None and age <= max(1, int(timeout))
 
 
 def process_running(pid: int) -> bool:

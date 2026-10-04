@@ -26,6 +26,15 @@ def test_system_one_response_preserves_typed_answers():
     assert result["usage"]["total_tokens"] == 5
 
 
+def test_fast_decision_questions_use_supported_choice_types():
+    from astra_backend.fast_decision_policy import build_typed_questions
+
+    questions = build_typed_questions()
+    assert set(questions) == {"protective_action", "protection_reason", "reduce_fraction"}
+    assert all(question["type"] == "choice" for question in questions.values())
+    assert set(questions["protection_reason"]["criteria"]) == {"true", "false"}
+
+
 def test_fast_decision_unknown_action_fails_safe_to_hold():
     decision = parse_decision({"answers": {"protective_action": "BUY_LONG"}}, received_at=100.0)
     assert decision["action"] == "HOLD"
