@@ -53,6 +53,7 @@ class LLMCapabilitiesTailsTests(unittest.TestCase):
         self.assertEqual(_detect_reasoning_type("deepseek-v4.1"), "standard_effort")
         self.assertEqual(_detect_reasoning_type("kimi-k3"), "standard_effort")
         self.assertEqual(_detect_reasoning_type("glm-5.3-flash"), "standard_effort")
+        self.assertEqual(_detect_reasoning_type("nemotron-3.5-lightning"), "standard_effort")
 
     def test_detect_reasoning_type_none(self):
         # 覆盖 line 30

@@ -5,7 +5,7 @@
 ```
 council_transcript = {council_mode, council_architecture, consensus_mode, total_duration_ms,
                       arbitrator: {role_name, model_used, model_requested, model_registered,
-                                   model_fallback, model_note, latency_ms, reasoning},
+                                   model_fallback, model_note, latency_ms, reasoning, summary},
                       advisors: trader_proposals,
                       cross_examinations: 跨审才有，其它模式为 {} }
 brain_output["council_transcript"] = council_transcript      # 同一个对象
@@ -80,13 +80,27 @@ class VerdictTest(unittest.TestCase):
         arb = transcript["arbitrator"]
         self.assertEqual(sorted(arb), ["latency_ms", "model_fallback", "model_note",
                                        "model_registered", "model_requested", "model_used",
-                                       "reasoning", "role_name"])
+                                       "reasoning", "role_name", "summary"])
         self.assertEqual(arb["model_requested"], "M-req")
         self.assertEqual(arb["model_registered"], True)
         self.assertEqual(arb["latency_ms"], 12.5)
         self.assertEqual(arb["reasoning"], "思考")
 
-    def test_the_degraded_seat_is_recorded_with_zero_weight(self):
+    def test_arbitrator_summary_comes_from_final_json_not_native_reasoning(self):
+        brain, transcript = self._run(
+            cio_payload=(
+                '{"macro_assessment":"偏多震荡",'
+                '"decisions":{"BTC-USDT-SWAP":{"action":"WAIT",'
+                '"reasoning":"波动率过高，暂不追单"}}}'
+            )
+        )
+        self.assertEqual(
+            transcript["arbitrator"]["summary"],
+            "宏观：偏多震荡\nBTC-USDT-SWAP：WAIT，波动率过高，暂不追单",
+        )
+        self.assertNotIn("思考", transcript["arbitrator"]["summary"])
+        self.assertIs(brain["council_transcript"], transcript)
+
         """★ 第 233 刀标注"未断言"的那条，现在断言：异常席位 ⇒ **`weight=0.0`**。
 
         （当时看不到是因为提案字典是函数内部状态；读到末尾 `return` 后，它随

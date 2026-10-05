@@ -120,7 +120,6 @@ function modelMissing(role: any): boolean {
 /** 当前选中的席位（原 `expandedRole`；加载时经 nextExpandedRole 回落） */
 const expandedRole = ref<string>('trader_trend');
 const testResult = ref<any>(null);
-const expandedReasoning = ref<Record<string, boolean>>({});
 
 /** 图标表：键由 councilLogic.roleIconKeyOf() 决定（未知席位 → 'custom'）。 */
 const roleIcons: Record<string, any> = {
@@ -486,7 +485,6 @@ async function resetRole(roleId: string) {
 async function runDebateTest() {
   testing.value = true;
   testResult.value = null;
-  expandedReasoning.value = {};
   toast.warn(t('admin.council.testRunning'));
   try {
     const res = await api('/api/v1/admin/council/test', {
@@ -1011,22 +1009,6 @@ onMounted(loadData);
                   <span v-if="adv.proposal_id">ID: {{ adv.proposal_id }}</span>
                 </div>
                 <p class="cn-adv-body">{{ adv.content }}</p>
-                <div v-if="adv.reasoning" class="cn-adv-reason">
-                  <button type="button"
-                    class="btn btn-quiet btn-sm"
-                    :aria-expanded="Boolean(expandedReasoning[String(key)])"
-                    :aria-controls="expandedReasoning[String(key)] ? `cn-reasoning-${key}` : undefined"
-                    @click="expandedReasoning[String(key)] = !expandedReasoning[String(key)]"
-                  >
-                    {{ expandedReasoning[String(key)] ? t('admin.council.collapseReasoning') : t('admin.council.expandReasoning') }}
-                  </button>
-                  <pre
-                    v-if="expandedReasoning[String(key)]"
-                    :id="`cn-reasoning-${key}`"
-                    class="code-block"
-                    tabindex="0"
-                  >{{ adv.reasoning }}</pre>
-                </div>
               </article>
             </div>
           </div>

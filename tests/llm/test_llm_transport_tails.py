@@ -169,16 +169,27 @@ class LlmTransportTailsTests(unittest.TestCase):
         self.assertEqual(reasoning, "Chain")
         self.assertEqual(usage["total_tokens"], 50)
 
-    def test_parse_openai_chat_stream(self):
+    def test_parse_openai_chat_reasoning_alias_and_details(self):
+        res_json = {
+            "choices": [{"message": {
+                "content": "Answer",
+                "reasoning": "Hidden chain",
+                "reasoning_details": [{"type": "reasoning.text", "text": "Ignored duplicate"}],
+            }}],
+        }
+        content, reasoning, _ = _parse_llm_response("openai_chat", res_json)
+        self.assertEqual(content, "Answer")
+        self.assertEqual(reasoning, "Hidden chain")
+
+    def test_parse_openai_chat_stream_reasoning_details_never_becomes_content(self):
         body = (
-            'data: {"choices":[{"delta":{"reasoning_content":"think "}}]}\n\n'
-            'data: {"choices":[{"delta":{"content":"pong"}}]}\n\n'
+            'data: {"choices":[{"delta":{"content":"","reasoning_details":[{"text":"Think"}]}}]}\n\n'
+            'data: {"choices":[{"delta":{"content":"PONG"},"finish_reason":"stop"}]}\n\n'
             'data: [DONE]\n'
         )
-        content, reasoning, usage = _parse_stream_response("openai_chat", body)
-        self.assertEqual(content, "pong")
-        self.assertEqual(reasoning, "think")
-        self.assertEqual(usage, {})
+        content, reasoning, _ = _parse_stream_response("openai_chat", body)
+        self.assertEqual(content, "PONG")
+        self.assertEqual(reasoning, "Think")
 
     def test_parse_claude_messages_stream(self):
         body = (
@@ -277,6 +288,17 @@ class LlmTransportTailsTests(unittest.TestCase):
         )
         self.assertEqual(payload["reasoning"], {"effort": "medium"})
         self.assertEqual(payload["text"], {"format": {"type": "json_object"}})
+
+    def test_build_request_spec_nemotron_passes_reasoning_effort(self):
+        _, _, payload = build_request_spec(
+            "nemotron-3.5-lightning",
+            [{"role": "user", "content": "hi"}],
+            "https://gateway.example/v1",
+            reasoning_effort="none",
+            reasoning_type="auto",
+        )
+        self.assertEqual(payload.get("reasoning_effort"), "none")
+        self.assertNotIn("temperature", payload)
 
     def test_build_request_spec_openai_chat_gemini_temperature(self):
         # 推演模型通常不传 temperature，但 gemini 允许保留
@@ -393,6 +415,18 @@ class LlmTransportTailsTests(unittest.TestCase):
         self.assertEqual(reasoning, "think")
         self.assertEqual(usage["total_tokens"], 12)
         self.assertGreaterEqual(latency, 0)
+
+    @patch("urllib.request.urlopen")
+    def test_attempt_llm_call_rejects_length_terminated_stream(self, mock_urlopen):
+        mock_urlopen.return_value = _IncrementalResponse(
+            'data: {"choices":[{"delta":{"content":"partial"},"finish_reason":"length"}]}\n\n'
+            'data: [DONE]\n'
+        )
+        cand = {"model": "gpt-4o", "base_url": "https://api.openai.com/v1"}
+        with self.assertRaises(_LLMTransientError) as ctx:
+            _attempt_llm_call(cand, [{"role": "user", "content": "ping"}], None, None, 10.0)
+        self.assertIn("达到长度上限", str(ctx.exception))
+        self.assertTrue(ctx.exception.fail_over_now)
 
     @patch("urllib.request.urlopen")
     def test_attempt_llm_call_empty_content_raises_transient_error(self, mock_urlopen):

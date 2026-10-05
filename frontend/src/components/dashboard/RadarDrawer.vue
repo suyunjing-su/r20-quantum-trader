@@ -53,6 +53,22 @@ function seatLabel(id: any): string {
 
 const advisorList = computed<any[]>(() => Object.values(transcript.value?.advisors || {}));
 const arbitrator = computed<any>(() => transcript.value?.arbitrator || null);
+const arbitratorSummary = computed(() => {
+  const explicit = arbitrator.value?.summary || arbitrator.value?.verdict_summary;
+  if (explicit) return String(explicit);
+  // Backward-compatible fallback for history written before the CIO summary field existed.
+  const macro = String(c.value?.macro_assessment || '').trim();
+  const rows = opps.value
+    .slice(0, 8)
+    .map((row: any) => {
+      const action = String(row?.action || '').trim();
+      const reason = String(row?.reason || row?.reasoning || '').trim();
+      if (!action && !reason) return '';
+      return `${row?.inst || '标的'}：${action || '已裁决'}${reason ? `，${reason.slice(0, 120)}` : ''}`;
+    })
+    .filter(Boolean);
+  return [macro && `宏观：${macro}`, ...rows].filter(Boolean).join('\n');
+});
 const modeLabel = computed(() => transcript.value?.consensus_mode === 'cross_examination'
   ? t('dash.radar.council.cross') : t('dash.radar.council.standard'));
 
@@ -328,7 +344,7 @@ function posActionBadge(action: string): { label: string; class: string } {
           </div>
           <ConfBadge :value="arbitrator.confidence" />
         </div>
-        <p class="text-xs text-[var(--ink-1)] leading-body whitespace-pre-wrap">{{ arbitrator.reasoning || arbitrator.summary || '--' }}</p>
+        <p class="text-xs text-[var(--ink-1)] leading-body whitespace-pre-wrap">{{ arbitratorSummary || '--' }}</p>
       </div>
 
       <!-- 各交易员提案列表 -->
@@ -349,18 +365,14 @@ function posActionBadge(action: string): { label: string; class: string } {
             </div>
             <span v-if="adv.inst" class="text-3xs font-mono text-[var(--ink-2)]">{{ adv.inst }}</span>
           </div>
-          <!-- 优先展示方案正文 content，若无则展示 reasoning/view -->
+          <!-- 只展示模型的最终方案正文；推理链仅供后端审计，不在交易面板回显。 -->
           <div v-if="adv.status === 'error'" role="alert" class="text-xs text-[var(--down)] bg-[var(--down-bg)]/30 p-2 rounded leading-body whitespace-pre-wrap">
             {{ adv.content || '--' }}
           </div>
           <div v-else class="space-y-1.5">
             <p v-if="adv.content" class="text-xs text-[var(--ink-1)] leading-body whitespace-pre-wrap font-mono select-text">{{ adv.content }}</p>
-            <p v-else-if="adv.reasoning || adv.view" class="text-xs text-[var(--ink-2)] leading-body whitespace-pre-wrap">{{ adv.reasoning || adv.view }}</p>
+            <p v-else-if="adv.view" class="text-xs text-[var(--ink-2)] leading-body whitespace-pre-wrap">{{ adv.view }}</p>
             <p v-else class="text-xs text-[var(--ink-3)] leading-body">--</p>
-            <details v-if="adv.content && adv.reasoning" class="text-3xs text-[var(--ink-3)] pt-1 cursor-pointer">
-              <summary class="hover:text-[var(--accent)] select-none">{{ t('dash.radar.viewReasoning') }}</summary>
-              <div class="mt-1 p-2 rounded bg-[var(--bg-sub)] text-xs text-[var(--ink-2)] leading-body whitespace-pre-wrap">{{ adv.reasoning }}</div>
-            </details>
           </div>
         </div>
       </div>

@@ -182,6 +182,20 @@ def _is_transient_http(code: int, body: str) -> bool:
     return False
 
 
+def _coerce_reasoning_text(value: Any) -> str:
+    """Normalize provider-specific reasoning fields without exposing them as content."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        for key in ("text", "thinking", "reasoning", "content", "summary"):
+            if value.get(key) is not None:
+                return _coerce_reasoning_text(value[key])
+        return ""
+    if isinstance(value, list):
+        return "".join(_coerce_reasoning_text(item) for item in value)
+    return "" if value is None else str(value)
+
+
 def _parse_llm_response(target_format: str, res_json: Dict[str, Any]) -> Tuple[str, str, Dict[str, Any]]:
     content = ""
     reasoning_content = ""
@@ -218,7 +232,11 @@ def _parse_llm_response(target_format: str, res_json: Dict[str, Any]) -> Tuple[s
     else:
         msg = res_json.get("choices", [{}])[0].get("message", {})
         content = str(msg.get("content", "")).strip()
-        reasoning_content = str(msg.get("reasoning_content") or "").strip()
+        reasoning_content = _coerce_reasoning_text(
+            msg.get("reasoning_content") or msg.get("reasoning")
+        ).strip()
+        if not reasoning_content:
+            reasoning_content = _coerce_reasoning_text(msg.get("reasoning_details")).strip()
 
     # 规范化提取各厂商 Prompt Caching 缓存命中指标（OpenAI, DeepSeek, Claude, Gemini, Qwen）
     prompt_details = usage.get("prompt_tokens_details", {}) if isinstance(usage.get("prompt_tokens_details"), dict) else {}
@@ -314,7 +332,13 @@ class _StreamAccumulator:
                 self.content_parts.append(str(piece))
             reasoning_piece = delta.get("reasoning_content") or delta.get("reasoning")
             if reasoning_piece is not None:
-                self.reasoning_parts.append(str(reasoning_piece))
+                self.reasoning_parts.append(_coerce_reasoning_text(reasoning_piece))
+            elif delta.get("reasoning_details") is not None:
+                # Some OpenAI-compatible gateways omit `reasoning` and only send
+                # the structured detail list. It is still reasoning, never answer text.
+                self.reasoning_parts.append(
+                    _coerce_reasoning_text(delta.get("reasoning_details"))
+                )
 
     def finish(self) -> Tuple[str, str, Dict[str, Any], Optional[str]]:
         if self.completed_response:
@@ -679,6 +703,7 @@ def build_request_spec(
             or "-r1" in m_lower
             or "qwen3" in m_lower or "qwen-3" in m_lower or "qwq" in m_lower
             or "kimi-k" in m_lower or "glm-5" in m_lower
+            or "nemotron" in m_lower
         )
         if not is_reasoning_model:
             if temperature is not None:
@@ -694,6 +719,7 @@ def build_request_spec(
             or "gpt-5" in m_lower or "gpt-6" in m_lower or "chatgpt-6" in m_lower
             or "deepseek-v4" in m_lower or "v4.1" in m_lower
             or "kimi-k" in m_lower or "glm-5" in m_lower
+            or "nemotron" in m_lower
         )):
             if effort in ("max", "xhigh", "high", "medium", "low", "minimal"):
                 payload["reasoning_effort"] = effort
@@ -897,6 +923,7 @@ def _attempt_llm_call_unbounded(
             timed_out=True,
             fail_over_now=True,
         )
+    if finish_reason in ("length", "max_tokens"):
         raise _LLMTransientError(
             f"模型 {cand['model']} 流式输出达到长度上限（finish_reason={finish_reason}）",
             fail_over_now=True,

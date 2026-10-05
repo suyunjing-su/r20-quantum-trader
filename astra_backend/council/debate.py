@@ -478,6 +478,31 @@ def _call_single_trader_critique(resolve_seat: Callable[..., Any],
         }
 
 
+def _build_cio_verdict_summary(brain_output: Dict[str, Any]) -> str:
+    """Build a short user-facing verdict from the final JSON, not native CoT."""
+    parts: List[str] = []
+    macro = str(brain_output.get("macro_assessment") or "").strip()
+    if macro:
+        parts.append(f"宏观：{macro[:180]}")
+
+    decisions = brain_output.get("decisions")
+    decision_items = decisions.items() if isinstance(decisions, dict) else enumerate(decisions or [])
+    for symbol, decision in list(decision_items)[:8]:
+        if not isinstance(decision, dict):
+            continue
+        action = str(decision.get("action") or "").strip()
+        reason = str(decision.get("reasoning") or decision.get("reason") or "").strip()
+        if not action and not reason:
+            continue
+        label = str(symbol)
+        line = f"{label}：{action or '已裁决'}"
+        if reason:
+            line += f"，{reason[:120]}"
+        parts.append(line)
+
+    return "\n".join(parts)[:1000]
+
+
 def _execute_council_debate_impl(load_config: Callable[[], Dict[str, Any]], resolve_seat: Callable[..., Any], call_trader: Callable[..., Any], call_critique: Callable[..., Any],
     market_prompt: str,
     original_system_prompt: str,
@@ -975,7 +1000,9 @@ def _execute_council_debate_impl(load_config: Callable[[], Dict[str, Any]], reso
             "model_fallback": cio_resolved["fallback"],
             "model_note": cio_resolved["reason"],
             "latency_ms": latency,
+            # `reasoning` is provider-native CoT and must remain audit-only.
             "reasoning": reasoning,
+            "summary": _build_cio_verdict_summary(brain_output),
         },
         "advisors": trader_proposals,
         "cross_examinations": trader_critiques if consensus_mode == "cross_examination" else {},

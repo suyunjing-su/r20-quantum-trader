@@ -31,6 +31,7 @@ def _detect_reasoning_type(model_id: str) -> str:
         or "glm-5" in m
         or "minimax-m2" in m
         or "mimo-v2" in m
+        or "nemotron" in m
     ):
         return "standard_effort"
     if "chat" in m or "gpt-4o" in m or "gpt-3" in m or "qwen" in m or "llama" in m:
