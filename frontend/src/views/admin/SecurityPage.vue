@@ -47,7 +47,7 @@ import BaseSwitch from '../../components/base/BaseSwitch.vue'
 import BaseDialog from '../../components/base/BaseDialog.vue'
 import BaseEmpty from '../../components/base/BaseEmpty.vue'
 import { Save, RefreshCw, Layers, Trash2, Zap, ShieldCheck, Route, KeyRound,
-  Wallet, Activity, AlertTriangle, Loader2, Radar, Share2, Copy, Eye } from 'lucide-vue-next'
+  Wallet, Activity, AlertTriangle, Loader2, Radar, Share2, Copy, Eye, Clock3 } from 'lucide-vue-next'
 import BaseLoadingAnnounce from '../../components/base/BaseLoadingAnnounce.vue';
 
 const { api } = useApi()
@@ -108,6 +108,8 @@ const keys = ref({ live_key: '', live_secret: '', live_pass: '', demo_key: '', d
 const newCapital = ref<string>('')
 const capitalConfirm = ref<string>('')
 const savingCapital = ref(false)
+const savingEntryFreshness = ref(false)
+const entryFreshnessMaxAgeSeconds = ref<number>(300)
 const savingCouncilGroupSize = ref(false)
 const capitalAmountOk = computed(() => {
   const n = Number(newCapital.value)
@@ -238,6 +240,7 @@ async function loadAll() {
       orderMode.value = 'market'
     }
     newCapital.value = String(cfg.editable?.initial_capital ?? '')
+    entryFreshnessMaxAgeSeconds.value = Number(cfg.editable?.entry_freshness_max_age_seconds ?? 300)
     manualClose.value = !!cfg.editable?.manual_close_enabled
     const [inst, cCfg] = await Promise.all([
       api('/api/v1/admin/instruments'),
@@ -316,6 +319,31 @@ async function saveOrderMode() {
     toast.err(t('admin.security.errSaveFailed', undefined, { msg: e.message }))
   } finally {
     savingOrderMode.value = false
+  }
+}
+
+async function saveEntryFreshness() {
+  if (!auth.isSuperadmin) {
+    toast.err(t('admin.security.errSuperadminOnly'))
+    return
+  }
+  const value = Number(entryFreshnessMaxAgeSeconds.value)
+  if (!Number.isFinite(value) || value < 30 || value > 3600) {
+    toast.err(t('admin.security.entryFreshnessInvalid'))
+    return
+  }
+  savingEntryFreshness.value = true
+  try {
+    const res = await api('/api/v1/admin/config', {
+      method: 'PUT',
+      body: JSON.stringify({ entry_freshness_max_age_seconds: value }),
+    })
+    entryFreshnessMaxAgeSeconds.value = Number(res?.editable?.entry_freshness_max_age_seconds ?? value)
+    toast.ok(t('admin.security.entryFreshnessSaved'))
+  } catch (e: any) {
+    toast.err(t('admin.security.errSaveFailed', undefined, { msg: e.message }))
+  } finally {
+    savingEntryFreshness.value = false
   }
 }
 
@@ -1569,36 +1597,6 @@ onMounted(() => { loadAll(); loadMx(); loadChannels(); loadPlazaSettings() })
           <p class="sc-hint pad">{{ t('admin.security.capitalFooter') }}</p>
         </SettingsSection>
 
-        <SettingsSection :title="t('admin.security.councilGroupSizeTitle')" :description="t('admin.security.councilGroupSizeDesc')" :icon="Layers">
-          <template #actions>
-            <button
-              type="button"
-              class="btn btn-primary btn-sm"
-              :disabled="savingCouncilGroupSize || !auth.isSuperadmin"
-              @click="saveCouncilGroupSize"
-            >
-              <Loader2 v-if="savingCouncilGroupSize" :size="13" class="animate-spin shrink-0" />
-              <Save v-else :size="13" />
-              <span>{{ savingCouncilGroupSize ? t('admin.security.saving') : t('admin.security.councilGroupSizeSave') }}</span>
-            </button>
-          </template>
-          <div class="sc-form-2">
-            <label class="field-stack">
-              <span class="form-label">{{ t('admin.security.councilGroupSizeLabel') }}</span>
-              <input
-                v-model.number="councilConfig.max_symbols_per_group"
-                type="number"
-                min="1"
-                max="100"
-                step="1"
-                class="field num"
-                :disabled="!auth.isSuperadmin"
-              />
-            </label>
-          </div>
-          <p class="sc-hint pad">{{ t('admin.security.councilGroupSizeFooter') }}</p>
-        </SettingsSection>
-
         <SettingsSection :title="t('admin.security.poolTitle')" :description="t('admin.security.poolDesc')" :icon="Layers">
           <template #actions>
             <div class="sc-inst-venues" role="group" :aria-label="t('admin.security.instVenuesLabel')">
@@ -1686,6 +1684,67 @@ onMounted(() => { loadAll(); loadMx(); loadChannels(); loadPlazaSettings() })
           </div>
 
           <p class="sc-hint pad">{{ t('admin.security.poolFooter', undefined, { max: instLimits.maximum }) }}</p>
+        </SettingsSection>
+
+        <SettingsSection :title="t('admin.security.entryFreshnessTitle')" :description="t('admin.security.entryFreshnessDesc')" :icon="Clock3">
+          <template #actions>
+            <button
+              type="button"
+              class="btn btn-primary btn-sm"
+              :disabled="savingEntryFreshness || !auth.isSuperadmin"
+              @click="saveEntryFreshness"
+            >
+              <Loader2 v-if="savingEntryFreshness" :size="13" class="animate-spin shrink-0" />
+              <Save v-else :size="13" />
+              <span>{{ savingEntryFreshness ? t('admin.security.saving') : t('admin.security.entryFreshnessSave') }}</span>
+            </button>
+          </template>
+
+          <div class="sc-form-2">
+            <label class="field-stack">
+              <span class="form-label">{{ t('admin.security.entryFreshnessLabel') }}</span>
+              <input
+                v-model.number="entryFreshnessMaxAgeSeconds"
+                type="number"
+                min="30"
+                max="3600"
+                step="1"
+                class="field num"
+                :disabled="!auth.isSuperadmin"
+              />
+            </label>
+          </div>
+          <p class="sc-hint pad">{{ t('admin.security.entryFreshnessFooter') }}</p>
+        </SettingsSection>
+
+        <SettingsSection :title="t('admin.security.councilGroupSizeTitle')" :description="t('admin.security.councilGroupSizeDesc')" :icon="Layers">
+          <template #actions>
+            <button
+              type="button"
+              class="btn btn-primary btn-sm"
+              :disabled="savingCouncilGroupSize || !auth.isSuperadmin"
+              @click="saveCouncilGroupSize"
+            >
+              <Loader2 v-if="savingCouncilGroupSize" :size="13" class="animate-spin shrink-0" />
+              <Save v-else :size="13" />
+              <span>{{ savingCouncilGroupSize ? t('admin.security.saving') : t('admin.security.councilGroupSizeSave') }}</span>
+            </button>
+          </template>
+          <div class="sc-form-2">
+            <label class="field-stack">
+              <span class="form-label">{{ t('admin.security.councilGroupSizeLabel') }}</span>
+              <input
+                v-model.number="councilConfig.max_symbols_per_group"
+                type="number"
+                min="1"
+                max="100"
+                step="1"
+                class="field num"
+                :disabled="!auth.isSuperadmin"
+              />
+            </label>
+          </div>
+          <p class="sc-hint pad">{{ t('admin.security.councilGroupSizeFooter') }}</p>
         </SettingsSection>
       </template>
 

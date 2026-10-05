@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Dict
 # 结构优化阶段 4·B3 第四十八刀：本地锁兜底外提到 `scripts/local_lock.py`。
@@ -161,7 +162,12 @@ def score_universe_candidate(
 
 
 def _precision(tick_size: str) -> int:
-    normalized = tick_size.rstrip("0")
+    """Return decimal places for a tick, including scientific-notation floats."""
+    try:
+        text = format(Decimal(str(tick_size)), "f")
+    except (InvalidOperation, ValueError):
+        text = str(tick_size)
+    normalized = text.rstrip("0")
     return len(normalized.split(".", 1)[1]) if "." in normalized else 0
 
 

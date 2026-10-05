@@ -124,6 +124,13 @@ export const enAdminSecurity = {
   toastPoolSaved: '{venue} perpetual pool saved',
 
   poolDesc: 'Manage the USDT perpetual instrument pool. Select eligible venues on each instrument here; routing chooses the final venue when several are selected.',
+  entryFreshnessTitle: 'AI entry freshness',
+  entryFreshnessDesc: 'Control how long an AI decision and the market snapshot behind it may survive at the final entry boundary.',
+  entryFreshnessLabel: 'Maximum age (seconds)',
+  entryFreshnessSave: 'Save freshness',
+  entryFreshnessSaved: 'AI entry freshness saved; decision and market snapshot limits are synchronized.',
+  entryFreshnessInvalid: 'Freshness must be a number from 30 to 3600 seconds',
+  entryFreshnessFooter: 'Superadmin only. The value applies to both AI decisions and market snapshots; default is 300 seconds. Raising it widens the stale-signal entry window.',
   councilGroupSizeTitle: 'Council grouping',
   councilGroupSizeDesc: 'Choose how many primary symbols each Trader proposal group contains. The default is 7 and can be adjusted manually for this account and pool.',
   councilGroupSizeLabel: 'Primary symbols per group',

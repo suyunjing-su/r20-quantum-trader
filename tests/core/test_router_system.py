@@ -84,6 +84,7 @@ class _Base(unittest.TestCase):
         s.okx_secret_key = "b"
         s.okx_passphrase = "c"
         s.manual_close_enabled = True
+        s.entry_freshness_max_age_seconds = 300.0
         s.okx_environment = "live"
         _patch("settings", s)
 
@@ -469,6 +470,7 @@ class AdminConfigRouteTests(_Base):
         self.assertEqual(out["editable"]["okx_environment"], "live")
         self.assertEqual(out["editable"]["initial_capital"], 4061.04)
         self.assertEqual(out["editable"]["initial_capital_reset_time"], "t")
+        self.assertEqual(out["editable"]["entry_freshness_max_age_seconds"], 300.0)
 
     def test_missing_baseline_falls_back_to_the_documented_default(self):
         self._start(mock.patch.object(A, "load_account_baseline", return_value={}))
@@ -511,6 +513,15 @@ class UpdateAdminConfigTests(_Base):
         A.update_admin_config(AdminConfigUpdate(okx_simulated=False),
                               x_astra_admin_token="tok", x_astra_session="s")
         self.superadmin.assert_called_once_with("s")
+
+    def test_entry_freshness_requires_superadmin_and_updates_both_guards(self):
+        A.update_admin_config(
+            AdminConfigUpdate(entry_freshness_max_age_seconds=900),
+            x_astra_admin_token="tok", x_astra_session="s")
+        self.superadmin.assert_called_once_with("s")
+        env_values = self.update_env.call_args[0][0]
+        self.assertEqual(env_values["ASTRA_ENTRY_DECISION_MAX_AGE_SECONDS"], 900.0)
+        self.assertEqual(env_values["ASTRA_ENTRY_MARKET_MAX_AGE_SECONDS"], 900.0)
 
     def test_url_protocol_validation_blocks_bad_endpoints(self):
         with self.assertRaises(HTTPException) as ctx:

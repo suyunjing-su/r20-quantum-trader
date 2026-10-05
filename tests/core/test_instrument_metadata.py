@@ -63,6 +63,13 @@ class NativeMetadataTests(unittest.TestCase):
         self.assertEqual(item["venue_specs"], specs)
         self.assertEqual(canonical_pool_metadata(specs)["precision"], 2)
 
+    def test_scientific_notation_tick_preserves_decimal_precision(self):
+        specs = {"binance": {
+            "tick_size": 1e-05, "ct_val": 1.0, "min_size": 1.0,
+            "step_size": 1.0, "quantity_unit": "base_asset",
+        }}
+        self.assertEqual(canonical_pool_metadata(specs)["precision"], 5)
+
 
 if __name__ == "__main__":
     unittest.main()

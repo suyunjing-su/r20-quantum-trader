@@ -92,6 +92,8 @@ class AdminConfigUpdate(BaseModel):
     notification_webhook: str | None = None
     manual_close_enabled: bool | None = None
     order_mode: str | None = Field(default=None, pattern=r"^(limit|market)$")
+    # One UI-controlled value is mirrored to the decision and market snapshot guards.
+    entry_freshness_max_age_seconds: float | None = Field(default=None, ge=30.0, le=3600.0)
 
 
 class LLMActivateRequest(BaseModel):

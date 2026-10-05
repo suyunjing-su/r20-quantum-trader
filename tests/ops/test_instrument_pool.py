@@ -256,6 +256,9 @@ class PrecisionTests(unittest.TestCase):
     def test_a_tick_size_without_a_dot_is_zero_precision(self):
         self.assertEqual(ip._precision("100"), 0)
 
+    def test_scientific_notation_tick_size_keeps_its_decimal_places(self):
+        self.assertEqual(ip._precision("1e-05"), 5)
+
 
 class FromOkxInstrumentTests(unittest.TestCase):
     def _convert(self, raw):

@@ -8,6 +8,7 @@ OKX-shaped placeholder.
 from __future__ import annotations
 
 import math
+from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, Iterable
 
 from .exchanges.env_profiles import legacy_environment_for
@@ -91,8 +92,12 @@ def canonical_pool_metadata(specs: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
     venue = sorted(specs)[0]
     spec = specs[venue]
     tick = float(spec["tick_size"])
-    precision = max(0, len(str(spec["tick_size"]).split(".")[1].rstrip("0"))
-                   if "." in str(spec["tick_size"]) else 0)
+    try:
+        tick_text = format(Decimal(str(spec["tick_size"])), "f")
+    except (InvalidOperation, ValueError):
+        tick_text = str(spec["tick_size"])
+    normalized_tick = tick_text.rstrip("0")
+    precision = len(normalized_tick.split(".", 1)[1]) if "." in normalized_tick else 0
     return {
         "metadata_venue": venue,
         "base_sz": float(spec["min_size"]),

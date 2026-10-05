@@ -54,7 +54,9 @@ class _Base(unittest.TestCase):
         self.addCleanup(lambda: os.unlink(self.tmp.name))
 
     def _call(self, *, candles_15m=None, candles_1h=None, candles_4h=None,
-              positions=(), ctVal=1.0, adaptive=None, news_file=None):
+              positions=(), ctVal=1.0, adaptive=None, news_file=None,
+              tickSz=None, venues=None, fetch_market_bundle=None,
+              legacy_candles=None):
         """返回装配好的因子字典 `f`。K 线按**由旧到新**传入，内部自动翻转成交易所的
         「最新在前」顺序（生产代码会 `reversed()`）。"""
         books = {"15m": list(reversed(candles_15m if candles_15m is not None else _rising(45))),
@@ -62,12 +64,20 @@ class _Base(unittest.TestCase):
                  "4H": list(reversed(candles_4h if candles_4h is not None else _rising(25)))}
         item = {"instId": INST, "name": "BTC", "type": "crypto", "base_sz": 2.0,
                 "precision": 2, "ctVal": ctVal, "minSz": 0.01}
-        return fetch_single_instrument_data(
-            item, list(positions), 1000.0,
-            news_sentiment_file=news_file or self.tmp.name,
-            fetch_candles_direct=lambda inst, bar, n: books.get(bar, []),
-            instrument_profile=lambda f, asset_type: {"sl_atr_mult": 1.3},
-            load_adaptive_config=lambda: (adaptive or {}))
+        if tickSz is not None:
+            item["tickSz"] = tickSz
+        if venues is not None:
+            item["venues"] = venues
+        candle_source = legacy_candles or (lambda inst, bar, n: books.get(bar, []))
+        kwargs = {
+            "news_sentiment_file": news_file or self.tmp.name,
+            "fetch_candles_direct": candle_source,
+            "instrument_profile": lambda f, asset_type: {"sl_atr_mult": 1.3},
+            "load_adaptive_config": lambda: (adaptive or {}),
+        }
+        if fetch_market_bundle is not None:
+            kwargs["fetch_market_bundle"] = fetch_market_bundle
+        return fetch_single_instrument_data(item, list(positions), 1000.0, **kwargs)
 
 
 class BboTickerTest(_Base):
@@ -247,6 +257,35 @@ class StructureAndRegimeTest(_Base):
         """
         f = self._call(candles_1h=self._lh_ll_1h(), candles_15m=_rising(45, 100.0))
         self.assertEqual(f["market_regime"], "CHOP")
+
+
+class VenueBundleTest(_Base):
+    """生产因子装配必须使用与 AI 决策同源的 venue bundle。"""
+
+    def test_bundle_supplies_bbo_and_tick_precision_without_legacy_okx_calls(self):
+        books = {"15m": list(reversed(_rising(45, 0.003, 0.00001))),
+                 "1H": list(reversed(_rising(35, 0.003, 0.00001))),
+                 "4H": list(reversed(_rising(25, 0.003, 0.00001)))}
+        bundle = {"venue": "binance",
+                  "ticker": {"last": "0.00394", "bid": "0.00393",
+                              "ask": "0.00395", "ts_ms": 1700000000000},
+                  "candles": books}
+        f = self._call(
+            tickSz="1e-05", venues=["binance"],
+            fetch_market_bundle=lambda inst, allowed, limits: bundle,
+            legacy_candles=lambda *args: self.fail("legacy candle source was used"))
+        self.assertEqual(f["precision"], 5)
+        self.assertEqual(f["market_data_venue"], "binance")
+        self.assertEqual(f["bidPx"], 0.00393)
+        self.assertEqual(f["askPx"], 0.00395)
+        self.assertTrue(f["market_data_valid"])
+
+    def test_missing_bundle_does_not_fall_back_to_legacy_okx_candles(self):
+        f = self._call(
+            venues=["binance"], fetch_market_bundle=lambda *args: None,
+            legacy_candles=lambda *args: self.fail("legacy candle source was used"))
+        self.assertFalse(f["market_data_valid"])
+        self.assertEqual(f["sz"], 0.0)
 
 
 class SizeFallbackTest(_Base):

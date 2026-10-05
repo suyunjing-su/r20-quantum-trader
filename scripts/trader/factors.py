@@ -30,6 +30,7 @@ import os
 import time
 import urllib
 import warnings
+from decimal import Decimal, InvalidOperation
 
 from astra_backend.execution import (
     calc_atr,
@@ -47,7 +48,8 @@ def fetch_single_instrument_data(item, all_positions, usdt_available, *,
                                  news_sentiment_file,
                                  fetch_candles_direct,
                                  instrument_profile,
-                                 load_adaptive_config):
+                                 load_adaptive_config,
+                                 fetch_market_bundle=None):
     """装配单个标的的多因子特征字典。依赖由门面注入，理由见模块 docstring。"""
     inst_id = item["instId"]
     name = item["name"]
@@ -55,6 +57,35 @@ def fetch_single_instrument_data(item, all_positions, usdt_available, *,
     base_sz = item["base_sz"]
     # 交易所最小下单量与步长（OKX 多数永续为 0.01 张），此前被代码的 int()+max(1,..) 完全忽略
     min_sz = float(item.get("minSz", 1) or 1)
+    # Production execution uses the same venue-constrained market bundle as the
+    # AI brain.  The direct OKX path below remains only as a compatibility
+    # fallback for isolated callers that do not inject a bundle.
+    market_bundle = None
+    if fetch_market_bundle is not None:
+        try:
+            market_bundle = fetch_market_bundle(
+                inst_id, item.get("venues"), {"15m": 45, "1H": 35, "4H": 25})
+        except Exception as exc:
+            warnings.warn(
+                f"[factors] {inst_id} 跨所行情包获取失败，生产路径将拒绝旧 OKX 回退: {exc!r}",
+                RuntimeWarning)
+
+    def _bundle_candles(bar: str, limit: int):
+        if fetch_market_bundle is not None:
+            return (market_bundle or {}).get("candles", {}).get(bar, [])
+        return fetch_candles_direct(inst_id, bar, limit)
+
+    def _tick_precision(value) -> int | None:
+        if value in (None, ""):
+            return None
+        try:
+            text = format(Decimal(str(value)), "f").rstrip("0")
+        except (InvalidOperation, ValueError):
+            return None
+        return len(text.split(".", 1)[1]) if "." in text else 0
+
+    tick_precision = _tick_precision(item.get("tickSz"))
+    precision = tick_precision if tick_precision is not None else int(item.get("precision", 0) or 0)
 
     f = {
         "instId": inst_id,
@@ -62,7 +93,8 @@ def fetch_single_instrument_data(item, all_positions, usdt_available, *,
         "type": asset_type,
         "base_sz": base_sz,
         "sz": base_sz,
-        "precision": item["precision"],
+        "precision": precision,
+        "tickSz": item.get("tickSz"),
         "ctVal": item["ctVal"],
         "risk_per_trade_usd": effective_risk_per_trade(item.get("risk_per_trade_usd", 0.0), usdt_available),
         "minSz": min_sz,
@@ -72,7 +104,7 @@ def fetch_single_instrument_data(item, all_positions, usdt_available, *,
         "sl_atr_mult": item.get("sl_atr_mult", 2.2),
         "price": 0.0,
         "market_data_timestamp": 0,
-        "market_data_venue": "okx",
+        "market_data_venue": "",
         "market_last": 0.0,
         "change24h": 0.0,
         "vol24h": 0.0,
@@ -142,7 +174,7 @@ def fetch_single_instrument_data(item, all_positions, usdt_available, *,
                 break
 
     # 1. Fetch 15M Candles
-    raw_15m = fetch_candles_direct(inst_id, "15m", 45)
+    raw_15m = _bundle_candles("15m", 45)
     if raw_15m:
         candles_15m = list(reversed(raw_15m))
         closes = [float(c[4]) for c in candles_15m]
@@ -191,30 +223,51 @@ def fetch_single_instrument_data(item, all_positions, usdt_available, *,
         c_open, c_high, c_low, c_close = float(last_c[1]), float(last_c[2]), float(last_c[3]), float(last_c[4])
         f["bidPx"] = f["price"]
         f["askPx"] = f["price"]
-        # Fetch Real-time Orderbook Ticker BBO (Best Bid & Ask) for Precision Limit Placement
-        try:
-            req_t = urllib.request.Request(f"https://www.okx.com/api/v5/market/ticker?instId={inst_id}", headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req_t, timeout=3) as response_t:
-                d_t = json.loads(response_t.read().decode("utf-8"))
-                if d_t.get("code") == "0" and "data" in d_t and len(d_t["data"]) > 0:
-                    t_item = d_t["data"][0]
-                    _ticker_last = float(t_item.get("last", 0) or 0)
-                    if _ticker_last > 0:
-                        # Technical indicators continue to use candle closes, but
-                        # execution sizing/anchors must use the current ticker last.
-                        f["price"] = _ticker_last
-                        f["market_last"] = _ticker_last
-                    f["market_data_timestamp"] = int(float(
-                        t_item.get("ts") or time.time() * 1000
-                    ))
-                    f["bidPx"] = float(t_item.get("bidPx", f["price"]) or f["price"])
-                    f["askPx"] = float(t_item.get("askPx", f["price"]) or f["price"])
-        except Exception as _bbo_err:
-            # 2026-09-16：原先静默 pass —— BBO 取不到时 bid/ask 会悄悄退回最新价，
-            # 限价精度随之降级而无人知道。保留降级（不阻断取数），但必须留痕。
+        if market_bundle is not None:
+            # The bundle's ticker is from the same venue family used by the AI
+            # decision; never overwrite it with the legacy OKX-only request.
+            t_item = market_bundle.get("ticker") or {}
+            _ticker_last = float(t_item.get("last") or 0)
+            if _ticker_last > 0:
+                f["price"] = _ticker_last
+                f["market_last"] = _ticker_last
+            f["market_data_venue"] = str(market_bundle.get("venue") or "")
+            f["market_data_timestamp"] = int(float(
+                t_item.get("ts_ms") or time.time() * 1000
+            ))
+            f["bidPx"] = float(t_item.get("bid") or f["price"])
+            f["askPx"] = float(t_item.get("ask") or f["price"])
+        elif fetch_market_bundle is not None:
             warnings.warn(
-                f"[factors] {inst_id} BBO 盘口取价失败，bid/ask 退回最新价（限价精度降级）: {_bbo_err!r}",
+                f"[factors] {inst_id} 跨所行情包缺失，拒绝回退到旧 OKX 行情路径",
                 RuntimeWarning)
+        else:
+            # Compatibility path for direct unit/test callers that predate the
+            # venue-constrained bundle. Production always injects the bundle.
+            try:
+                req_t = urllib.request.Request(f"https://www.okx.com/api/v5/market/ticker?instId={inst_id}", headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req_t, timeout=3) as response_t:
+                    d_t = json.loads(response_t.read().decode("utf-8"))
+                    if d_t.get("code") == "0" and "data" in d_t and len(d_t["data"]) > 0:
+                        t_item = d_t["data"][0]
+                        _ticker_last = float(t_item.get("last", 0) or 0)
+                        if _ticker_last > 0:
+                            # Technical indicators continue to use candle closes, but
+                            # execution sizing/anchors must use the current ticker last.
+                            f["price"] = _ticker_last
+                            f["market_last"] = _ticker_last
+                        f["market_data_venue"] = "okx"
+                        f["market_data_timestamp"] = int(float(
+                            t_item.get("ts") or time.time() * 1000
+                        ))
+                        f["bidPx"] = float(t_item.get("bidPx", f["price"]) or f["price"])
+                        f["askPx"] = float(t_item.get("askPx", f["price"]) or f["price"])
+            except Exception as _bbo_err:
+                # 2026-09-16：原先静默 pass —— BBO 取不到时 bid/ask 会悄悄退回最新价，
+                # 限价精度随之降级而无人知道。保留降级（不阻断取数），但必须留痕。
+                warnings.warn(
+                    f"[factors] {inst_id} BBO 盘口取价失败，bid/ask 退回最新价（限价精度降级）: {_bbo_err!r}",
+                    RuntimeWarning)
 
         f["is_bull_candle_15m"] = (c_close > c_open)
         f["is_bear_candle_15m"] = (c_close < c_open)
@@ -230,7 +283,7 @@ def fetch_single_instrument_data(item, all_positions, usdt_available, *,
         f["vol_ratio"] = round(f["vol_15m"] / f["vol_ma20"], 2) if f["vol_ma20"] > 0 else 1.0
 
     # 2. Fetch 1H & 4H Trend Confluence
-    raw_1h = fetch_candles_direct(inst_id, "1H", 35)
+    raw_1h = _bundle_candles("1H", 35)
     if raw_1h:
         c_1h = list(reversed(raw_1h))
         closes_1h = [float(c[4]) for c in c_1h]
@@ -262,7 +315,7 @@ def fetch_single_instrument_data(item, all_positions, usdt_available, *,
         else:
             f["structure_1h"] = "CHOP"
     
-    raw_4h = fetch_candles_direct(inst_id, "4H", 25)
+    raw_4h = _bundle_candles("4H", 25)
     if raw_4h:
         c_4h = list(reversed(raw_4h))
         closes_4h = [float(c[4]) for c in c_4h]

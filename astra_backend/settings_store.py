@@ -56,6 +56,9 @@ MANAGED_KEYS = {
     "ASTRA_AGENT_API_KEY_SCOPES",
     "ASTRA_MANUAL_CLOSE_ENABLED",
     "ASTRA_ORDER_MODE",
+    # AI entry freshness guards (the admin UI writes both decision and market ages).
+    "ASTRA_ENTRY_DECISION_MAX_AGE_SECONDS",
+    "ASTRA_ENTRY_MARKET_MAX_AGE_SECONDS",
 }
 
 # 执行层风控参数（后台「风控管理页」写入，scripts/risk_constants.py 读取）

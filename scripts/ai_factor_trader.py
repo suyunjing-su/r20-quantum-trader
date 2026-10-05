@@ -185,7 +185,7 @@ import urllib.request
 import fcntl
 from typing import Tuple, Dict, Any, List, Optional
 from concurrent.futures import ThreadPoolExecutor
-from market_data_service import fetch_candles, fetch_ticker
+from market_data_service import fetch_candles, fetch_ticker, fetch_market_bundle
 # 行情取数健康快照的写盘入口（读侧在后端 /metrics，见 MARKET_DATA_HEALTH_FILE 注释）。
 from market_data_health import write_snapshot as write_market_data_health_snapshot
 import scripts.okx_rest as okx_rest
@@ -979,13 +979,26 @@ def fetch_single_instrument_data(item, all_positions, usdt_available):
     门面保留同名壳：唯一调用点（execute_portfolio 内 executor.map）以及可能的外部
     引用都按全局名查找，调用点无需改动。依赖在**调用时**注入 —— 理由见该模块 docstring。
     """
-    return _fetch_single_instrument_data(
-        item, all_positions, usdt_available,
-        news_sentiment_file=NEWS_SENTIMENT_FILE,
-        fetch_candles_direct=fetch_candles_direct,
-        instrument_profile=instrument_profile,
-        load_adaptive_config=load_adaptive_config,
-    )
+    try:
+        return _fetch_single_instrument_data(
+            item, all_positions, usdt_available,
+            news_sentiment_file=NEWS_SENTIMENT_FILE,
+            fetch_candles_direct=fetch_candles_direct,
+            instrument_profile=instrument_profile,
+            load_adaptive_config=load_adaptive_config,
+            fetch_market_bundle=fetch_market_bundle,
+        )
+    except TypeError as exc:
+        if "fetch_market_bundle" not in str(exc):
+            raise
+        # Keep compatibility with older injected factor builders.
+        return _fetch_single_instrument_data(
+            item, all_positions, usdt_available,
+            news_sentiment_file=NEWS_SENTIMENT_FILE,
+            fetch_candles_direct=fetch_candles_direct,
+            instrument_profile=instrument_profile,
+            load_adaptive_config=load_adaptive_config,
+        )
 
 # =============================================================================
 # Trailing Stop & Risk Management
