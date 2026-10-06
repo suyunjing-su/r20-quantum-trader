@@ -10,6 +10,9 @@ numpy>=1.24.0,<3.0.0
 openpyxl>=3.1.0
 cryptography>=42.0.0
 httpx==0.28.1
+# Binance modular official SDK packages (MIGRATION.md).
+binance-common==4.5.0
+binance-sdk-derivatives-trading-usds-futures==17.5.0
 python-multipart>=0.0.9
 pydantic>=2.7.0,<3.0.0
 websockets>=12.0

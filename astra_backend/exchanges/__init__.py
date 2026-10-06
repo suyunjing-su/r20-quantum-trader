@@ -7,10 +7,8 @@
 | 模块 | 内容 |
 |---|---|
 | `base.py` | `ExchangeCapabilities` 能力表 / `InstrumentSpec` / `BaseExchangeAdapter` |
-| `binance.py` | 币安 USDT-M 只读行情适配器（`BinanceAdapter` / `BinanceAPIError`） |
-| `binance_algo.py` | 币安 Algo Service 请求构造器混入（US-004 双轨契约；纯 dict 构造、零 I/O、零凭证） |
-| `binance_orders.py` | 币安下单参数构建的两条判定：`build_order_params(...)`（数量/价格按 `step`/`tick` 向下取整、LIMIT/MARKET 选择、**`reduceOnly`×`positionSide` 互斥契约**）、`apply_protective_qty_policy(...)`（保护单数量策略：有数量限仓、无数量整仓平）、`send_protective_order(...)`（TP/SL 发单统一入口：触发价无效不发、返回 algoId→orderId→""，第一百一十六刀合并两段重复代码） —— 纯函数、零 `self`、零 I/O |
-| `binance_signing.py` | `build_signed_query(...)` —— Binance 私有请求的**签名串构建**：补齐毫秒 `timestamp` 与 `recvWindow=5000`、**剔除空值但保留 `0`/`False`**、`HMAC-SHA256(secret, query_string)` 十六进制 —— 纯字符串构建；HTTP 传送与 `urlopen` 接缝仍在 `binance.py` |
+| `binance.py` | 币安 USDT-M 适配器（`BinanceAdapter` / `BinanceAPIError`），所有 Binance REST 请求统一通过官方 `binance-sdk-derivatives-trading-usds-futures` SDK 发出 |
+| `binance_orders.py` | 币安下单参数构建与数量/名义额校验的纯函数（零 I/O） |
 | `gate.py` | Gate.io V4 永续只读行情适配器 |
 | `okx.py` | OKX V5 公共行情只读适配器 |
 | `env_profiles.py` | `(venue, environment)` → 端点档单一入口（US-001） |

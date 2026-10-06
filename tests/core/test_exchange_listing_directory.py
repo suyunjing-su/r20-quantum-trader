@@ -75,17 +75,28 @@ class FetchDirectoryTest(unittest.TestCase):
         p3 = patch.object(L, "urlopen", side_effect=_urlopen)
         p3.start()
         self.addCleanup(p3.stop)
+        if venue == "binance":
+            requested["sdk"] = True
+            p4 = patch(
+                "astra_backend.exchanges.binance.BinanceAdapter._public_call",
+                return_value=payload if payload is not None else {},
+            )
+            p4.start()
+            self.addCleanup(p4.stop)
         out = L._fetch_directory(venue, environment)
         return out, requested
 
-    def test_each_venue_uses_its_own_public_path(self):
+    def test_each_venue_uses_its_own_public_path_or_sdk_method(self):
         for venue, path, payload in (
                 ("okx", "/api/v5/public/instruments?instType=SWAP", {"data": []}),
-                ("binance", "/fapi/v1/exchangeInfo", {"symbols": []}),
+                ("binance", "SDK exchange_information", {"symbols": []}),
                 ("gate", "/api/v4/futures/usdt/contracts", [])):
             with self.subTest(venue=venue):
                 _out, req = self._run(venue, payload=payload)
-                self.assertTrue(req["url"].endswith(path), f"{venue} 的公共目录路径")
+                if venue == "binance":
+                    self.assertTrue(req["sdk"], "Binance 目录必须走官方 SDK")
+                else:
+                    self.assertTrue(req["url"].endswith(path), f"{venue} 的公共目录路径")
 
     def test_okx_demo_carries_the_simulated_header_and_live_does_not(self):
         """★ 钱路相邻：模拟盘**必须**带 `x-simulated-trading`，实盘**必须不带**。"""
@@ -149,8 +160,11 @@ class FetchDirectoryTest(unittest.TestCase):
         p3 = patch.object(L, "urlopen", return_value=_Bad())
         p3.start()
         self.addCleanup(p3.stop)
-        with self.assertRaises(json.JSONDecodeError):
-            L._fetch_directory("binance", "live")
+        with patch(
+                "astra_backend.exchanges.binance.BinanceAdapter._public_call",
+                return_value=None):
+            with self.assertRaises(ValueError):
+                L._fetch_directory("binance", "live")
 
 
 if __name__ == "__main__":

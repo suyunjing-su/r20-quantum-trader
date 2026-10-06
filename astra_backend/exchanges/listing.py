@@ -80,15 +80,20 @@ def _fetch_directory(venue: str, environment: str) -> Dict[str, Dict[str, str]]:
             # OKX demo = 同域 + 模拟盘头（env_profiles 结构位）
             headers["x-simulated-trading"] = "1"
     elif venue == "binance":
-        path = "/fapi/v1/exchangeInfo"
+        # Binance 的目录请求也必须经过官方 SDK；不要在此模块重建 REST URL。
+        from .binance import BinanceAdapter
+        payload = BinanceAdapter(environment=environment)._public_call("exchange_information")
+        if not isinstance(payload, dict):
+            raise ValueError("Binance SDK exchange_information 返回结构异常")
     elif venue == "gate":
         path = "/api/v4/futures/usdt/contracts"
     else:
         raise ExchangeCapabilityError(f"listing gate 未支持的 venue={venue!r}")
 
-    req = Request(base_url + path, headers=headers, method="GET")
-    with urlopen(req, timeout=_TIMEOUT_SECONDS) as resp:
-        payload = json.loads(resp.read().decode("utf-8"))
+    if venue != "binance":
+        req = Request(base_url + path, headers=headers, method="GET")
+        with urlopen(req, timeout=_TIMEOUT_SECONDS) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
 
     directory: Dict[str, Dict[str, str]] = {}
     if venue == "okx":

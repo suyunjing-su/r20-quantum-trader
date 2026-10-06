@@ -17,20 +17,15 @@ class TestSmartMoneyExtraction(unittest.TestCase):
         self.assertIsNone(fetch_smart_money_for_symbol(""))
         self.assertIsNone(fetch_smart_money_for_symbol(None))  # type: ignore
 
-    @patch("urllib.request.urlopen")
-    def test_binance_success(self, mock_urlopen):
-        # Mock topLongShortPositionRatio and takerlongshortRatio
-        resp_ratio = MagicMock()
-        resp_ratio.read.return_value = b'[{"symbol":"SOLUSDT","longAccount":"0.6850","shortAccount":"0.3150","longShortRatio":"2.1746"}]'
-        resp_ratio.__enter__.return_value = resp_ratio
-
-        resp_taker = MagicMock()
-        resp_taker.read.return_value = b'[{"buyVol":"10000","sellVol":"5000","buySellRatio":"2.0"}]'
-        resp_taker.__enter__.return_value = resp_taker
-
-        mock_urlopen.side_effect = [resp_ratio, resp_taker]
-
-        res = _fetch_from_binance("SOL", price=100.0)
+    def test_binance_success(self):
+        adapter = MagicMock()
+        adapter.fetch_top_trader_position_ratio.return_value = [
+            {"symbol": "SOLUSDT", "longAccount": "0.6850",
+             "shortAccount": "0.3150", "longShortRatio": "2.1746"}]
+        adapter.fetch_taker_volume.return_value = [
+            {"buyVol": "10000", "sellVol": "5000", "buySellRatio": "2.0"}]
+        with patch("scripts.factors.smart_money.get_adapter", return_value=adapter):
+            res = _fetch_from_binance("SOL", price=100.0)
         self.assertIsNotNone(res)
         self.assertAlmostEqual(res["longShortRatio"]["weightedLongRatio"], 0.6850)
         self.assertAlmostEqual(res["longShortRatio"]["longShortRatio"], 2.1746)

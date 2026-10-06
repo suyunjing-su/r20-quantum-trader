@@ -12,6 +12,8 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
 
+from astra_backend.exchanges import get_adapter
+
 _HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
 
@@ -46,37 +48,34 @@ def _fetch_from_binance(ccy: str, price: float = 0.0, timeout: float = 3.5) -> O
     net_notional_usd = 0.0
     taker_str = "--"
 
-    # A. 顶级大户持仓量多空比 topLongShortPositionRatio
+    # A. 顶级大户持仓量多空比（由 Binance 适配器统一调用官方 SDK）。
     try:
-        url = f"https://fapi.binance.com/futures/data/topLongShortPositionRatio?symbol={sym}&period=5m&limit=1"
-        req = urllib.request.Request(url, headers=_HEADERS)
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            if isinstance(data, list) and data:
-                w_long = float(data[0].get("longAccount", 0.5))
-                ls_ratio = float(data[0].get("longShortRatio", 1.0))
+        adapter = get_adapter("binance", environment="live")
+        top_rows = adapter.fetch_top_trader_position_ratio(sym, period="5m", limit=1)
+        if top_rows:
+            top = top_rows[-1]
+            w_long = float(top.get("longAccount", 0.5))
+            ls_ratio = float(top.get("longShortRatio", 1.0))
     except Exception:
         pass
 
     if w_long is None:
         return None
 
-    # B. 主动买卖成交量净额 takerlongshortRatio
+    # B. 主动买卖成交量净额（同一 SDK 适配器边界）。
     try:
-        url_t = f"https://fapi.binance.com/futures/data/takerlongshortRatio?symbol={sym}&period=5m&limit=1"
-        req_t = urllib.request.Request(url_t, headers=_HEADERS)
-        with urllib.request.urlopen(req_t, timeout=timeout) as resp:
-            data_t = json.loads(resp.read().decode("utf-8"))
-            if isinstance(data_t, list) and data_t:
-                b_vol = float(data_t[0].get("buyVol", 0))
-                s_vol = float(data_t[0].get("sellVol", 0))
-                diff = b_vol - s_vol
-                net_notional_usd = diff * price if price > 0 else diff
-                taker_str = (
-                    f"{round(net_notional_usd / 1e4, 1)}万 U"
-                    if abs(net_notional_usd) >= 1e4
-                    else f"{round(net_notional_usd, 0)} U"
-                )
+        taker_rows = adapter.fetch_taker_volume(sym, period="5m", limit=1)
+        if taker_rows:
+            taker = taker_rows[-1]
+            b_vol = float(taker.get("buyVol", 0))
+            s_vol = float(taker.get("sellVol", 0))
+            diff = b_vol - s_vol
+            net_notional_usd = diff * price if price > 0 else diff
+            taker_str = (
+                f"{round(net_notional_usd / 1e4, 1)}万 U"
+                if abs(net_notional_usd) >= 1e4
+                else f"{round(net_notional_usd, 0)} U"
+            )
     except Exception:
         pass
 

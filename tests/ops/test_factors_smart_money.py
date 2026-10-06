@@ -46,6 +46,27 @@ BINANCE_LS = [{"longAccount": "0.62", "longShortRatio": "1.63"}]
 BINANCE_TAKER = [{"buyVol": "30000", "sellVol": "10000"}]
 
 
+class _FakeBinanceAdapter:
+    def __init__(self, routes, urls):
+        self.routes = routes
+        self.urls = urls
+
+    def _get(self, endpoint):
+        self.urls.append(f"https://fapi.binance.com/futures/data/{endpoint}?symbol=BTCUSDT&period=5m&limit=1")
+        for key, value in self.routes.items():
+            if key in endpoint:
+                if isinstance(value, Exception):
+                    raise value
+                return value if isinstance(value, list) else []
+        return []
+
+    def fetch_top_trader_position_ratio(self, symbol, **kwargs):
+        return self._get("topLongShortPositionRatio")
+
+    def fetch_taker_volume(self, symbol, **kwargs):
+        return self._get("takerlongshortRatio")
+
+
 class _HttpMixin:
     def setUp(self):
         self.urls: list[str] = []
@@ -63,7 +84,9 @@ class _HttpMixin:
         return opener
 
     def _run(self, routes, ccy="BTC", **kw):
-        with patch.object(sm.urllib.request, "urlopen", self._opener(routes)):
+        fake = _FakeBinanceAdapter(routes, self.urls)
+        with patch.object(sm, "get_adapter", return_value=fake), \
+             patch.object(sm.urllib.request, "urlopen", self._opener(routes)):
             return sm.fetch_smart_money_for_symbol(ccy, price=100.0, **kw)
 
 
@@ -114,7 +137,8 @@ class SourcePreferenceTests(_HttpMixin, unittest.TestCase):
 
 class BinanceSourceTests(_HttpMixin, unittest.TestCase):
     def _binance(self, routes, price=0.0):
-        with patch.object(sm.urllib.request, "urlopen", self._opener(routes)):
+        fake = _FakeBinanceAdapter(routes, self.urls)
+        with patch.object(sm, "get_adapter", return_value=fake):
             return sm._fetch_from_binance("BTC", price=price)
 
     def test_symbol_is_currency_plus_usdt(self):

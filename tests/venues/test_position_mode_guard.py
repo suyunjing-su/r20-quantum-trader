@@ -340,15 +340,15 @@ class BinancePositionModeTest(unittest.TestCase):
         ad = BinanceAdapter.__new__(BinanceAdapter)
         calls = []
 
-        def _req(method, path, **kw):
-            calls.append((method, path))
+        def _private(method, **kw):
+            calls.append((method, kw))
             return {"dualSidePosition": False}
-        ad.signed_request = _req                      # type: ignore[method-assign]
+        ad._private_call = _private
         self.assertEqual(ad.detect_position_mode(), "net")
-        self.assertEqual(calls, [("GET", "/fapi/v1/positionSide/dual")],
-                         "必须是只读 GET（本系统绝不 POST 切换账户模式）")
+        self.assertEqual(calls, [("get_current_position_mode", {})],
+                         "必须走官方 SDK 只读方法（本系统绝不 POST 切换账户模式）")
 
-        ad.signed_request = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("net down"))  # type: ignore[method-assign]
+        ad._private_call = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("net down"))
         self.assertEqual(ad.detect_position_mode(), "unknown", "探测失败必须 fail-soft")
 
     def test_entry_ready_subset_declared_for_both_venues(self):

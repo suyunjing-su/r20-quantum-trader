@@ -131,81 +131,24 @@ class TestCapabilityDeclarations(unittest.TestCase):
 
 
 # ----------------------------------------------------------------------
-# 2) Binance Algo 双轨契约（纯构造器 + fail-closed 发送）
+# 2) Binance 条件单能力由官方 SDK 承载
 # ----------------------------------------------------------------------
-class TestBinanceAlgoContract(unittest.TestCase):
-    def setUp(self):
-        self.ad = BinanceAdapter()
+class TestBinanceSDKConditionalContract(unittest.TestCase):
+    def test_private_algo_operations_use_sdk_boundary(self):
+        ad = BinanceAdapter.__new__(BinanceAdapter)
+        calls = []
 
-    def test_build_algo_order_uses_algo_fields(self):
-        req = self.ad.build_algo_order_request(
-            symbol="BTCUSDT", side="SELL", type_="STOP_MARKET",
-            trigger_price="78500.0", working_type="MARK_PRICE",
-            quantity="0.05", client_algo_id="astraa1")
-        self.assertEqual(req["method"], "POST")
-        self.assertEqual(req["path"], "/fapi/v1/algoOrder")
-        b = req["body"]
-        self.assertEqual(b["triggerPrice"], "78500.0")     # 当前字段名
-        self.assertEqual(b["clientAlgoId"], "astraa1")       # 当前字段名
-        self.assertEqual(b["workingType"], "MARK_PRICE")   # 显式传入
-        self.assertNotIn("stopPrice", b)                   # 普通订单旧字段禁传
-        self.assertNotIn("newClientOrderId", b)
+        def _private(method, **kwargs):
+            calls.append((method, kwargs))
+            return {"algoId": 1}
 
-    def test_working_type_required_not_default(self):
-        with self.assertRaises(ValueError):
-            self.ad.build_algo_order_request(
-                symbol="BTCUSDT", side="SELL", type_="STOP_MARKET",
-                trigger_price="1", working_type=None, quantity="1")
-        with self.assertRaises(ValueError):
-            self.ad.build_algo_order_request(
-                symbol="BTCUSDT", side="SELL", type_="STOP_MARKET",
-                trigger_price="1", working_type="BOGUS", quantity="1")
-
-    def test_close_position_exclusivity_fail_closed(self):
-        mk = dict(symbol="BTCUSDT", side="SELL", type_="STOP_MARKET",
-                  trigger_price="78000", working_type="CONTRACT_PRICE")
-        # 合法：仅 closePosition
-        req = self.ad.build_algo_order_request(close_position=True, **mk)
-        self.assertEqual(req["body"]["closePosition"], "true")
-        self.assertNotIn("quantity", req["body"])
-        # 非法：与 quantity / reduceOnly 并传；非 *_MARKET 类型
-        with self.assertRaises(ValueError):
-            self.ad.build_algo_order_request(close_position=True, quantity="0.1", **mk)
-        with self.assertRaises(ValueError):
-            self.ad.build_algo_order_request(close_position=True, reduce_only=True, **mk)
-        with self.assertRaises(ValueError):
-            self.ad.build_algo_order_request(
-                symbol="BTCUSDT", side="SELL", type_="STOP", working_type="CONTRACT_PRICE",
-                trigger_price="78000", close_position=True)
-
-    def test_hedge_mode_rejects_reduce_only(self):
-        with self.assertRaises(ValueError):
-            self.ad.build_algo_order_request(
-                symbol="BTCUSDT", side="SELL", type_="STOP_MARKET",
-                trigger_price="78000", working_type="MARK_PRICE",
-                quantity="0.1", reduce_only=True, position_side="LONG")
-
-    def test_private_algo_sends_require_credentials_fail_closed(self):
-        # US-005 实装后契约升级：不再「恒不支持」，而是「凭证缺失显式拒」——
-        # 实装 ≠ 放行，load_secrets 为空的封闭环境里绝不静默出网
-        import astra_gateway.secrets as gw_secrets
-        for call in (lambda: self.ad.query_algo_order(algo_id="1"),
-                     lambda: self.ad.current_all_algo_open_orders(symbol="BTCUSDT"),
-                     lambda: self.ad.cancel_algo_order(algo_id="1"),
-                     lambda: self.ad.cancel_all_algo_open_orders(symbol="BTCUSDT")):
-            with patch.object(gw_secrets, "load_secrets", lambda: {}):
-                with self.assertRaises(ExchangeCapabilityError):
-                    call()
-
-    def test_merged_protection_view_is_dual_source(self):
-        view = self.ad.merged_protection_view(
-            [{"orderId": 111, "symbol": "BTCUSDT"}],
-            [{"algoId": 9007199254740993, "type": "STOP_MARKET"}])
-        self.assertFalse(view["open_orders_only"])
-        self.assertEqual(view["entries"][0]["orderId"], "111")           # str 归一
-        self.assertEqual(view["conditional"][0]["algoId"],
-                         "9007199254740993")                             # 大整数无损字符串
-        self.assertEqual(view["protection_total"], 1)
+        ad._private_call = _private
+        ad.cancel_algo_order(algo_id="1")
+        ad.cancel_all_algo_open_orders(symbol="BTC")
+        self.assertEqual([name for name, _ in calls],
+                         ["cancel_algo_order", "cancel_all_algo_open_orders"])
+        self.assertEqual(calls[0][1], {"algo_id": 1})
+        self.assertEqual(calls[1][1], {"symbol": "BTCUSDT"})
 
 
 # ----------------------------------------------------------------------

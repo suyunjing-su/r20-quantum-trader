@@ -8,7 +8,7 @@
 封闭三律遵守：
 - 支持依赖注入测试（http_client / urlopen 可 mock）
 - 错误信息全结构化返回，永不抛出 500
-- 严格遵循各所鉴权规范（OKX V5, Binance USDT-M HMAC-SHA256, Gate V4 HMAC-SHA512）
+- 各场所鉴权由对应官方/既有适配器负责（Binance 使用官方模块化 SDK；OKX V5、Gate V4 保持原边界）
 - 永不在诊断响应中泄露 API Secret 或 Passphrase 明文
 """
 from __future__ import annotations
@@ -53,6 +53,35 @@ def _default_http_call(url: str, method: str = "GET", headers: Optional[Dict[str
             data = {"raw_text": raw[:500]}
         resp_headers = dict(exc.headers.items()) if hasattr(exc, "headers") else {}
         return status, data if isinstance(data, dict) else {"data": data}, resp_headers
+
+
+def _binance_sdk_request(environment: str, api_key: str = "", secret_key: str = "",
+                         method: str = "check_server_time", timeout: float = 8.0):
+    """Call one Binance diagnostic endpoint through the modular official SDK."""
+    from binance_common.configuration import ConfigurationRestAPI
+    from binance_sdk_derivatives_trading_usds_futures.derivatives_trading_usds_futures import (
+        DerivativesTradingUsdsFutures,
+    )
+    from .binance import BinanceAdapter
+
+    base_url = env_profiles.resolve_base_url("binance", environment)
+    config = ConfigurationRestAPI(
+        api_key=api_key or None,
+        api_secret=secret_key or None,
+        base_path=base_url,
+        timeout=max(1, int(float(timeout) * 1000)),
+        retries=0,
+    )
+    try:
+        response = getattr(
+            DerivativesTradingUsdsFutures(config_rest_api=config).rest_api, method
+        )().data()
+        return 200, BinanceAdapter._plain(response)
+    except Exception as exc:
+        status = getattr(exc, "status_code", 0) or 0
+        code = getattr(exc, "code", None)
+        message = getattr(exc, "error_message", None) or str(exc)
+        return status, {"code": code, "msg": message, "raw_text": message}
 
 
 def diagnose_venue_connection(
@@ -156,13 +185,15 @@ def _diagnose_public_ping(venue: str, env: str, caller: Callable, timeout: float
             base_url = "https://www.okx.com"
             path = "/api/v5/public/time"
         elif venue == "binance":
-            base_url = _resolve_for_diagnostics("binance", env, caller)
-            path = "/fapi/v1/time"
+            base_url = env_profiles.resolve_base_url("binance", env)
+            path = "SDK rest_api.check_server_time"
+            status, data = _binance_sdk_request(env, timeout=timeout)
         else:  # gate
             base_url = _resolve_for_diagnostics("gate", env, caller)
             path = "/api/v4/futures/usdt/contracts"
 
-        status, data, _ = caller(f"{base_url}{path}", method="GET", timeout=timeout)
+        if venue != "binance":
+            status, data, _ = caller(f"{base_url}{path}", method="GET", timeout=timeout)
         latency = max(1, round((time.monotonic() - t0) * 1000))
         ok = (status == 200)
         return {
@@ -240,23 +271,12 @@ def _diagnose_okx(env: str, is_sandbox: bool, ak: str, sk: str, pp: str,
 
 def _diagnose_binance(env: str, is_sandbox: bool, ak: str, sk: str,
                       caller: Callable, timeout: float, t0: float) -> Dict[str, Any]:
-    base_url = env_profiles.resolve_base_url("binance", env)
-    path = "/fapi/v2/account"
-    ts_ms = int(time.time() * 1000)
-    query = f"timestamp={ts_ms}&recvWindow=5000"
-    signature = hmac.new(sk.encode("utf-8"), query.encode("utf-8"), hashlib.sha256).hexdigest()
-    url = f"{base_url}{path}?{query}&signature={signature}"
-
-    headers = {
-        "X-MBX-APIKEY": ak,
-        "Accept": "application/json",
-        "User-Agent": "ASTRA-Diag/1.0",
-    }
-
-    status, data, _ = caller(url, method="GET", headers=headers, timeout=timeout)
+    """Validate Binance credentials through the modular official SDK."""
+    status, data = _binance_sdk_request(env, ak, sk, "account_information_v2", timeout)
     latency = max(1, round((time.monotonic() - t0) * 1000))
 
-    if status == 200 and isinstance(data, dict) and ("totalWalletBalance" in data or "canTrade" in data or "assets" in data):
+    if status == 200 and isinstance(data, dict) and (
+            "totalWalletBalance" in data or "canTrade" in data or "assets" in data):
         return {
             "ok": True,
             "venue": "binance",
@@ -270,19 +290,22 @@ def _diagnose_binance(env: str, is_sandbox: bool, ak: str, sk: str,
                 "total_wallet_balance": data.get("totalWalletBalance"),
             },
         }
-    else:
-        code = data.get("code")
-        msg = data.get("msg") or data.get("raw_text") or f"HTTP {status}"
-        return {
-            "ok": False,
-            "venue": "binance",
-            "environment": env,
-            "authenticated": False,
-            "mode": "auth_failed",
-            "latency_ms": latency,
-            "message": f"Binance 鉴权失败: [{code or status}] {msg}",
-            "details": {"status_code": status, "code": code, "msg": msg},
-        }
+
+    code = data.get("code") if isinstance(data, dict) else None
+    msg = None
+    if isinstance(data, dict):
+        msg = data.get("msg") or data.get("raw_text")
+    msg = msg or f"HTTP {status}"
+    return {
+        "ok": False,
+        "venue": "binance",
+        "environment": env,
+        "authenticated": False,
+        "mode": "auth_failed",
+        "latency_ms": latency,
+        "message": f"Binance 鉴权失败: [{code or status}] {msg}",
+        "details": {"status_code": status, "code": code, "msg": msg},
+    }
 
 
 def _diagnose_gate(env: str, is_sandbox: bool, ak: str, sk: str,

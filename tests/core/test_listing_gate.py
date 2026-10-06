@@ -119,19 +119,20 @@ class ListingGateTest(unittest.TestCase):
         self.assertIn("www.okx.com", net.requests[0].full_url)
 
     def test_04_binance_break_reject(self):
-        net = _FakeNet([BINANCE_BREAK])
-        self.mock_urlopen.side_effect = net
-        chk = ensure_contract_listed("binance", "live", "SUIUSDT")
+        with patch("astra_backend.exchanges.binance.BinanceAdapter._public_call",
+                   return_value=BINANCE_BREAK):
+            chk = ensure_contract_listed("binance", "live", "SUIUSDT")
         self.assertFalse(chk.ok)
         self.assertIn("status=BREAK", chk.reason)
 
     def test_05_binance_domains_live_vs_demo(self):
-        net = _FakeNet([BINANCE_TRADING, BINANCE_TRADING])
-        self.mock_urlopen.side_effect = net
-        self.assertTrue(ensure_contract_listed("binance", "live", "SUIUSDT").ok)
-        self.assertTrue(ensure_contract_listed("binance", "demo", "SUIUSDT").ok)
-        self.assertIn("https://fapi.binance.com", net.requests[0].full_url)
-        self.assertIn("https://demo-fapi.binance.com", net.requests[1].full_url)
+        # Binance 目录读取走官方 SDK；环境域仍由 adapter/base_url 按档解析。
+        with patch("astra_backend.exchanges.binance.BinanceAdapter._public_call",
+                   side_effect=[BINANCE_TRADING, BINANCE_TRADING]) as sdk_call:
+            self.assertTrue(ensure_contract_listed("binance", "live", "SUIUSDT").ok)
+            self.assertTrue(ensure_contract_listed("binance", "demo", "SUIUSDT").ok)
+        self.assertEqual([call.args[0] for call in sdk_call.call_args_list],
+                         ["exchange_information", "exchange_information"])
 
     def test_06_gate_in_delisting_reject(self):
         net = _FakeNet([GATE_DELISTING])

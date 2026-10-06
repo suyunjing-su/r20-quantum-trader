@@ -268,7 +268,7 @@ def _resolve_trade_leverage(
 
 
 def fetch_binance_closed_trades(environment: str = "demo", tz_bj=None) -> list:
-    """拉取币安真实平仓盈亏台账（/fapi/v1/income REALIZED_PNL + /fapi/v1/userTrades）。"""
+    """通过 Binance 官方 SDK 拉取真实平仓盈亏台账。"""
     if tz_bj is None:
         tz_bj = datetime.timezone(datetime.timedelta(hours=8))
     out = []
@@ -279,14 +279,14 @@ def fetch_binance_closed_trades(environment: str = "demo", tz_bj=None) -> list:
             # 未配置私有凭证（仅提供免密公共行情），无账户台账可同步，安全跳过
             return []
         ad_bn = get_adapter("binance", environment=environment)
-        income_rows = ad_bn.signed_request("GET", "/fapi/v1/income", params={"incomeType": "REALIZED_PNL", "limit": 100})
+        income_rows = ad_bn.fetch_income_history(income_type="REALIZED_PNL", limit=100)
         if not income_rows or not isinstance(income_rows, list):
             return []
 
-        # 批量获取币安各标的的当前杠杆档位（/fapi/v2/positionRisk 返回全量 symbol 的 leverage）
+        # 批量获取币安各标的的当前杠杆档位（SDK position-risk 方法返回全量 symbol）。
         symbol_leverage_map = {}
         try:
-            risk_rows = ad_bn.signed_request("GET", "/fapi/v2/positionRisk")
+            risk_rows = ad_bn.fetch_position_risk()
             if isinstance(risk_rows, list):
                 for pr in risk_rows:
                     s = str(pr.get("symbol", "")).upper()
@@ -315,7 +315,7 @@ def fetch_binance_closed_trades(environment: str = "demo", tz_bj=None) -> list:
         user_trades_by_symbol = {}
         for sym in symbols:
             try:
-                ut = ad_bn.signed_request("GET", "/fapi/v1/userTrades", params={"symbol": sym, "limit": 50})
+                ut = ad_bn.fetch_account_trades(sym, limit=50)
                 user_trades_by_symbol[sym] = ut or []
                 for t in (ut or []):
                     user_trades_by_id[str(t.get("id"))] = t
@@ -325,7 +325,7 @@ def fetch_binance_closed_trades(environment: str = "demo", tz_bj=None) -> list:
         # 尝试拉取最近资金费（incomeType=FUNDING_FEE）
         funding_by_symbol = {}
         try:
-            funding_rows = ad_bn.signed_request("GET", "/fapi/v1/income", params={"incomeType": "FUNDING_FEE", "limit": 100})
+            funding_rows = ad_bn.fetch_income_history(income_type="FUNDING_FEE", limit=100)
             if isinstance(funding_rows, list):
                 for fr in funding_rows:
                     fsym = str(fr.get("symbol", "")).upper()
@@ -806,7 +806,7 @@ def _history_truncated_in_scope(truncated, oldest_ms, reset_time, tz_bj):
 def _binance_position_lifecycle(ad, symbol: str, size_signed: float) -> tuple:
     """币安**在仓**的真实开仓时刻、已付手续费与已结算资金费。
 
-    为什么必须回放成交：`/fapi/v2/positionRisk` **不返回任何费用字段**，且它的
+    为什么必须回放成交：SDK 的 position-risk 回包**不返回任何费用字段**，且它的
     `updateTime` 是"最后变更"时刻而非开仓时刻 —— 实测 UNI 空仓真实开仓
     2026-09-23 18:01，`updateTime` 却是 21:50（差 3.8 小时）。用它当开仓时间，
     持仓时长与资金费窗口都是错的。
@@ -823,17 +823,14 @@ def _binance_position_lifecycle(ad, symbol: str, size_signed: float) -> tuple:
     open_ms = 0
     fee = 0.0
     funding = 0.0
-    # 本函数的前提是"该所有签名请求面"（`signed_request` 只在 binance/gate 适配器上
-    # 存在，`tests/audit/test_venue_capability_calls.py` 要求按所分流的能力调用必须有
-    # 守卫）。缺了它就如实返回"不知道"，而不是让 AttributeError 被下面的宽 except 吞掉
-    # ——吞掉之后症状是"费用恒为 0"，看起来像"真的一分钱没花"。
-    if not hasattr(ad, "signed_request"):
+    # 历史富化只对提供官方 SDK 历史能力的适配器执行。缺了它就如实返回
+    # "不知道"，而不是让 AttributeError 被下面的宽 except 吞掉——吞掉之后症状是
+    # "费用恒为 0"，看起来像"真的一分钱没花"。
+    if not hasattr(ad, "fetch_account_trades") or not hasattr(ad, "fetch_income_history"):
         return open_ms, fee, funding
     trades: list = []
     try:
-        trades = ad.signed_request(
-            "GET", "/fapi/v1/userTrades",
-            params={"symbol": symbol, "limit": 500}) or []
+        trades = ad.fetch_account_trades(symbol, limit=500) or []
     except Exception:
         trades = []
     if isinstance(trades, list) and trades:
@@ -870,10 +867,9 @@ def _binance_position_lifecycle(ad, symbol: str, size_signed: float) -> tuple:
             pass
     if open_ms > 0:
         try:
-            rows = ad.signed_request(
-                "GET", "/fapi/v1/income",
-                params={"incomeType": "FUNDING_FEE", "symbol": symbol,
-                        "startTime": open_ms, "limit": 1000}) or []
+            rows = ad.fetch_income_history(
+                income_type="FUNDING_FEE", symbol=symbol,
+                start_time=open_ms, limit=1000) or []
             if isinstance(rows, list):
                 for fr in rows:
                     if not isinstance(fr, dict):

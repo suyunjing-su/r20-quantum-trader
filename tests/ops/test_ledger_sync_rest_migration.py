@@ -300,14 +300,14 @@ class LedgerRestMigrationTests(unittest.TestCase):
         fake_risk = [{"symbol": "BTCUSDT", "leverage": "5"}]
 
         class MockBinanceAdapter:
-            def signed_request(self, method, path, params=None):
-                if path == "/fapi/v1/income":
-                    return fake_income
-                if path == "/fapi/v1/userTrades":
-                    return fake_trades
-                if path == "/fapi/v2/positionRisk":
-                    return fake_risk
-                return []
+            def fetch_income_history(self, **kwargs):
+                return fake_income
+
+            def fetch_account_trades(self, symbol, **kwargs):
+                return fake_trades
+
+            def fetch_position_risk(self, **kwargs):
+                return fake_risk
 
         with patch("astra_backend.exchanges.venue_credentials", return_value=("key", "secret")), \
              patch("astra_backend.exchanges.get_adapter", return_value=MockBinanceAdapter()):

@@ -108,26 +108,28 @@ class ExchangeDiagnosticsTailsTests(unittest.TestCase):
 
     def test_diagnose_venue_connection_implicit_credentials_loading_binance(self):
         with patch("astra_backend.exchanges.diagnostics.venue_credentials", return_value=("ak_bin", "sk_bin")):
-            caller = MagicMock(return_value=(200, {"canTrade": True, "totalWalletBalance": "500"}, {}))
-            res = diagnose_venue_connection(
-                venue="binance",
-                environment="live",
-                http_client=caller,
-            )
+            with patch("astra_backend.exchanges.diagnostics._binance_sdk_request",
+                       return_value=(200, {"canTrade": True, "totalWalletBalance": "500"})):
+                res = diagnose_venue_connection(
+                    venue="binance",
+                    environment="live",
+                    http_client=MagicMock(),
+                )
             self.assertTrue(res["ok"])
             self.assertEqual(res["mode"], "authenticated")
             self.assertIn("Binance LIVE 凭证鉴权成功", res["message"])
 
     def test_diagnose_venue_connection_private_call_exception_handled(self):
         # 鉴权过程中底层 caller 抛出非 HTTPError 异常（如网络断开/连接重置）
-        caller = MagicMock(side_effect=ConnectionResetError("Peer reset"))
-        res = diagnose_venue_connection(
-            venue="binance",
-            environment="live",
-            api_key="ak",
-            secret_key="sk",
-            http_client=caller,
-        )
+        with patch("astra_backend.exchanges.diagnostics._binance_sdk_request",
+                   side_effect=ConnectionResetError("Peer reset")):
+            res = diagnose_venue_connection(
+                venue="binance",
+                environment="live",
+                api_key="ak",
+                secret_key="sk",
+                http_client=MagicMock(),
+            )
         self.assertFalse(res["ok"])
         self.assertEqual(res["mode"], "network_error")
         self.assertIn("ConnectionResetError", res["message"])
@@ -169,16 +171,18 @@ class ExchangeDiagnosticsTailsTests(unittest.TestCase):
     # 4. 私有鉴权分支报错解析 (_diagnose_binance & _diagnose_gate)
     # -------------------------------------------------------------------------
     def test_diagnose_binance_auth_failed_with_code_and_msg(self):
-        caller = MagicMock(return_value=(401, {"code": -2015, "msg": "Invalid API-key, IP, or permissions for action"}, {}))
-        res = _diagnose_binance("live", False, "bad_ak", "bad_sk", caller, 5.0, 0.0)
+        with patch("astra_backend.exchanges.diagnostics._binance_sdk_request",
+                   return_value=(401, {"code": -2015, "msg": "Invalid API-key, IP, or permissions for action"})):
+            res = _diagnose_binance("live", False, "bad_ak", "bad_sk", MagicMock(), 5.0, 0.0)
         self.assertFalse(res["ok"])
         self.assertEqual(res["mode"], "auth_failed")
         self.assertIn("[-2015]", res["message"])
         self.assertIn("Invalid API-key", res["message"])
 
     def test_diagnose_binance_auth_failed_with_raw_text(self):
-        caller = MagicMock(return_value=(500, {"raw_text": "Internal error"}, {}))
-        res = _diagnose_binance("live", False, "bad_ak", "bad_sk", caller, 5.0, 0.0)
+        with patch("astra_backend.exchanges.diagnostics._binance_sdk_request",
+                   return_value=(500, {"raw_text": "Internal error"})):
+            res = _diagnose_binance("live", False, "bad_ak", "bad_sk", MagicMock(), 5.0, 0.0)
         self.assertFalse(res["ok"])
         self.assertEqual(res["mode"], "auth_failed")
         self.assertIn("Internal error", res["message"])

@@ -703,6 +703,24 @@ class _FakeSigned:
             raise got
         return got
 
+    def fetch_income_history(self, *, symbol=None, income_type=None,
+                             start_time=None, end_time=None, limit=None):
+        params = {"incomeType": income_type, "symbol": symbol,
+                  "startTime": start_time, "endTime": end_time, "limit": limit}
+        return self.signed_request("GET", "/fapi/v1/income",
+                                   {k: v for k, v in params.items() if v is not None})
+
+    def fetch_account_trades(self, symbol, *, limit=None, start_time=None,
+                             end_time=None, order_id=None, from_id=None):
+        params = {"symbol": symbol, "limit": limit, "startTime": start_time,
+                  "endTime": end_time, "orderId": order_id, "fromId": from_id}
+        return self.signed_request("GET", "/fapi/v1/userTrades",
+                                   {k: v for k, v in params.items() if v is not None})
+
+    def fetch_position_risk(self, symbol=None):
+        params = {"symbol": symbol} if symbol is not None else None
+        return self.signed_request("GET", "/fapi/v2/positionRisk", params)
+
 
 class FetchBinanceClosedTradesTests(unittest.TestCase):
     def _run(self, adapter, credentials=("key", "secret"), data_dir=None):

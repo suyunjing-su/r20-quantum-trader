@@ -10,7 +10,7 @@
 | `cancel_algo_order` | ✗ | ✓ | ✗ |
 | `list_open_orders` | ✗ | ✗ | ✓ |
 | `detect_position_mode` | ✗ | ✓ | ✓ |
-| `signed_request` | ✗ | ✓ | ✓ |
+| `fetch_income_history` | ✗ | ✓ | ✗ |
 
 `cancel_orphan_attributed_legs`（跨所、默认含 binance）此前直接 `ad.cancel_price_order(leg_id)`
 ⇒ 对 **Binance 恒 `AttributeError`** ⇒ 腿撤不掉（而 Binance 恰是孤儿腿最多的所）。
