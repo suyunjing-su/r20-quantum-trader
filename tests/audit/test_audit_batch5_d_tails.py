@@ -252,8 +252,8 @@ class TestExternalVenueReclaim(unittest.TestCase):
             ok, msg = aft.clean_stale_open_orders(keep_ord_ids={"g-keep"})
         self.assertTrue(ok, msg)
         self.assertIn(("BTC", "g-old"), gate_cancelled)
-        self.assertIn(("BTC", "g-keep"), gate_cancelled,
-                      "对账接管不能让外所超龄挂单绕过生命周期回收")
+        self.assertNotIn(("BTC", "g-keep"), gate_cancelled,
+                         "对账接管的外所限价挂单应跨周期保留")
         self.assertNotIn(("BTC", "g-young"), gate_cancelled, "未超龄不得撤")
         self.assertEqual(bin_cancelled, [("ETH", "b-old")])
 
