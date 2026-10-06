@@ -222,6 +222,14 @@ def dispatch_llm_and_persist_decisions(*,
             policy_snapshot=policy_snapshot,
             council_status=council_status,
         )
+        # Persist the normalized mode beside each decision so execution uses the
+        # same mode that the model actually saw, even if the dashboard changes later.
+        _cycle_order_mode = ((runtime_context or {}).get("order_mode")
+                             if isinstance(runtime_context, dict) else None)
+        if _cycle_order_mode in {"limit", "market"}:
+            for _cached_decision in standard_cache.values():
+                if isinstance(_cached_decision, dict):
+                    _cached_decision["order_mode"] = _cycle_order_mode
 
         # 审计③(2026-09-13)：整档覆盖与 trader 的 venue-decision 读-改-写互斥
         # （astra_backend.file_locks，同锁文件路径即同临界区），防互相回退。

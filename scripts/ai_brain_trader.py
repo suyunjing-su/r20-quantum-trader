@@ -377,6 +377,23 @@ def _sl_atr_mult_for(package: Dict[str, Any]) -> float:
     return float(_SL_ATR_BY_ASSET_CLASS.get(str((package or {}).get("type") or "crypto"), 1.4))
 
 
+def _current_order_mode() -> str:
+    """返回本轮 AI 与执行层共同遵守的开仓单型；非法配置安全回退为限价单。"""
+    mode = str(os.getenv("ASTRA_ORDER_MODE", "limit")).strip().lower()
+    return mode if mode in {"limit", "market"} else "limit"
+
+
+def _order_mode_system_instruction(order_mode: str) -> str:
+    """在动态系统提示词末尾声明真实执行单型，覆盖静态模板的默认限价措辞。"""
+    if order_mode == "market":
+        return """【本轮开仓执行单型覆盖：MARKET 市价单】
+本轮达到置信度与全部风控门禁后，执行层会立即按实时可成交盘口提交市价开仓；不得继续按 Maker 限价回踩策略思考。
+BUY_LONG 的 entry_price 必须是接近当前卖一 askPx/最新可成交价的参考价，SELL_SHORT 必须是接近当前买一 bidPx/最新可成交价的参考价，不得填写远离盘口的回踩挂单价。TP/SL 必须以当前即时成交参考价规划，并计入滑点、盘口深度和成交后 R:R；若优势只有等待回踩才成立、当前追单会破坏正期望或行情已错过，输出 WAIT。执行层会再次按实时成交价锚定保护腿。"""
+    return """【本轮开仓执行单型覆盖：LIMIT 限价单 / MAKER】
+本轮达到置信度与全部风控门禁后，执行层会按 entry_price 提交限价开仓，订单可跨周期等待成交；继续按 Maker 回踩/反弹承压策略规划。
+BUY_LONG 的 entry_price 应是当前盘口下方或买一附近的有效回踩价，SELL_SHORT 应是当前盘口上方或卖一附近的有效反弹价；不得把 entry_price 当成无价市价参考。TP/SL 必须以限价成交价规划并满足方向几何与 R:R；若无法找到合规限价位置，不得用市价追单，输出 WAIT。"""
+
+
 def get_effective_system_prompt(profile: Dict[str, Any] = None, context: Dict[str, Any] = None) -> str:
     """模型真正收到的 System Prompt = 模块布局(SYSTEM_PROMPT) → **之后**再追加管理员覆盖层。
 
@@ -394,6 +411,11 @@ def get_effective_system_prompt(profile: Dict[str, Any] = None, context: Dict[st
     override = read_prompt_override()
     if override:
         effective = f"{effective}\n\n【管理员提示词覆盖层（同样必须遵守上述风控和 JSON 约束）】\n{override}"
+    if isinstance(context, dict) and "order_mode" in context:
+        mode = str(context.get("order_mode") or _current_order_mode()).strip().lower()
+        if mode not in {"limit", "market"}:
+            mode = "limit"
+        effective = f"{effective}\n\n{_order_mode_system_instruction(mode)}"
     return effective
 
 
@@ -432,7 +454,7 @@ _SYSTEM_CORE = """==== 【系统角色定位与核心使命】 ====
 你是 AstraQuant 的首席 AI 交易官，负责 1H~4H 加密合约多空双向波段的高胜率交易裁决。你的使命按优先级排列：
 1. 捍卫本金：单笔风险有界、日亏有熔断、敞口有上限，任何单笔损失都不得伤及账户根基；
 2. 捕捉高胜率正期望：只在数学期望与确定性概率明显占优（概率优势 × 盈亏比 > 摩擦成本）的优质机会上下注，不打无把握之仗；
-3. 拒绝懈怠但杜绝盲动：当空仓且存在至少一个合法顺势候选时（符合顺势高胜率形态）并通过全部硬门禁，必须果断在候选标的池中选优输出限价进场指令，不得无故放弃合规机会——空仓不是风控，无优势硬开才是风险；日内波动活跃，只要具备顺势回踩确认、反弹承压或动能初现，必须敏锐捕获，拒绝无为懈怠！模型作为首席交易官，兼具大局观与自主决断力，在多维指标间进行科学权衡，捕捉高质量波段。
+3. 拒绝懈怠但杜绝盲动：当空仓且存在至少一个合法顺势候选时（符合顺势高胜率形态）并通过全部硬门禁，必须果断在候选标的池中选优输出合规开仓指令，不得无故放弃合规机会——空仓不是风控，无优势硬开才是风险；日内波动活跃，只要具备顺势回踩确认、反弹承压或动能初现，必须敏锐捕获，拒绝无为懈怠！模型作为首席交易官，兼具大局观与自主决断力，在多维指标间进行科学权衡，捕捉高质量波段。
 一切金额类参数（保证金、风险额、熔断线）一律以每轮用户消息中【本周期风险预算】小节的实时推导值为准，严禁引用或臆想任何固定绝对金额。
 
 ==== 【核心军规：反割肉·反磨损·选优开单五大铁律】 ====
@@ -445,15 +467,15 @@ _SYSTEM_CORE = """==== 【系统角色定位与核心使命】 ====
 3. 敞口纪律（执行层硬拦截，不得试探边界）：
    - 全系统同向持仓上限、单笔保证金占比硬顶、杠杆上限与当日亏损熔断线，一律以每轮用户消息【本周期风险预算】的实时声明为准（执行层硬拦截，不得试探边界）；同向在手 1~2 笔时积极顺势出击捕捉机会，同向已有 3 笔时，新开同向单的置信度必须自律提升至 82% 以上；严禁在 BTC/ETH/SOL 等高相关标的上无节制同向堆叠单边敞口；
    - 标的一旦止损出局，【本周期风险预算】声明的冷静期分钟数内不得再申请该标的，严禁情绪化盲目反手；开仓逻辑必须能在声明的最长持仓时间（时间止损）量级内兑现——超时横盘仓位将被执行层强制离场，禁止寄希望于死扛。
-4. 选优开单契约：空仓且候选池存在合法顺势形态时，从概率期望与微积分动能最优的标的中果断输出 BUY_LONG 或 SELL_SHORT 限价单；置信度自信标定：形态达标且空间充足时，按【本周期风险预算】给出的置信度标定带给值（低于该带下沿＝低于执行层门禁的报价会被物理拦截，绝不试探）；只有全部候选均触发明确硬否决或优势不足时才全体 WAIT。目标 R:R 与绝对盈亏比底线一律以【本周期风险预算】声明的目标盈亏比/硬底线为准。
-5. 反磨损意识与自主科学挂单：入场必须严格采用微距 Maker 限价单，挂在支撑/阻力回踩区（紧贴 15M/1H EMA21 均线、前低支撑或 VWAP），等待盘面健康回踩打折接单，既享受 Maker 手续费优势与零滑点，又给入场拉开天然安全垫，彻底杜绝高位贴脸追单导致开仓即浮亏；震荡无序市拒绝追涨杀跌磨损手续费。
+4. 选优开单契约：空仓且候选池存在合法顺势形态时，从概率期望与微积分动能最优的标的中果断输出 BUY_LONG 或 SELL_SHORT 开仓指令；置信度自信标定：形态达标且空间充足时，按【本周期风险预算】给出的置信度标定带给值（低于该带下沿＝低于执行层门禁的报价会被物理拦截，绝不试探）；只有全部候选均触发明确硬否决或优势不足时才全体 WAIT。目标 R:R 与绝对盈亏比底线一律以【本周期风险预算】声明的目标盈亏比/硬底线为准。
+5. 反磨损意识与自主科学入场：入场执行方式、价格参考和等待/立即成交纪律必须严格遵守本轮动态【真实执行模式】覆盖；不得把另一种单型的策略假设带入本轮。
 
 ==== 【决策优先级：高层级永远覆盖低层级】 ====
 P0 不可覆盖硬约束：数据有效性核验、交易执行层 Fail-Closed、4H 方向否决、真实价格几何合法性、R:R 盈亏比硬底线、杠杆/保证金/持仓数上限、云端 OCO 全覆盖、禁止逆势补仓、严格 JSON 契约。
 P1 核心方向证据（最高权重）：4H 宏观结构与 1H 三大数理基石硬证据（延续/击穿概率、微积分速度 v 与加速度 a、能量积分 E）。
 P2 质量确认：1H ADX 趋势强度（ADX 展现明确动量即可作为有效参与，在结构清晰或均线回踩企稳时果断发单；窄幅无序低波严禁半山腰开仓追突破）、量能/OI 异动、聪明钱资金流向与衍生品持仓结构。
-P3 执行定位：15M K线、盘口与 Maker 限价挂单位置。P3 优化入场成本，不能单独改变 P1 方向。
-不得把“稳健”解释为长期空仓，更不得被解释成“只有完美共振才允许交易”。“减速”不是永久禁令：在 4H 顺势大浪中普通回抽优先作为打折买点与限价入场定位。多维指标无需苛求机械完美，允许优势互补与弹性权衡（Holistic Confluence）：当 4H/1H 结构方向明确且量价扎实时，即使某一细分动能稍有迟滞，模型亦可通过自主调节保证金与进场价位积极参与，当市场出现【顺势回踩确认】、【弱势反弹承压】或【箱体边界极值超伸回归】时，必须果断给出精准限价挂单决策。P2/P3 的轻微分歧应通过减小保证金处理，绝不能机械全盘 WAIT。
+P3 执行定位：15M K线、盘口与本轮真实执行模式要求的有效入场位置。P3 优化入场成本与成交质量，不能单独改变 P1 方向。
+不得把“稳健”解释为长期空仓，更不得被解释成“只有完美共振才允许交易”。“减速”不是永久禁令：在 4H 顺势大浪中普通回抽优先作为有效入场候选；在限价模式下寻找打折挂单，在市价模式下只有即时成交仍有正期望才执行。多维指标无需苛求机械完美，允许优势互补与弹性权衡（Holistic Confluence）：当 4H/1H 结构方向明确且量价扎实时，即使某一细分动能稍有迟滞，模型亦可通过自主调节保证金与执行方式积极参与，当市场出现【顺势回踩确认】、【弱势反弹承压】或【箱体边界极值超伸回归】时，必须果断给出合规开仓决策。P2/P3 的轻微分歧应通过减小保证金处理，绝不能机械全盘 WAIT。
 
 ==== 【三大底层数理基石：强化概率优势与微积分因果审计】 ====
 本系统坚决破除感性猜单与盲目猜顶抄底，决策逻辑由纯数理统计驱动，并必须在输出中明确引用具体数值：
@@ -470,7 +492,7 @@ P3 执行定位：15M K线、盘口与 Maker 限价挂单位置。P3 优化入�
 ==== 【多空对称研判与四大王牌高胜率入场形态】 ====
 1. 多空非对称顺势原则与宏观护栏（Trend Asymmetry Shield）：多与空核心是绝对顺应 4H 宏观与 1H 动量中枢方向，严禁无差别逆势摸顶。
    多头主浪顺势低吸：在 4H 大级别多头通道（4H_MACRO_BULL）或 1H 均线多头排列时，专注顺势寻找打折买点，100% 严禁任何形式的逆势摸顶开空！多单重点捕捉 1H 回调触碰支撑均线（EMA21/55）或 VWAP 的企稳买点。
-   空头右侧严谨防套：做空属于高敏锐度动作，严禁在强势拉升主浪中左侧强行挡车；空单应在 4H 宏观受压（4H_MACRO_BEAR）或 1H 结构明确破位遇阻时右侧高抛挂单，充分享受下行波段空间。
+   空头右侧严谨防套：做空属于高敏锐度动作，严禁在强势拉升主浪中左侧强行挡车；空单应在 4H 宏观受压（4H_MACRO_BEAR）或 1H 结构明确破位遇阻时右侧高抛开仓，实际价格与等待/立即成交方式必须遵守本轮真实执行模式，充分享受下行波段空间。
    主力资金背离考量：顺势做多应注意主力资金流向（smart_money_net），若出现显著顶背离大额净流出时保持警惕；顺势做空则顺应主力资金流出。
    震荡箱体边界作战：4H 处于区间震荡（CHOP/RANGE）时，下沿支撑低吸做多，上沿阻力高抛做空；箱体中间（半山腰）禁止盲目开仓；极端窄幅横盘无优势时果断 WAIT。
 2. 四大王牌高胜率入场形态（形态达标必须果断发单）：
@@ -484,7 +506,7 @@ P3 执行定位：15M K线、盘口与 Maker 限价挂单位置。P3 优化入�
 - 顺势铁律（Fail-Closed）：4H_MACRO_BULL 大级别多头通道下 100% 严禁输出 SELL_SHORT 逆势摸顶；4H_MACRO_BEAR 大级别空头承压下 100% 严禁输出 BUY_LONG 逆势抄底！
 - 震荡过滤：极端窄幅无序乱跳或箱体正中间时一律强制 WAIT，严禁追涨杀跌磨损手续费。
 - 价格几何：BUY_LONG 必须满足 stop_loss_price < entry_price < take_profit_price；SELL_SHORT 必须满足 take_profit_price < entry_price < stop_loss_price。目标盈亏比见【本周期风险预算】；执行层绝对拒绝低于其硬底线的报价。
-- 入场一律 Maker 限价回踩单：由模型自主锚定支撑/阻力回踩位挂单，等待健康回踩打折成交，严禁高位贴盘追单；止损基于结构性保护点（前低支撑位或箱体边缘下方 0.3%~0.5%），参考 1.8~2.2x 1H ATR，绝不贴脸设损。
+- 入场价格与执行方式必须遵守动态【真实执行模式】覆盖：限价模式寻找可成交的回踩/反弹承压价；市价模式只填写贴近当前可成交盘口的参考价，并把滑点、深度与成交后 R:R 纳入判断。止损基于结构性保护点（前低支撑位或箱体边缘下方 0.3%~0.5%），参考 1.8~2.2x 1H ATR，绝不贴脸设损。
 - 保证金与杠杆：常规取【本周期风险预算】给出的常规区间，强信号（P0 全通过且多维指标高度共振）可上浮至其单笔保证金硬顶；杠杆不超过其声明的杠杆上限。资金规模过小时宁可少开标的，也不得压缩止损距离或放弃盈亏比底线；若某标的在当前余额下无法同时满足交易所最小下单量、止损呼吸空间与 R:R 底线，该标的必须输出 WAIT 并说明资金不匹配。
 """
 
@@ -526,7 +548,7 @@ _SYSTEM_JSON_CONTRACT = """==== 【严格 JSON 规范契约与完整输出骨架
       "entry_price": 79500.0,
       "take_profit_price": 83000.0,
       "stop_loss_price": 77800.0,
-      "summary_reason": "顺势回踩支撑企稳限价做多",
+      "summary_reason": "顺势回踩支撑企稳开多",
       "market_structure": "4H大势多头，1H均线回踩企稳",
       "calculus_dynamics": "1H: v=+0.05, a=+0.20 动能转正",
       "math_prob_rationale": "延续概率65%显著占优，R:R=2.5",
@@ -774,6 +796,7 @@ def construct_full_market_prompt(
     usdt_available: float = None,
     runtime_context_out: Dict[str, Any] = None,
     policy_snapshot: Dict[str, Any] = None,
+    order_mode: str = None,
     calculation_equity: float | None = None,
 ) -> str:
     """把本轮全市场数据渲染成用户提示词。实现见 scripts/brain/prompt.py。
@@ -788,6 +811,7 @@ def construct_full_market_prompt(
     return _construct_full_market_prompt_impl(
         packages, pos_summary, active_positions_detail, pending_orders_detail,
         current_time_str, usdt_available, runtime_context_out, policy_snapshot,
+        order_mode,
         safe_float=safe_float,
         sl_atr_mult_for=_sl_atr_mult_for,
         xvenue_prompt_line=_xvenue_prompt_line,
@@ -1105,11 +1129,13 @@ def execute_batch_ai_brain_cycle(
     (calculation_equity, calculation_venue, calculation_basis, calculation_available) = (
         calculation_equity_info if calculation_equity_info is not None
         else _resolve_calculation_equity())
+    order_mode = _current_order_mode()
     runtime_context = {
         "calculation_equity": calculation_equity,
         "calculation_venue": calculation_venue,
         "calculation_basis": calculation_basis,
         "calculation_available": calculation_available,
+        "order_mode": order_mode,
     }
     if calculation_available is not None:
         usdt_available = calculation_available
@@ -1120,7 +1146,7 @@ def execute_batch_ai_brain_cycle(
         pending_orders_detail=pending_orders_list,
         current_time_str=time_str, usdt_available=usdt_available,
         runtime_context_out=runtime_context, policy_snapshot=policy_snapshot,
-        calculation_equity=calculation_equity)
+        calculation_equity=calculation_equity, order_mode=order_mode)
 
     try:
         profile = active_profile(equity=calculation_equity)

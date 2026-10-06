@@ -43,7 +43,7 @@ import os
 from typing import Any, Dict, List
 
 
-def construct_full_market_prompt(packages: List[Dict[str, Any]], pos_summary: str = "[MISSING_CONTEXT:account_positions]", active_positions_detail: List[Dict[str, Any]] = None, pending_orders_detail: List[Dict[str, Any]] = None, current_time_str: str = "", usdt_available: float = None, runtime_context_out: Dict[str, Any] = None, policy_snapshot: Dict[str, Any] = None, *,
+def construct_full_market_prompt(packages: List[Dict[str, Any]], pos_summary: str = "[MISSING_CONTEXT:account_positions]", active_positions_detail: List[Dict[str, Any]] = None, pending_orders_detail: List[Dict[str, Any]] = None, current_time_str: str = "", usdt_available: float = None, runtime_context_out: Dict[str, Any] = None, policy_snapshot: Dict[str, Any] = None, order_mode: str = None, *,
                              safe_float=None, sl_atr_mult_for=None, xvenue_prompt_line=None,
                              build_risk_budget_text=None, active_profile=None,
                              apply_module_layout=None, system_version=None,
@@ -115,6 +115,37 @@ def construct_full_market_prompt(packages: List[Dict[str, Any]], pos_summary: st
             "_build_pending_order_lines",
             lambda: __import__("scripts.brain.account_text", fromlist=["x"]).build_pending_order_lines)
 
+    _order_mode = str(order_mode or os.getenv("ASTRA_ORDER_MODE", "limit")).strip().lower()
+    if _order_mode not in {"limit", "market"}:
+        _order_mode = "limit"
+    if _order_mode == "market":
+        execution_mode_text = """================================================================================
+【本轮真实执行模式：市价单 MARKET】
+这是本轮唯一有效的开仓执行口径：达到置信度与全部风控门禁后，执行层会立即按最新可成交盘口提交市价开仓，不会等待模型设想的回踩限价。
+- 策略思考：只在当前盘口立刻成交后仍具备正期望时开仓；必须把即时成交滑点、盘口深度、波动冲击与成交后真实风险纳入判断。若优势只有等回踩打折后才成立，必须 WAIT，不得用限价思路假装市价可行。
+- 出价字段：BUY_LONG 的 entry_price 只填写当前可成交参考价（优先卖一 askPx，接近最新价）；SELL_SHORT 只填写当前可成交参考价（优先买一 bidPx，接近最新价）。不得填写远离当前盘口的回踩/阻力挂单价，也严禁输出“等价格到 entry_price 再成交”的叙述。
+- 保护腿：take_profit_price 与 stop_loss_price 必须以当前可成交参考价为基准计算，满足真实成交后的方向几何与本周期 R:R；执行层会再次按实时成交锚定保护腿。
+- 立即成交纪律：置信度达标不等于无条件追单；若当前价已错过优势区、滑点/波动使 R:R 不成立或数据不新鲜，输出 WAIT。"""
+        pending_orders_heading = "【当前在途未成交订单（历史限价单/保护单仅供审查）】"
+        pending_management_text = """2. 【在途订单生命周期审查与裁决 (Pending Orders Management)】：
+   - 市价模式不会为新的入场决策等待限价成交。若列表中存在历史限价入场单，必须按 ordId 判断其价格、方向、资讯和风险是否仍有效；只有原计划失效或风险恶化时输出 CANCEL，否则 KEEP。
+   - 不得把当前市价模式误解为继续维护新的 Maker 入场挂单；新的开仓决策必须按实时可成交盘口重新评估。"""
+        entry_price_instruction = """- 自主规划 entry_price、take_profit_price 与 stop_loss_price：entry_price 仅作为当前可成交价参考，必须贴近卖一/买一并计入滑点；若即时成交后 R:R 不成立或只能等待回踩才有优势，输出 WAIT。"""
+        min_order_instruction = "实际市价单按当前可成交价核算名义额；entry_price 仅作盘口参考，执行层会在发单瞬间再次核验。"
+    else:
+        execution_mode_text = """================================================================================
+【本轮真实执行模式：限价单 LIMIT / MAKER】
+这是本轮唯一有效的开仓执行口径：达到置信度与全部风控门禁后，执行层会按 entry_price 提交限价开仓，订单可跨周期等待成交。
+- 策略思考：寻找支撑/阻力、均线或 VWAP 的健康回踩/反弹承压位置，以成交成本和 Maker 费率优势为核心；若只有市价追单才成立，必须 WAIT。
+- 出价字段：BUY_LONG 的 entry_price 应位于当前盘口下方或买一附近的有效回踩买入区；SELL_SHORT 应位于当前盘口上方或卖一附近的有效反弹卖出区。必须给出真实可挂出的限价，不得把 entry_price 当成市价参考价。
+- 保护腿：take_profit_price 与 stop_loss_price 以限价成交价为基准，满足真实成交后的方向几何与本周期 R:R；执行层会校验价格步进、穿价与保护腿。
+- 挂单纪律：置信度达标后仍需有合规限价位置；价格偏离盘口过远、结构失效或等待成交的正期望不足时输出 WAIT。"""
+        pending_orders_heading = "【在途未成交限价挂单 (Pending Maker Orders)】"
+        pending_management_text = """2. 【在途限价挂单生命周期审查与裁决 (Pending Orders Management)】：
+   - 仔细审查上述在途未成交限价挂单：若挂单价格已大幅偏离最新盘口、或者行情动能/突发要闻已转变导致原挂单计划失效，必须在 pending_orders_management 中为该挂单输出 CANCEL 立即撤单指令；若原计划仍然有效且价格合适，输出 KEEP 维持挂单。"""
+        entry_price_instruction = """- 自主规划 entry_price、take_profit_price 与 stop_loss_price：entry_price 必须是可实际挂出的限价；多单寻找回踩买入区，空单寻找反弹卖出区。"""
+        min_order_instruction = "实际限价单必须先按交易所步进/价格刻度量化，再用将实际提交的数量 × 实际限价计算名义额。"
+
     tz_bj = datetime.timezone(datetime.timedelta(hours=8))
     now_bj_str = current_time_str or datetime.datetime.now(tz_bj).strftime("%Y-%m-%d %H:%M:%S (北京时间)")
     market_lines = []
@@ -178,7 +209,7 @@ def construct_full_market_prompt(packages: List[Dict[str, Any]], pos_summary: st
             min_order_line = "各所合约规格暂不可用（不得臆测门槛；开仓前必须核验）"
         info = f"""---------------------------------------------------------
 【{p['name']} ({p['instId']})】| 数据质量: {quality} | 现价: {p['price']} | 24H涨跌: {p['chg24h']}% | 盘口买/卖: {p['bidPx']}/{p['askPx']}
-- 🧾 交易所合约最小开仓名义价值（按当前价从公共合约规格预取）: {min_order_line}。实际限价单必须先按交易所步进/价格刻度量化，再用将实际提交的数量 × 实际限价计算名义额，且不得低于所选交易所门槛（Binance 常见最低 5 USDT，以当前合约规格返回值为准）；不得用未量化的原始数量或参考市价代替。若低于门槛，或规格/门槛不可得，必须输出 WAIT；不得为凑最低额擅自增大保证金、杠杆或下单数量，执行层将本地拒单并记录原因。
+- 🧾 交易所合约最小开仓名义价值（按当前价从公共合约规格预取）: {min_order_line}。{min_order_instruction}且不得低于所选交易所门槛（Binance 常见最低 5 USDT，以当前合约规格返回值为准）；不得用未量化的原始数量或参考市价代替。若低于门槛，或规格/门槛不可得，必须输出 WAIT；不得为凑最低额擅自增大保证金、杠杆或下单数量，执行层将本地拒单并记录原因。
 - 🏛️ 三重滤网宏观结构: 4H宏观大势={p.get('macro_4h', '4H_MACRO_RANGE')} | 1H波段结构={p.get('structure_1h', '1H_SWING_CHOP')}
 - 👑 顶级聪明钱 (SmartMoney Top100): {("加权做多占比=" + str(sm.get('weighted_long_pct')) + "% | 24H净流入=" + str(sm.get('net_flow_usdt', '--')) + " | 多头均价=" + str(sm.get('avg_long_entry', '--')) + " | 空头均价=" + str(sm.get('avg_short_entry', '--')) + " | " + str(sm.get('top_win_rate', ''))) if sm.get('available') else "数据源缺失（OKX CLI 已移除，暂无公开 V5 等价接口；本项不构成任何方向的证据，禁止臆测填充）"}
 - 📐 1H核心波段指标: 1H ATR(14)={p.get('atr_1h', p.get('atr', '--'))} (止损基准: {sl_atr_desc}) | 1H RSI(14)={p.get('rsi_1h', '--')} | 1H ADX趋势强度={adx_val} (注:<20无趋势垃圾市, ≥22强单边)
@@ -253,7 +284,9 @@ def construct_full_market_prompt(packages: List[Dict[str, Any]], pos_summary: st
 
     risk_budget_text = build_risk_budget_text(usdt_available)
 
-    prompt = f"""{memory_lessons}
+    prompt = f"""{execution_mode_text}
+
+{memory_lessons}
 
 ================================================================================
 【推演与决策任务】:
@@ -263,13 +296,12 @@ def construct_full_market_prompt(packages: List[Dict[str, Any]], pos_summary: st
      • 若 1H 波段趋势完好且微积分动能平稳，坚决坚定持有 (HOLD)，给大波段充分呼吸空间；
      • 若出现【1H 结构破位 / 动能加速度严重逆转 / 聪明钱反向出逃】等真实趋势逆转信号且置信度 ≥ 85%，果断输出 CLOSE_MARKET 提前斩仓止损，杜绝死等硬止损；
      • 若底仓浮盈已超过 1.2x 1H ATR 且需锁定利润，输出 UPDATE_SL 并确保新止损与现价保留 0.7x 1H ATR 安全缓冲，严禁贴脸移动止损。
-2. 【在途限价挂单生命周期审查与裁决 (Pending Orders Management)】：
-   - 仔细审查上述在途未成交挂单：若挂单价格已大幅偏离最新盘口、或者行情动能/突发要闻已转变导致原挂单计划失效，必须在 pending_orders_management 中为该挂单输出 CANCEL 立即撤单指令，防止挂单成交在不利价格；若原计划仍然有效且价格合适，输出 KEEP 维持挂单。
+{pending_management_text}
 3. 【多空开仓与顺势浮盈加仓全权裁决 (Opening & Pyramiding)】：
    - 【首发开仓】：自主判断未持仓品种是否具备确定性爆发机会，结合最新资讯、多周期形态与筹码，决定多空方向 (action: BUY_LONG / SELL_SHORT / WAIT)；
    - 【顺势浮盈金字塔加仓申请】：已有多仓仅可输出同向 BUY_LONG，已有空仓仅可输出同向 SELL_SHORT；这只是加仓申请，执行层仍将复核底仓 ROI/保本、最多{max_scale_in_count}次、累计保证金≤【本周期风险预算】单标的上限、置信度≥{min_scale_in_confidence:g}%、加速度与延续/击穿概率门禁。任何不确定均输出 WAIT；
    - 自主规划拟开仓/加仓保证金 (margin_usdt: 可用余额的 5%~{max_margin_equity_ratio:.0%}，且不得超过系统上限) 与杠杆 ({min_leverage:g}~{max_leverage:g}x 内按信心强弱自主裁决)；
-   - 自主规划 entry_price、take_profit_price 与 stop_loss_price；目标盈亏比与止盈宽度见【本周期风险预算】，且任何低于其硬底线的报价会被执行层拒绝，超出上限的超远止盈将被执行层自动平滑收窄。
+   {entry_price_instruction}
 4. 必须输出严格 JSON，格式如下：
 {{
   "macro_assessment": "30字内全市场宏观流动性与情绪总结",
@@ -319,7 +351,7 @@ def construct_full_market_prompt(packages: List[Dict[str, Any]], pos_summary: st
 【当前活动在途持仓明细】:
 {active_pos_text}
 
-======================= 【在途未成交限价挂单 (Pending Maker Orders)】 =======================
+======================= {pending_orders_heading} =======================
 【当前在途挂单列表】:
 {pending_orders_text}
 
@@ -367,6 +399,8 @@ def construct_full_market_prompt(packages: List[Dict[str, Any]], pos_summary: st
         "policy_version": policy_ver,
         "policy_hash": policy_hash,
         "profile_name": profile.get("name", ""),
+        "order_mode": _order_mode,
+        "execution_mode": execution_mode_text,
     })
     if runtime_context_out is not None:
         runtime_context_out.update(runtime_vars)

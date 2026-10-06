@@ -250,9 +250,14 @@ def execute_entry_scan(*,
                 print(f"[挂单对账] fail-closed 拦截 {f['name']} 新增多单下单（本周期对账失败）")
                 allow_entry = False
             if allow_entry:
-                limit_px, tp_px, sl_px = resolve_entry_prices(
-                    is_long=True, ai_decision=ai_decision, f=f, prec=prec,
-                    tp_dist=tp_dist, sl_dist=sl_dist)
+                try:
+                    limit_px, tp_px, sl_px = resolve_entry_prices(
+                        is_long=True, ai_decision=ai_decision, f=f, prec=prec,
+                        tp_dist=tp_dist, sl_dist=sl_dist,
+                        order_mode=ai_info.get("order_mode"))
+                except (TypeError, ValueError) as _price_exc:
+                    print(f"[价格解析] {f['name']} 市价参考不可核验，跳过开多: {_price_exc}")
+                    continue
 
                 # Hard check: 做多须 sl_px < limit_px < tp_px（钳制见 scripts/trader/brackets.py）
                 sl_px, tp_px = normalize_bracket_prices(
@@ -272,6 +277,8 @@ def execute_entry_scan(*,
                     margin_usdt=_order_margin,
                     max_margin_usdt=equity_margin_cap(usdt_available),
                     inst_lever_cap=_inst_lever_cap, ai_conf=ai_conf, ai_info=ai_info)
+                if isinstance(_venue_ctx, dict) and ai_info.get("order_mode") in {"limit", "market"}:
+                    _venue_ctx["order_mode"] = ai_info["order_mode"]
                 accepted, order_ref = submit_protected_limit_order(
                     inst_id, _side, _pos_side, actual_sz, limit_px, tp_px, sl_px,
                     venue_ctx=_venue_ctx)
@@ -381,9 +388,14 @@ def execute_entry_scan(*,
                 print(f"[挂单对账] fail-closed 拦截 {f['name']} 新增空单下单（本周期对账失败）")
                 allow_entry = False
             if allow_entry:
-                limit_px, tp_px, sl_px = resolve_entry_prices(
-                    is_long=False, ai_decision=ai_decision, f=f, prec=prec,
-                    tp_dist=tp_dist, sl_dist=sl_dist)
+                try:
+                    limit_px, tp_px, sl_px = resolve_entry_prices(
+                        is_long=False, ai_decision=ai_decision, f=f, prec=prec,
+                        tp_dist=tp_dist, sl_dist=sl_dist,
+                        order_mode=ai_info.get("order_mode"))
+                except (TypeError, ValueError) as _price_exc:
+                    print(f"[价格解析] {f['name']} 市价参考不可核验，跳过开空: {_price_exc}")
+                    continue
 
                 # Hard check: 做空须 tp_px < limit_px < sl_px（钳制见 scripts/trader/brackets.py）
                 sl_px, tp_px = normalize_bracket_prices(
@@ -403,6 +415,8 @@ def execute_entry_scan(*,
                     margin_usdt=_order_margin,
                     max_margin_usdt=equity_margin_cap(usdt_available),
                     inst_lever_cap=_inst_lever_cap, ai_conf=ai_conf, ai_info=ai_info)
+                if isinstance(_venue_ctx, dict) and ai_info.get("order_mode") in {"limit", "market"}:
+                    _venue_ctx["order_mode"] = ai_info["order_mode"]
                 accepted, order_ref = submit_protected_limit_order(
                     inst_id, _side, _pos_side, actual_sz, limit_px, tp_px, sl_px,
                     venue_ctx=_venue_ctx)

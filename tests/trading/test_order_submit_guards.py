@@ -204,7 +204,7 @@ class PriceAnchorGateTest(unittest.TestCase):
         rig, (ok, why) = self._run_with(price=97000.0)
         self.assertTrue(ok, f"回踩方向的远挂单是合法策略，不该被闸掉：{why}")
 
-    def test_ai_entry_beyond_five_percent_pullback_window_is_rejected(self):
+    def test_ai_entry_far_pullback_is_allowed_without_drift_guard(self):
         rig = Rig(price=94000.0, ticker="100000")
         now = time.time()
         ctx = {
@@ -214,27 +214,24 @@ class PriceAnchorGateTest(unittest.TestCase):
             "market_data_timestamp": now * 1000,
             "market_data_venue": "okx",
         }
-        with patch.dict(os.environ, {"ASTRA_ORDER_MODE": "limit",
-                                     "ASTRA_MAX_ENTRY_DRIFT_PCT": "0.05"}), \
+        with patch.dict(os.environ, {"ASTRA_ORDER_MODE": "limit"}), \
              patch("scripts.order_risk.validate_quote_geometry_and_rr",
                    return_value=(True, "", 1.0)), \
              patch("astra_backend.exchanges.listing.ensure_contract_listed",
                    return_value=SimpleNamespace(ok=True, reason="")), \
              patch("scripts.trader.order_submit.time.time", return_value=now):
             ok, why = rig.run(venue_ctx=ctx)
-        self.assertFalse(ok)
-        self.assertIn("价格新鲜度拒绝", why)
-        self.assertIn("允许回踩窗口", why)
-        self.assertEqual(rig.okx.orders, [])
+        self.assertTrue(ok, f"长期回撤限价挂单不应被方向性新鲜度闸门拒绝：{why}")
+        self.assertTrue(rig.okx.orders)
 
-    def test_ai_market_snapshot_expiry_is_rejected(self):
+    def test_ai_market_snapshot_expiry_is_allowed_for_long_lived_limit_order(self):
         rig = Rig(price=97000.0, ticker="100000")
         now = time.time()
         ctx = {
             "notional_usdt": 1, "margin_usdt": 1,
             "price_context_version": 1,
-            "decision_timestamp": now,
-            "market_data_timestamp": (now - 301) * 1000,
+            "decision_timestamp": now - 3600,
+            "market_data_timestamp": (now - 3601) * 1000,
             "market_data_venue": "okx",
         }
         with patch.dict(os.environ, {"ASTRA_ORDER_MODE": "limit"}), \
@@ -244,10 +241,8 @@ class PriceAnchorGateTest(unittest.TestCase):
                    return_value=SimpleNamespace(ok=True, reason="")), \
              patch("scripts.trader.order_submit.time.time", return_value=now):
             ok, why = rig.run(venue_ctx=ctx)
-        self.assertFalse(ok)
-        self.assertIn("时间新鲜度拒绝", why)
-        self.assertIn("行情快照已过期", why)
-        self.assertEqual(rig.okx.orders, [])
+        self.assertTrue(ok, f"长期回撤限价挂单不应被行情时间闸门拒绝：{why}")
+        self.assertTrue(rig.okx.orders)
 
 
 class MultiVenueRouteTest(unittest.TestCase):
@@ -501,26 +496,22 @@ class ListingGateTest(unittest.TestCase):
 
 
 class RescaleFailureTraceTest(unittest.TestCase):
-    def test_rescale_failure_is_traced_and_does_not_block(self):
-        """重算过程出异常 ⇒ **不阻断**，但必须**出声**（原来这里是静默 `pass`）。
-
-        实测行为（如实钉住）：异常发生在**重算中途** ⇒ 入场价已改成沙盒价、而 tp/sl 仍是原值；
-        所幸**不可绕过的几何复验在其后**仍会跑，不一致的报价在那里被拒（下面第二条断言钉这一点）。
-        """
+    def test_rescale_failure_is_traced_and_final_quote_guard_blocks(self):
+        """重算过程出异常 ⇒ 必须留痕；最终三价校验仍不可绕过。"""
         import io
         from contextlib import redirect_stdout
         rig = Rig(price=100000.0, tp="不是数字", sl=95000.0, ticker="95000", simulated=True)
         buf = io.StringIO()
         with patch.dict(os.environ, {"ASTRA_ORDER_MODE": "limit"}):
             with redirect_stdout(buf):
-                ok, _ = rig.run(venue_ctx={"notional_usdt": 1, "margin_usdt": 1})
-        self.assertTrue(ok, "重算失败不该阻断下单")
+                ok, why = rig.run(venue_ctx={"notional_usdt": 1, "margin_usdt": 1})
+        self.assertFalse(ok, "非数字保护腿不得下单")
         self.assertIn("沙盒报价重算失败", buf.getvalue(),
-                      "失败必须留痕：原来静默 pass 会让「重算出 bug」毫无痕迹地过去")
-        _, _, _, kw = rig.okx.orders[0]
-        self.assertEqual(kw["px"], 95000.0, "中途失败：入场价已按沙盒价改过")
-        self.assertTrue(rig.geometry_calls,
-                        "即便重算中途失败，**核心安全复验也必须仍然跑到**（不可绕过）")
+                      "失败必须留痕：重算出 bug 不能静默过去")
+        self.assertIn("最终订单三价拒绝", why)
+        self.assertEqual(rig.okx.orders, [])
+        self.assertFalse(rig.geometry_calls,
+                         "三价有限性校验失败时不得继续进入几何复验")
 
 
 class LongStopPushBackTest(unittest.TestCase):

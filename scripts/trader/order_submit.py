@@ -258,8 +258,6 @@ def submit_protected_limit_order(inst_id: str, side: str, pos_side: str, size: f
     # 15M candle close，也不能用另一交易所的价格替代目标所价格。
     _tick_last_raw = None
     _anchor_last = 0.0
-    _anchor_ts_ms = 0
-    _execution_ticker_venue = target_venue
     _price_context_required = bool(
         isinstance(venue_ctx, dict) and venue_ctx.get("price_context_version")
     )
@@ -272,8 +270,6 @@ def submit_protected_limit_order(inst_id: str, side: str, pos_side: str, size: f
             _ticker = fetch_ticker(inst_id)
         if isinstance(_ticker, dict):
             _tick_last_raw = _ticker.get("last")
-            _anchor_ts_ms = int(float(_ticker.get("ts_ms") or 0))
-            _execution_ticker_venue = str(_ticker.get("venue") or target_venue).lower()
             if _tick_last_raw:
                 _anchor_last = float(_tick_last_raw)
         if _anchor_last <= 0 and not _price_context_required:
@@ -281,7 +277,6 @@ def submit_protected_limit_order(inst_id: str, side: str, pos_side: str, size: f
             _ticker = fetch_ticker(inst_id)
             if isinstance(_ticker, dict):
                 _tick_last_raw = _ticker.get("last")
-                _anchor_ts_ms = int(float(_ticker.get("ts_ms") or 0))
                 _anchor_last = float(_tick_last_raw or 0)
     except Exception as _ae:
         print(f"[价格锚定] warn {target_venue.upper()} 目标所现价获取失败: {_ae}")
@@ -322,75 +317,25 @@ def submit_protected_limit_order(inst_id: str, side: str, pos_side: str, size: f
             # （仍按原价/已算出的值提交、仍不阻断），但必须出声。
             print(f"[demo rescale] warn {inst_id} 沙盒报价重算失败，按当前值提交: {_rsc_exc}")
 
-    # AI 的时间戳和行情快照都必须在最终落单边界重新核验。缓存文件的 mtime
-    # 只能说明文件被写过，不能说明 entry_price 是基于多新的市场数据计算的。
-    if _price_context_required:
-        try:
-            _now_s = time.time()
-            _decision_ts = float(venue_ctx.get("decision_timestamp") or 0.0)
-            _market_ts_raw = float(venue_ctx.get("market_data_timestamp") or 0.0)
-            _market_ts_s = (_market_ts_raw / 1000.0
-                            if _market_ts_raw > 10_000_000_000 else _market_ts_raw)
-            _market_venue = str(venue_ctx.get("market_data_venue") or "").strip().lower()
-            if _market_venue and _market_venue != str(target_venue).strip().lower():
-                # Routing can legitimately choose a different venue after the
-                # parallel read.  The target-venue ticker fetched above is the
-                # execution authority; retain the mismatch for audit instead of
-                # silently using the source venue's price.
-                print(f"[价格锚定] {inst_id} 决策行情来自 {_market_venue.upper()}，"
-                      f"最终执行所为 {target_venue.upper()}；已使用目标所实时价格复核")
-            _max_decision_age = max(1.0, float(os.getenv(
-                "ASTRA_ENTRY_DECISION_MAX_AGE_SECONDS", "300") or 300))
-            _max_market_age = max(1.0, float(os.getenv(
-                "ASTRA_ENTRY_MARKET_MAX_AGE_SECONDS", "300") or 300))
-            _future_skew = max(1.0, float(os.getenv(
-                "ASTRA_ENTRY_TIMESTAMP_FUTURE_SKEW_SECONDS", "30") or 30))
-            if _decision_ts <= 0 or _now_s - _decision_ts > _max_decision_age:
-                _rej = (f"AI 决策已过期（age={_now_s - _decision_ts:.1f}s，"
-                        f"上限={_max_decision_age:g}s）")
-                print(f"[时间新鲜度] 拒单 {inst_id}: {_rej}")
-                release_signal_reservation(_reservation, "AI 决策过期")
-                return False, f"时间新鲜度拒绝: {_rej}"
-            if _market_ts_s <= 0 or _now_s - _market_ts_s > _max_market_age:
-                _rej = (f"AI 行情快照已过期或缺失（age={_now_s - _market_ts_s:.1f}s，"
-                        f"上限={_max_market_age:g}s）")
-                print(f"[时间新鲜度] 拒单 {inst_id}: {_rej}")
-                release_signal_reservation(_reservation, "AI 行情快照过期")
-                return False, f"时间新鲜度拒绝: {_rej}"
-            if _market_ts_s - _now_s > _future_skew:
-                _rej = f"AI 行情快照时间异常超前（skew={_market_ts_s - _now_s:.1f}s）"
-                print(f"[时间新鲜度] 拒单 {inst_id}: {_rej}")
-                release_signal_reservation(_reservation, "AI 行情快照时间异常")
-                return False, f"时间新鲜度拒绝: {_rej}"
-        except (TypeError, ValueError, OverflowError) as _ts_exc:
-            _rej = f"AI 决策/行情时间戳不可核验: {_ts_exc}"
-            print(f"[时间新鲜度] 拒单 {inst_id}: {_rej}")
-            release_signal_reservation(_reservation, "AI 时间戳不可核验")
-            return False, f"时间新鲜度拒绝: {_rej}"
-
-    # 允许小幅 Maker 回踩，但拒绝超出可执行回踩窗口的旧绝对价格；阈值可按
-    # 市场波动配置，默认 1% 以避免把数小时前的技术位当成当前入场价。
-    if _price_context_required and _anchor_last > 0 and effective_px > 0:
-        _entry_drift_pct = max(0.0, float(os.getenv(
-            "ASTRA_MAX_ENTRY_DRIFT_PCT", "0.01") or 0.01))
-        _drift = (abs(effective_px - _anchor_last) / _anchor_last
-                  if _anchor_last else 0.0)
-        _wrong_side = (
-            pos_side == "long" and effective_px < _anchor_last * (1.0 - _entry_drift_pct)
-        ) or (
-            pos_side != "long" and effective_px > _anchor_last * (1.0 + _entry_drift_pct)
-        )
-        if _wrong_side:
-            _rej = (f"AI 入场价距离目标所现价 {_drift * 100:.2f}% 超过允许回踩窗口 "
-                    f"{_entry_drift_pct * 100:.2f}%（entry={effective_px:g}, "
-                    f"market={_anchor_last:g}, venue={_execution_ticker_venue}）")
-            print(f"[价格新鲜度] 拒单 {inst_id}: {_rej}")
-            release_signal_reservation(_reservation, "AI 入场价过旧或偏离")
-            return False, f"价格新鲜度拒绝: {_rej}"
+    # AI 决策可以在订单生命周期内等待较长时间；最终边界只保留目标所实时价格
+    # 的获取与下方不可绕过的报价/几何校验，不再按决策年龄、行情快照年龄或
+    # 入场价相对当前价格的方向性偏移拒绝长期回撤限价挂单。
+    if _price_context_required and isinstance(venue_ctx, dict):
+        _market_venue = str(venue_ctx.get("market_data_venue") or "").strip().lower()
+        if _market_venue and _market_venue != str(target_venue).strip().lower():
+            # Routing can legitimately choose a different venue after the parallel
+            # read. The target-venue ticker remains the execution authority.
+            print(f"[价格锚定] {inst_id} 决策行情来自 {_market_venue.upper()}，"
+                  f"最终执行所为 {target_venue.upper()}；已使用目标所实时价格复核")
 
     # 委托订单模式（限价 / 市价）。**在此处读**而不是发单前才读：市价单必须先在
     # 这里按现价重锚保护价，才能进下面的几何复验与穿价闸。
-    order_mode = str(os.getenv("ASTRA_ORDER_MODE", "limit")).strip().lower()
+    # A mode captured in the AI decision travels through venue_ctx; this prevents
+    # a dashboard change mid-cycle from making resolution and submission disagree.
+    _captured_order_mode = venue_ctx.get("order_mode") if isinstance(venue_ctx, dict) else None
+    order_mode = str(_captured_order_mode or os.getenv("ASTRA_ORDER_MODE", "limit")).strip().lower()
+    if order_mode not in {"limit", "market"}:
+        order_mode = "limit"
 
     # 市价单：真实成交价 = 下单一刻的现价，而 `effective_px/tp/sl` 是按**限价挂单
     # 计划**算的。若计划是回踩挂单位（做多、计划价明显低于现价），市价单会在现价
@@ -461,8 +406,8 @@ def submit_protected_limit_order(inst_id: str, side: str, pos_side: str, size: f
         _quote_values = (float(effective_px), float(effective_tp), float(effective_sl))
     except (TypeError, ValueError, OverflowError):
         _quote_values = ()
-    if _price_context_required and (len(_quote_values) != 3
-                                    or not all(math.isfinite(v) and v > 0 for v in _quote_values)):
+    if (len(_quote_values) != 3
+            or not all(math.isfinite(v) and v > 0 for v in _quote_values)):
         _rej = (f"最终订单三价不可用（entry={effective_px!r}, "
                 f"tp={effective_tp!r}, sl={effective_sl!r}）")
         print(f"[Order Rejected] {inst_id}: {_rej}")

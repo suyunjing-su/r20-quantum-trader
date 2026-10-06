@@ -333,7 +333,6 @@ def admin_config(x_astra_admin_token: str | None = Header(default=None)) -> dict
             "notification_webhook": settings.notification_webhook,
             "manual_close_enabled": settings.manual_close_enabled,
             "order_mode": settings.order_mode,
-            "entry_freshness_max_age_seconds": settings.entry_freshness_max_age_seconds,
             "initial_capital": baseline.get("initial_capital", 4061.04),
             "initial_capital_reset_time": baseline.get("reset_time", ""),
         },
@@ -344,7 +343,7 @@ def admin_config(x_astra_admin_token: str | None = Header(default=None)) -> dict
 def update_admin_config(payload: AdminConfigUpdate, x_astra_admin_token: str | None = Header(default=None), x_astra_session: str | None = Header(default=None, alias="X-Astra-Session")) -> dict[str, Any]:
     refresh_settings()
     data = payload.model_dump(exclude_none=True)
-    sensitive = any(key.startswith("okx_") or key in ("manual_close_enabled", "entry_freshness_max_age_seconds") for key in data)
+    sensitive = any(key.startswith("okx_") or key == "manual_close_enabled" for key in data)
     if sensitive:
         require_superadmin(x_astra_session)
     else:
@@ -384,10 +383,6 @@ def update_admin_config(payload: AdminConfigUpdate, x_astra_admin_token: str | N
         "ASTRA_NOTIFICATION_WEBHOOK": data.get("notification_webhook"),
         "ASTRA_MANUAL_CLOSE_ENABLED": "1" if data.get("manual_close_enabled") else "0" if "manual_close_enabled" in data else None,
         "ASTRA_ORDER_MODE": data.get("order_mode"),
-        # Keep the two execution-boundary guards in lockstep; the UI exposes one
-        # setting so a decision cannot outlive the market snapshot it used.
-        "ASTRA_ENTRY_DECISION_MAX_AGE_SECONDS": data.get("entry_freshness_max_age_seconds"),
-        "ASTRA_ENTRY_MARKET_MAX_AGE_SECONDS": data.get("entry_freshness_max_age_seconds"),
     }
     update_env(env_values)
     if data.get("order_mode"):

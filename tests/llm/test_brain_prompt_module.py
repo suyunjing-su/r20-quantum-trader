@@ -138,8 +138,35 @@ class _PromptSandbox(unittest.TestCase):
         self.news.write_text(json.dumps(payload), encoding="utf-8")
 
 
+class OrderModePromptTests(_PromptSandbox, unittest.TestCase):
+    """执行单型必须进入 AI 前置提示词，且两档口径互斥。"""
+
+    def test_market_mode_declares_immediate_executable_quote(self):
+        out = {}
+        rendered = self._call(order_mode="market", runtime_context_out=out)
+        self.assertIn("真实执行模式：市价单 MARKET", rendered)
+        self.assertIn("优先卖一 askPx", rendered)
+        self.assertIn("不得填写远离当前盘口的回踩/阻力挂单价", rendered)
+        self.assertEqual(out["order_mode"], "market")
+
+    def test_limit_mode_declares_maker_retracement_quote(self):
+        out = {}
+        rendered = self._call(order_mode="limit", runtime_context_out=out)
+        self.assertIn("真实执行模式：限价单 LIMIT / MAKER", rendered)
+        self.assertIn("有效回踩买入区", rendered)
+        self.assertNotIn("真实执行模式：市价单 MARKET", rendered)
+        self.assertEqual(out["order_mode"], "limit")
+
+    def test_invalid_mode_fails_closed_to_limit_prompt(self):
+        out = {}
+        rendered = self._call(order_mode="unexpected", runtime_context_out=out)
+        self.assertIn("真实执行模式：限价单 LIMIT / MAKER", rendered)
+        self.assertEqual(out["order_mode"], "limit")
+
+
 class BalanceContextTests(_PromptSandbox, unittest.TestCase):
     """★ `None` 与 `0` 必须区分：缺上下文 ≠ 余额为零。"""
+
 
     def test_missing_balance_is_marked_not_zero(self):
         out = {}
