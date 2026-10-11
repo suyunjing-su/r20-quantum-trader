@@ -64,6 +64,9 @@ from scripts.trader.cycle_stages import (
     preflight_reconcile_and_housekeeping,
     venue_protection_watchdog_stage,
 )
+from scripts.trader.entry_claim_venue_evidence import (
+    reconcile_unknown_entry_claims as _reconcile_unknown_entry_claims,
+)
 from scripts.trader.venue_protection import (
     read_ledger_rows,
     audit_cross_venue_protection,
@@ -1240,6 +1243,28 @@ def execute_portfolio():
     if _phase1 is None:
         return None
     (_xv_total, active_pos_count, all_positions, entries_blocked, long_count, pending_inst_ids, real_pos_dict, reserved_long_count, reserved_short_count, reserved_slot_count, short_count, usdt_available, xv_positions_by_venue) = _phase1
+
+    # Resolve ambiguous sends from exact, persisted client IDs using read-only venue evidence.
+    # This runs only after the authoritative position snapshot succeeds and cannot abort
+    # position management or unrelated entry scans when an evidence query is unavailable.
+    try:
+        _claim_recovery = _reconcile_unknown_entry_claims()
+        _claim_counts = (_claim_recovery.get("counts", {})
+                         if isinstance(_claim_recovery, dict) else {})
+        _claim_counts = _claim_counts or {"unknown_after_send": 0}
+        _claim_reports = (_claim_recovery.get("reports", [])
+                          if isinstance(_claim_recovery, dict) else [])
+        print(f"[开仓claim对账] 本轮结果: {_claim_counts}")
+        for _claim_report in _claim_reports:
+            print("[开仓claim对账] "
+                  f"{_claim_report.get('claim_id') or 'unknown'} "
+                  f"{_claim_report.get('venue') or ''}/"
+                  f"{_claim_report.get('instId') or ''}/"
+                  f"{_claim_report.get('side') or ''}: "
+                  f"{_claim_report.get('category') or 'retained_unknown'} — "
+                  f"{_claim_report.get('reason') or ''}")
+    except Exception as _claim_exc:
+        print(f"[开仓claim对账] warn worker 异常，未知结果继续保留并阻塞对应方向: {_claim_exc}")
 
     # 资金区间选择与本周期余额共用同一份路由/账户快照，避免 AI 与执行风控各自取不同账户。
     calculation_equity_info = _resolve_calculation_equity()

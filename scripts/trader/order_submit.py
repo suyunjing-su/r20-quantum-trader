@@ -529,18 +529,24 @@ def submit_protected_limit_order(inst_id: str, side: str, pos_side: str, size: f
     # 因此不能把同一标的的第二次请求交给交易所再决定。这里不再是 opt-in
     # 开关；所有最终开仓写请求都必须先持有 durable claim。
     _entry_claim_id = ""
+    _entry_client_order_id = ""
     _accepted_server_order_id = ""
     from scripts.trader.open_entry_guard import (
-        claim_open_entry, commit_open_entry, mark_open_entry_submitting,
-        mark_open_entry_unknown, release_open_entry)
+        claim_open_entry, commit_open_entry, get_open_entry_claim,
+        mark_open_entry_submitting, mark_open_entry_unknown, release_open_entry)
 
     def _claim_before_submit() -> Tuple[bool, str]:
-        nonlocal _entry_claim_id
+        nonlocal _entry_claim_id, _entry_client_order_id
         _claim_ok, _claim_reason, _entry_claim_id = claim_open_entry(
             environment=str(env.mode), venue=target_venue, inst_id=inst_id,
             side=pos_side)
         if not _claim_ok:
             return False, str(_claim_reason or "")
+        _claim_row = get_open_entry_claim(_entry_claim_id)
+        _entry_client_order_id = str((_claim_row or {}).get("client_order_id") or "")
+        if not _entry_client_order_id:
+            release_open_entry(_entry_claim_id, confirmed_not_sent=True)
+            return False, "开仓防重 claim 缺少预持久化 client order ID，安全拒绝下单"
         if not mark_open_entry_submitting(_entry_claim_id):
             return False, "开仓防重状态无法持久化为 submitting，安全拒绝下单"
         return True, ""
@@ -592,6 +598,7 @@ def submit_protected_limit_order(inst_id: str, side: str, pos_side: str, size: f
                 "environment": str(env.mode),
                 "inst_id": inst_id,
                 "entry_claim_id": _entry_claim_id,
+                "entry_client_order_id": _entry_client_order_id,
                 "order_mode": order_mode,
                 # 审计 P1-7：per-venue min_confidence 生效所需的原始 AI 置信度（缺失=不做该检查）
                 "confidence": float(venue_ctx.get("confidence") or 0.0) if isinstance(venue_ctx, dict) else 0.0,
@@ -733,7 +740,8 @@ def submit_protected_limit_order(inst_id: str, side: str, pos_side: str, size: f
         rows = okx_rest.place_order(
             inst_id, side, f"{size:g}",
             pos_side=pos_side, td_mode="cross", ord_type=ord_type,
-            px=entry_px, attach_tp=effective_tp, attach_sl=effective_sl,
+            px=entry_px, cl_ord_id=_entry_client_order_id,
+            attach_tp=effective_tp, attach_sl=effective_sl,
             attach_algo_cl_ord_id=f"astraprotect{uuid.uuid4().hex[:12]}",
         )
     except Exception as exc:

@@ -661,12 +661,13 @@ def open_protected_position(decision: Dict[str, Any], *,
     # order-submit facade passes an existing claim; direct/manual callers get
     # one here rather than bypassing durable de-duplication.
     _entry_claim_id = str(decision.get("entry_claim_id") or "")
+    _entry_client_order_id = ""
     _entry_claim_inst = str(decision.get("inst_id") or decision.get("instId") or asset)
     _entry_claim_side = "long" if action in ("BUY_LONG", "BUY", "LONG", "buy", "long") else "short"
     try:
         from scripts.trader.open_entry_guard import (
             claim_open_entry, begin_open_entry_submission, commit_open_entry,
-            mark_open_entry_unknown, classify_entry_submission_exception,
+            get_open_entry_claim, mark_open_entry_unknown, classify_entry_submission_exception,
             release_open_entry, validate_open_entry_claim,
         )
         _entry_env = str(decision.get("environment") or environment or "live")
@@ -683,6 +684,25 @@ def open_protected_position(decision: Dict[str, Any], *,
             if not _claim_ok:
                 return _fail("entry_claim", _claim_reason or "开仓防重拒绝",
                              venue=venue, submission_state="rejected_before_send")
+        _claim_row = get_open_entry_claim(_entry_claim_id)
+        _entry_client_order_id = str((_claim_row or {}).get("client_order_id") or "")
+        if not _entry_client_order_id:
+            return _fail("entry_claim", "持久化 claim 缺少 client order ID，拒绝无关联标识发单",
+                         venue=venue, submission_state="rejected_before_send")
+        try:
+            import inspect
+            _text_param = inspect.signature(ad.place_order).parameters.get("text")
+            _supports_text = bool(_text_param and _text_param.kind in (
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY))
+        except (TypeError, ValueError):
+            _supports_text = False
+        if not _supports_text:
+            release_open_entry(_entry_claim_id, confirmed_not_sent=True)
+            return _fail(
+                "entry_claim",
+                "场所适配器 place_order 不支持 client text，拒绝发送未关联的开仓单",
+                venue=venue, submission_state="rejected_before_send")
         if not begin_open_entry_submission(_entry_claim_id):
             return _fail("entry_claim", "开仓防重 claim 已消费或无法持久化 dispatching，安全拒绝下单",
                          venue=venue, submission_state="rejected_before_send")
@@ -694,9 +714,18 @@ def open_protected_position(decision: Dict[str, Any], *,
     order_mode = str(decision.get("order_mode") or os.getenv("ASTRA_ORDER_MODE", "market")).strip().lower()
     entry_px = None if order_mode == "market" else entry
     try:
-        placed = ad.place_order(asset, side, abs(contracts), price=entry_px)
+        placed = ad.place_order(
+            asset, side, abs(contracts), price=entry_px, text=_entry_client_order_id)
+    except ExchangeCapabilityError:
+        if _entry_claim_id:
+            release_open_entry(_entry_claim_id, confirmed_not_sent=True)
+        raise
     except Exception as exc:
-        _state = classify_entry_submission_exception(exc)
+        # A TypeError can originate inside an adapter after dispatch. Signature
+        # compatibility is checked before invocation above; never infer that a
+        # runtime TypeError proves the venue did not receive the request.
+        _state = ("unknown_after_send" if isinstance(exc, TypeError)
+                  else classify_entry_submission_exception(exc))
         if _state == "rejected_before_send" and _entry_claim_id:
             release_open_entry(_entry_claim_id, confirmed_not_sent=True)
         elif _entry_claim_id:

@@ -554,6 +554,30 @@ class GateAdapter(BaseExchangeAdapter):
                 return []
             raise
 
+    def fetch_order_history_timerange(self, symbol: str, *, from_s: int, to_s: int,
+                                     limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
+        """Read ordinary futures order history over a bounded time range."""
+        inst = self.native_symbol(symbol)
+        data = self.signed_request(
+            "GET", "/api/v4/futures/usdt/orders_timerange",
+            params={"contract": inst, "from": int(from_s), "to": int(to_s),
+                    "limit": int(limit), "offset": int(offset)})
+        if not isinstance(data, list):
+            raise GateAPIError("bad_response", "Gate 历史订单响应不是列表")
+        return [row for row in data if isinstance(row, dict)]
+
+    def fetch_personal_trades_timerange(self, symbol: str, *, from_s: int, to_s: int,
+                                        limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
+        """Read personal futures fills over a bounded time range."""
+        inst = self.native_symbol(symbol)
+        data = self.signed_request(
+            "GET", "/api/v4/futures/usdt/my_trades_timerange",
+            params={"contract": inst, "from": int(from_s), "to": int(to_s),
+                    "limit": int(limit), "offset": int(offset)})
+        if not isinstance(data, list):
+            raise GateAPIError("bad_response", "Gate 历史成交响应不是列表")
+        return [row for row in data if isinstance(row, dict)]
+
     def fast_close_position(self, symbol: str, text: str = "", pos_side: Optional[str] = None) -> Dict[str, Any]:
         """市价全平当前持仓（双向与单向模式自适应；审计 B1：方向钉腿 +
         非整数张数拒截断——int() 抹零会留残仓却谎报全平）。"""

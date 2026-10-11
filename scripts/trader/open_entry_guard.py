@@ -116,6 +116,104 @@ def _claim_ttl_ms(ttl_seconds: Optional[float] = None) -> int:
         return DEFAULT_CLAIM_TTL_SECONDS * 1000
 
 
+def _client_order_id(venue: str, claim_id: str) -> str:
+    """Build a venue-valid ID from the random claim token before any write."""
+    token = "".join(ch for ch in str(claim_id).lower() if ch in "0123456789abcdef")
+    target = str(venue or "").strip().lower()
+    if target == "gate":
+        # Gate text must start with ``t-`` and stay within its 28-byte limit.
+        return "t-astra-" + token[:19]
+    # OKX clOrdId and Binance newClientOrderId accept this ASCII token (25 chars).
+    return "astra" + token[:20]
+
+
+def read_open_entry_claims(*, path: Optional[os.PathLike[str] | str] = None
+                           ) -> Tuple[bool, list[dict[str, Any]], str]:
+    """Read a claim snapshot without expiring, pruning, or rewriting any row."""
+    target = Path(path) if path is not None else OPEN_ENTRY_CLAIMS_FILE
+    try:
+        with file_lock(target):
+            rows = _read_rows(target)
+        return True, [dict(row) for row in rows], ""
+    except Exception as exc:
+        return False, [], f"开仓防重状态不可读取: {exc}"
+
+
+def get_open_entry_claim(claim_id: str, *, path: Optional[os.PathLike[str] | str] = None
+                         ) -> Optional[dict[str, Any]]:
+    """Return a copy of one persisted claim, or None if it cannot be verified."""
+    if not claim_id:
+        return None
+    ok, rows, _error = read_open_entry_claims(path=path)
+    if not ok:
+        return None
+    return next((row for row in rows if str(row.get("claim_id", "")) == str(claim_id)), None)
+
+
+def apply_open_entry_reconciliation(claim_id: str, result: dict[str, Any], *,
+                                   path: Optional[os.PathLike[str] | str] = None,
+                                   now_ms: Optional[int] = None) -> bool:
+    """Persist an evidence decision; unresolved claims remain durable blockers.
+
+    Promotion and retention are atomic claim-file updates.  Evidence-backed
+    release first appends an audit record beside the claim file, then removes
+    the blocker.  If either operation fails, the claim remains in place.
+    """
+    if not claim_id or not isinstance(result, dict):
+        return False
+    target = Path(path) if path is not None else OPEN_ENTRY_CLAIMS_FILE
+    now = int(now_ms if now_ms is not None else _now_ms())
+    action = str(result.get("action") or "retain")
+    candidate_statuses = {"pending", "submitting", "dispatching", "unknown_after_send"}
+    try:
+        with file_lock(target):
+            rows = _read_rows(target)
+            index = next((i for i, row in enumerate(rows)
+                          if str(row.get("claim_id", "")) == str(claim_id)), None)
+            if index is None:
+                return False
+            row = rows[index]
+            if str(row.get("status", "")).lower() not in candidate_statuses:
+                return False
+            audit = {
+                "reconciled_at_ms": now,
+                "previous_status": str(row.get("status", "")),
+                "category": str(result.get("category") or "retained_unknown"),
+                "action": action,
+                "reason": str(result.get("reason") or "")[:500],
+                "order_id": str(result.get("order_id") or ""),
+                "evidence": result.get("evidence") if isinstance(result.get("evidence"), dict) else {},
+            }
+            if action == "release":
+                audit_path = target.with_name(target.name + ".reconciliation.jsonl")
+                audit_path.parent.mkdir(parents=True, exist_ok=True)
+                with file_lock(audit_path):
+                    with audit_path.open("a", encoding="utf-8") as handle:
+                        handle.write(json.dumps({"claim_id": str(claim_id), **audit},
+                                                ensure_ascii=False) + "\n")
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                del rows[index]
+                _atomic_write(target, rows)
+                return True
+            row["last_reconciliation"] = audit
+            if action == "promote_to_active":
+                row["status"] = "active"
+                row["updated_at_ms"] = now
+                row["expires_at_ms"] = now + _claim_ttl_ms()
+                row["order_id"] = str(result.get("order_id") or row.get("order_id") or "")
+                row.pop("last_error", None)
+            else:
+                # Do not touch expires_at_ms or convert a failed/ambiguous query
+                # into a new TTL window; this row remains fail-closed indefinitely.
+                pass
+            row["updated_at_ms"] = now
+            _atomic_write(target, rows)
+            return True
+    except Exception:
+        return False
+
+
 def claim_open_entry(*, environment: str, venue: str, inst_id: str, side: str,
                      ttl_seconds: Optional[float] = None,
                      path: Optional[os.PathLike[str] | str] = None,
@@ -157,6 +255,7 @@ def claim_open_entry(*, environment: str, venue: str, inst_id: str, side: str,
             claim_id = uuid.uuid4().hex
             live.append({
                 "claim_id": claim_id,
+                "client_order_id": _client_order_id(venue, claim_id),
                 "environment": str(environment),
                 "venue": str(venue).lower(),
                 "instId": str(inst_id),

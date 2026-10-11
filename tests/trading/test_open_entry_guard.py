@@ -17,6 +17,8 @@ from scripts.trader.open_entry_guard import (
     release_open_entry,
     classify_entry_submission_exception,
     validate_open_entry_claim,
+    apply_open_entry_reconciliation,
+    get_open_entry_claim,
 )
 
 
@@ -25,6 +27,78 @@ class OpenEntryGuardTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory(prefix="astra-entry-guard-")
         self.addCleanup(self.tmp.cleanup)
         self.path = Path(self.tmp.name) / "claims.json"
+
+    def test_claim_persists_venue_valid_correlation_id_before_submission(self):
+        cases = (("okx", "astra"), ("binance", "astra"), ("gate", "t-astra-"))
+        for venue, prefix in cases:
+            with self.subTest(venue=venue):
+                path = self.path.parent / f"{venue}.json"
+                claimed = claim_open_entry(
+                    environment="demo", venue=venue, inst_id="BTC-USDT-SWAP",
+                    side="long", path=path, now_ms=1_000)
+                self.assertTrue(claimed[0], claimed)
+                row = get_open_entry_claim(claimed[2], path=path)
+                self.assertIsNotNone(row)
+                client_id = row["client_order_id"]
+                self.assertTrue(client_id.startswith(prefix), client_id)
+                self.assertLessEqual(len(client_id.encode("ascii")), 28 if venue == "gate" else 32)
+                self.assertTrue(all(ch.isalnum() or ch == "-" for ch in client_id))
+
+    def test_reconciliation_promotes_and_releases_with_persisted_audit(self):
+        claimed = claim_open_entry(
+            environment="demo", venue="okx", inst_id="BTC-USDT-SWAP",
+            side="long", path=self.path, now_ms=1_000)
+        self.assertTrue(claimed[0], claimed)
+        self.assertTrue(mark_open_entry_submitting(claimed[2], path=self.path, now_ms=1_001))
+        self.assertTrue(mark_open_entry_unknown(claimed[2], "timeout", path=self.path, now_ms=1_002))
+
+        promoted = apply_open_entry_reconciliation(
+            claimed[2], {
+                "action": "promote_to_active",
+                "category": "promoted_to_active",
+                "reason": "unique client ID match",
+                "order_id": "server-1",
+                "evidence": {"complete": False, "live_orders": 1},
+            }, path=self.path, now_ms=2_000)
+        self.assertTrue(promoted)
+        row = get_open_entry_claim(claimed[2], path=self.path)
+        self.assertEqual(row["status"], "active")
+        self.assertEqual(row["order_id"], "server-1")
+        self.assertEqual(row["last_reconciliation"]["category"], "promoted_to_active")
+
+        # Once promoted, the claim leaves the unknown reconciliation state
+        # machine; later negative evidence must not release an accepted order.
+        released = apply_open_entry_reconciliation(
+            claimed[2], {
+                "action": "release",
+                "category": "released_with_evidence",
+                "reason": "explicit venue rejection and complete coverage",
+                "order_id": "server-rejected-2",
+                "evidence": {"complete": True, "fills": 0},
+            }, path=self.path, now_ms=3_000)
+        self.assertFalse(released, "active claim is not an unknown reconciliation candidate")
+        self.assertIsNotNone(get_open_entry_claim(claimed[2], path=self.path))
+
+    def test_reconciliation_release_audit_is_written_before_claim_removal(self):
+        claimed = claim_open_entry(
+            environment="demo", venue="gate", inst_id="ETH-USDT-SWAP",
+            side="short", path=self.path, now_ms=1_000)
+        self.assertTrue(mark_open_entry_submitting(claimed[2], path=self.path, now_ms=1_001))
+        self.assertTrue(mark_open_entry_unknown(claimed[2], "timeout", path=self.path, now_ms=1_002))
+        self.assertTrue(apply_open_entry_reconciliation(
+            claimed[2], {
+                "action": "release",
+                "category": "released_with_evidence",
+                "reason": "explicit rejection",
+                "order_id": "gate-rej-1",
+                "evidence": {"complete": True},
+            }, path=self.path, now_ms=4_000))
+        self.assertIsNone(get_open_entry_claim(claimed[2], path=self.path))
+        audit = Path(str(self.path) + ".reconciliation.jsonl")
+        rows = [json.loads(line) for line in audit.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(rows[-1]["claim_id"], claimed[2])
+        self.assertEqual(rows[-1]["category"], "released_with_evidence")
+        self.assertEqual(rows[-1]["order_id"], "gate-rej-1")
 
     def test_same_direction_is_blocked_across_route_changes(self):
         first = claim_open_entry(environment="demo", venue="okx",

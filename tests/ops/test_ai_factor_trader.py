@@ -393,6 +393,8 @@ class ExecutePortfolioTests(unittest.TestCase):
         self._patch("freeze_okx_environment", lambda: _Frozen())
         self._patch("unfreeze_okx_environment", lambda: None)
         self._patch("current_environment", lambda: _Frozen())
+        self._patch("_reconcile_unknown_entry_claims",
+                    lambda: {"ok": True, "counts": {}, "reports": []})
         self._patch("pool_is_trustworthy", lambda: True)
         self._patch("read_ledger_rows", lambda path: None)
         self._patch("write_market_data_health_snapshot", record("health_snapshot"))
@@ -466,6 +468,20 @@ class ExecutePortfolioTests(unittest.TestCase):
         self.assertEqual(self.calls["shape"]["intents_path"], aft.OPEN_INTENT_FILE)
         self.assertEqual(self.calls["phase1"]["entries_blocked"], "BLOCKED")
         self.assertEqual(self.calls["universe"]["timestamp_full"], "TS")
+
+    def test_unknown_claim_worker_runs_after_positions_before_factor_fetch(self):
+        self._wire()
+        order = []
+        self._patch("fetch_positions_and_reconcile",
+                    lambda **_kw: (order.append("positions"), self.PHASE1)[1])
+        self._patch("_reconcile_unknown_entry_claims",
+                    lambda: (order.append("claims"),
+                             {"ok": True, "counts": {}, "reports": []})[1])
+        self._patch("fetch_universe_and_manage_positions",
+                    lambda **_kw: (order.append("factors"), ([], [], {}))[1])
+
+        self._run()
+        self.assertEqual(order[:3], ["positions", "claims", "factors"])
 
     def test_phase1_unpacking_reaches_downstream_stages(self):
         self._wire()

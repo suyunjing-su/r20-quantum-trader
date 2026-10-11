@@ -85,9 +85,9 @@ class _FakeAdapter:
     def set_leverage(self, asset, leverage, margin_mode="cross"):
         self.calls.append(("set_leverage", leverage, margin_mode))
 
-    def place_order(self, asset, side, qty, price=None):
-        self.calls.append(("place_order", asset, side, qty, price))
-        return self.placed
+    def place_order(self, asset, side, qty, price=None, text=""):
+        self.calls.append(("place_order", asset, side, qty, price, text))
+        return {**self.placed, "client_order_id": text}
 
     def attach_protective_orders(self, asset, side, *, tp_px, sl_px,
                                  expiration=None, contracts=None, **kwargs):
@@ -99,6 +99,15 @@ class _FakeAdapter:
     def cancel_order(self, asset, order_id):
         self.calls.append(("cancel_order", order_id))
 
+    def cancel_algo_order(self, *, algo_id=None, client_algo_id=None):
+        identity = algo_id if algo_id is not None else client_algo_id
+        self.calls.append(("cancel_algo_order", identity))
+        return {"ok": True}
+
+    def cancel_price_order(self, order_id):
+        self.calls.append(("cancel_price_order", order_id))
+        return {"ok": True}
+
 
 class _Base(unittest.TestCase):
     def _start(self, patcher):
@@ -107,6 +116,15 @@ class _Base(unittest.TestCase):
         return started
 
     def setUp(self):
+        import tempfile
+        from pathlib import Path
+        from scripts.trader import open_entry_guard
+
+        self._claim_tmp = tempfile.TemporaryDirectory(prefix="astra-router-claims-")
+        self.addCleanup(self._claim_tmp.cleanup)
+        self._claim_path = Path(self._claim_tmp.name) / "open_entry_claims.json"
+        self._start(mock.patch.object(
+            open_entry_guard, "OPEN_ENTRY_CLAIMS_FILE", self._claim_path))
         self.adapter = _FakeAdapter()
         self.adapter.rows = []
         self.decision = {"asset": "BTC", "action": "BUY_LONG", "margin_usdt": 150.0,
@@ -551,6 +569,7 @@ class OpenVenuePoolTests(_Base):
     def test_absent_confidence_does_not_trigger_the_floor(self):
         self.pool.return_value = {"assets": ["BTC"], "min_confidence": 80}
         self.assertIs(self._open(decision={"confidence": None})["ok"], True)
+        self._claim_path.write_text("[]", encoding="utf-8")
         self.assertIs(self._open(decision={"confidence": "很高"})["ok"], True)
 
     def test_non_finite_pool_floor_is_ignored(self):
@@ -889,10 +908,43 @@ class OpenPlacementTests(_Base):
                  and c[0] == "set_leverage"]
         self.assertEqual(calls[0][2], "cross")
 
+    def test_entry_correlation_id_is_persisted_and_passed_to_adapter(self):
+        adapter = _FakeAdapter(venue="binance")
+        adapter.rows = []
+        out = self._open(adapter=adapter)
+        self.assertTrue(out["ok"], out.get("detail"))
+        place = next(c for c in adapter.calls
+                     if isinstance(c, tuple) and c[0] == "place_order")
+        client_id = place[5]
+        self.assertTrue(client_id.startswith("astra"), client_id)
+        from scripts.trader.open_entry_guard import read_open_entry_claims
+        ok, rows, error = read_open_entry_claims(path=self._claim_path)
+        self.assertTrue(ok, error)
+        self.assertEqual(rows[0]["client_order_id"], client_id)
+        self.assertEqual(rows[0]["status"], "active")
+
+    def test_gate_entry_correlation_id_is_persisted_and_passed_as_text(self):
+        adapter = _FakeAdapter(venue="gate")
+        adapter.rows = []
+        out = self._open(venue="gate", adapter=adapter)
+        self.assertTrue(out["ok"], out.get("detail"))
+        place = next(c for c in adapter.calls
+                     if isinstance(c, tuple) and c[0] == "place_order")
+        client_id = place[5]
+        self.assertRegex(client_id, r"^t-astra-[0-9a-f]{19}$")
+        from scripts.trader.open_entry_guard import read_open_entry_claims
+        ok, rows, error = read_open_entry_claims(path=self._claim_path)
+        self.assertTrue(ok, error)
+        self.assertEqual(rows[0]["client_order_id"], client_id)
+        self.assertEqual(rows[0]["status"], "active")
+
     def test_entry_failure_is_rejected(self):
         adapter = _FakeAdapter(venue="binance")
         adapter.rows = []
-        adapter.place_order = mock.Mock(side_effect=RuntimeError("被拒"))
+        def _fail(asset, side, qty, price=None, text=""):
+            raise RuntimeError("被拒")
+
+        adapter.place_order = _fail
         out = self._open(adapter=adapter)
         self.assertEqual(out["stage"], "entry")
         self.assertIn("入场委托提交失败", out["detail"])
@@ -901,18 +953,69 @@ class OpenPlacementTests(_Base):
         from astra_backend.exchanges import ExchangeCapabilityError
         adapter = _FakeAdapter(venue="binance")
         adapter.rows = []
-        adapter.place_order = mock.Mock(side_effect=ExchangeCapabilityError("不支持"))
+        def _fail(asset, side, qty, price=None, text=""):
+            raise ExchangeCapabilityError("不支持")
+
+        adapter.place_order = _fail
         with self.assertRaises(ExchangeCapabilityError):
             self._open(adapter=adapter)
 
+    def test_legacy_strict_adapter_is_rejected_before_place_order(self):
+        class StrictAdapter(_FakeAdapter):
+            def __init__(self):
+                super().__init__(venue="binance")
+                self.called = False
+
+            def place_order(self, asset, side, qty, price=None):
+                self.called = True
+                self.calls.append(("place_order_without_text", asset, side, qty, price))
+                return {"id": "should-not-be-sent"}
+
+        adapter = StrictAdapter()
+        adapter.rows = []
+        out = self._open(adapter=adapter)
+        self.assertEqual(out["submission_state"], "rejected_before_send")
+        self.assertIn("不支持 client text", out["detail"])
+        self.assertFalse(adapter.called)
+        from scripts.trader.open_entry_guard import read_open_entry_claims
+        ok, rows, error = read_open_entry_claims(path=self._claim_path)
+        self.assertTrue(ok, error)
+        self.assertEqual(rows, [])
+
+    def test_runtime_type_error_after_adapter_invocation_keeps_claim_unknown(self):
+        adapter = _FakeAdapter(venue="binance")
+        adapter.rows = []
+
+        def _type_error(asset, side, qty, price=None, text=""):
+            adapter.calls.append(("place_order", asset, side, qty, price, text))
+            raise TypeError("adapter failed while handling response")
+
+        adapter.place_order = _type_error
+        out = self._open(adapter=adapter)
+        self.assertEqual(out["submission_state"], "unknown_after_send")
+        from scripts.trader.open_entry_guard import read_open_entry_claims
+        ok, rows, error = read_open_entry_claims(path=self._claim_path)
+        self.assertTrue(ok, error)
+        self.assertEqual(rows[0]["status"], "unknown_after_send")
+
     def test_order_id_aliases(self):
-        for payload, expected in (({"id": "a"}, "a"), ({"order_id": "b"}, "b"),
-                                  ({"text": "c"}, "c"), ({}, "")):
+        cases = (({"id": "a"}, "a", True),
+                 ({"order_id": "b"}, "b", True),
+                 ({"text": "c"}, "", False),
+                 ({}, "", False))
+        for payload, expected, accepted in cases:
             with self.subTest(payload=payload):
+                self._claim_path.write_text("[]", encoding="utf-8")
                 adapter = _FakeAdapter(venue="binance", placed=payload)
                 adapter.rows = []
                 out = self._open(adapter=adapter)
-                self.assertEqual(out["order_id"], expected)
+                self.assertEqual(bool(out.get("ok")), accepted)
+                if accepted:
+                    self.assertEqual(out["order_id"], expected)
+                else:
+                    self.assertEqual(out["submission_state"], "unknown_after_send")
+                    self.assertNotIn("order_id", out,
+                                     "client tag must never be promoted to server order identity")
 
 
 class OpenProtectionTests(_Base):
@@ -969,50 +1072,61 @@ class OpenProtectionTests(_Base):
         out = self._open(adapter=adapter)
         self.assertEqual(out["stage"], "protective")
         self.assertIn("入场单已撤销", out["detail"])
-        cancelled = [c[1] for c in adapter.calls if isinstance(c, tuple)
-                     and c[0] == "cancel_order"]
-        self.assertIn("tp-9", cancelled)
-        self.assertIn("ord-1", cancelled)
+        cancelled_legs = [c[1] for c in adapter.calls if isinstance(c, tuple)
+                         and c[0] == "cancel_algo_order"]
+        cancelled_orders = [c[1] for c in adapter.calls if isinstance(c, tuple)
+                           and c[0] == "cancel_order"]
+        self.assertIn("tp-9", cancelled_legs)
+        self.assertNotIn("tp-9", cancelled_orders,
+                         "保护腿必须走专用 algo 资源撤销接口")
+        self.assertIn("ord-1", cancelled_orders)
 
     def test_leg_cancel_failure_is_recorded_without_changing_the_verdict(self):
         adapter = _FakeAdapter(venue="binance", open_orders=[])
         adapter.rows = []
 
-        def _cancel(asset, oid):
-            if oid == "tp-1":
+        def _cancel(*, algo_id=None, client_algo_id=None):
+            if algo_id == "tp-1":
                 raise RuntimeError("撤不动")
-            adapter.calls.append(("cancel_order", oid))
+            adapter.calls.append(("cancel_algo_order", algo_id or client_algo_id))
+            return {"ok": True}
 
-        adapter.cancel_order = _cancel
+        adapter.cancel_algo_order = _cancel
         out = self._open(adapter=adapter)
-        self.assertIn("TP腿 tp-1 撤销失败", out["detail"])
+        self.assertIn("TP腿 tp-1 撤销失败(撤不动)", out["detail"])
         self.assertEqual(out["stage"], "protective")
 
-    def test_only_astra_prefixed_residue_is_cancelled(self):
-        residue = [{"id": "user-leg", "text": "user manual"},
-                   {"id": "astra-orphan", "text": "astra tp"},
-                   {"id": "nested", "order": {"id": "astra-nested", "text": "ASTRA SL"}},
+    def test_only_attributed_typed_residue_is_cancelled_and_manual_is_retained(self):
+        manual = {"algoId": "user-leg", "text": "user manual"}
+        residue = [manual,
+                   {"algoId": "astra-orphan", "text": "t-astratp-orphan"},
+                   {"raw": {"algoId": "nested-algo", "text": "t-astrasl-nested"}},
                    "not-a-dict",
-                   {"id": "", "text": "astra-nope"}]
+                   {"text": "t-astrasl-no-typed-id"}]
         adapter = _FakeAdapter(venue="binance", open_orders=[], residue=residue)
         adapter.rows = []
-        adapter.list_protective_orders = mock.Mock(return_value=[])
         calls = {"n": 0}
 
         def _list(asset):
             calls["n"] += 1
-            return [] if calls["n"] == 1 else residue
+            if calls["n"] == 1:
+                return []  # 回读未见双腿 ⇒ 进入回滚
+            if calls["n"] == 2:
+                return residue
+            return [manual]  # 撤后仍保留手动单，且系统目标 identity 已消失
 
         adapter.list_protective_orders = _list
         out = self._open(adapter=adapter)
-        cancelled = [c[1] for c in adapter.calls if isinstance(c, tuple)
-                     and c[0] == "cancel_order"]
-        self.assertIn("astra-orphan", cancelled)
-        self.assertIn("nested", cancelled,
-                      "嵌套行取的是外层 id（`row.get('id')` 优先于 `row['order']['id']`）")
-        self.assertNotIn("user-leg", cancelled)
-        self.assertNotIn("", cancelled)
-        self.assertIn("孤儿触发单 astra-orphan 已撤", out["detail"])
+        cancelled_legs = [c[1] for c in adapter.calls if isinstance(c, tuple)
+                          and c[0] == "cancel_algo_order"]
+        cancelled_orders = [c[1] for c in adapter.calls if isinstance(c, tuple)
+                            and c[0] == "cancel_order"]
+        self.assertIn("astra-orphan", cancelled_legs)
+        self.assertIn("nested-algo", cancelled_legs)
+        self.assertNotIn("user-leg", cancelled_legs)
+        self.assertIn("ord-1", cancelled_orders)
+        self.assertIn("归属未证明", out["detail"])
+        self.assertIn("typed identity", out["detail"])
 
     def test_residue_enumeration_failure_is_reported(self):
         adapter = _FakeAdapter(venue="binance")
@@ -1027,8 +1141,8 @@ class OpenProtectionTests(_Base):
 
         adapter.list_protective_orders = _list
         out = self._open(adapter=adapter)
-        self.assertIn("孤儿触发单未能枚举", out["detail"])
-        self.assertIn("OCO/到期/手动兜底", out["detail"])
+        self.assertIn("孤儿触发单清理/撤后核验未完成", out["detail"])
+        self.assertIn("未证明归属的单保持不动", out["detail"])
 
     def test_entry_cancel_failure_is_reported(self):
         adapter = _FakeAdapter(venue="binance", open_orders=[], legs={})

@@ -125,6 +125,7 @@ class SubmitProtectedLimitOrderTests(unittest.TestCase):
         self.assertEqual(kwargs.get("attach_tp"), 125.0)
         self.assertEqual(kwargs.get("attach_sl"), 90.0)
         self.assertEqual(kwargs.get("pos_side"), "long")
+        self.assertRegex(str(kwargs.get("cl_ord_id") or ""), r"^astra[0-9a-f]{20}$")
         self.assertEqual(kwargs.get("td_mode"), "cross")
         self.assertEqual(kwargs.get("ord_type"), "limit")
         self.assertEqual(mock_rest.place_order.call_args.args[:2], ("BTC-USDT-SWAP", "buy"))

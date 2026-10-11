@@ -471,6 +471,19 @@ class BinanceAdapter(BaseExchangeAdapter):
         )
         return data if isinstance(data, list) else []
 
+    def fetch_order_history(
+            self, symbol: str, *, start_time: Optional[int] = None,
+            end_time: Optional[int] = None, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        """Return read-only USD-M order history for a bounded time interval."""
+        data = self._private_call(
+            "all_orders",
+            symbol=self.native_symbol(symbol),
+            start_time=start_time,
+            end_time=end_time,
+            limit=limit,
+        )
+        return data if isinstance(data, list) else []
+
     def fetch_position_risk(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
         """Return raw position-risk rows through the generated SDK endpoint."""
         data = self._private_call(
