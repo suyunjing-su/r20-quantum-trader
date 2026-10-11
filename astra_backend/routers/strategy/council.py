@@ -156,7 +156,13 @@ def admin_put_council_equity_bands(payload: EquityBandsUpdateRequest, x_astra_se
         "mode": result["mode"], "unified_target_id": result["unified_target_id"],
     })
     return result
-def admin_apply_council_suite(payload: CouncilApplySuiteRequest, x_astra_session: str | None = Header(default=None, alias="X-Astra-Session")) -> dict[str, Any]:
+
+
+@router.post("/api/v1/admin/council/apply-suite")
+def admin_apply_council_suite(
+    payload: CouncilApplySuiteRequest,
+    x_astra_session: str | None = Header(default=None, alias="X-Astra-Session"),
+) -> dict[str, Any]:
     actor = require_superadmin(x_astra_session)
     from astra_backend.council_manager import apply_preset_suite
     try:

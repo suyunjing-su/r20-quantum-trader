@@ -16,7 +16,7 @@ from unittest import mock
 
 from fastapi import HTTPException
 
-from astra_backend.routers.strategy import council as C
+from astra_backend.routers.strategy import council as C, router as strategy_router
 from astra_backend.schemas import (CouncilApplySuiteRequest, CouncilConfigUpdateRequest,
                                  CouncilImportRequest, CouncilResetRoleRequest)
 
@@ -89,6 +89,15 @@ class CouncilAdminRoutesTest(unittest.TestCase):
                                         "timeout_seconds"], "只落这几项，不把请求体整包塞进去")
 
     # ── 套用套件 / 重置角色 ────────────────────────────────
+    def test_apply_suite_post_route_is_registered(self):
+        routes = [
+            route for route in strategy_router.routes
+            if getattr(route, "path", None) == "/api/v1/admin/council/apply-suite"
+            and "POST" in getattr(route, "methods", set())
+        ]
+        self.assertEqual(len(routes), 1)
+        self.assertIs(routes[0].endpoint, C.admin_apply_council_suite)
+
     def test_apply_suite_writes_an_audit_record(self):
         with mock.patch("astra_backend.council_manager.apply_preset_suite",
                         return_value={"ok": 1}):
