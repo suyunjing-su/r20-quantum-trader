@@ -754,6 +754,14 @@ class BinanceAdapter(BaseExchangeAdapter):
         }
 
     def list_protective_orders(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
+        """List USDⓈ-M algo/conditional orders through the official SDK.
+
+        Binance's ``openAlgoOrders`` is a separate resource from ordinary
+        ``openOrders`` and includes STOP/TP/trailing orders.  Keep both numeric
+        ``algoId`` and ``clientAlgoId``: the former is the normal cancel key,
+        while the latter is the required fallback for a response that omits the
+        numeric identifier.
+        """
         data = self._private_call(
             "current_all_algo_open_orders",
             symbol=self.native_symbol(symbol) if symbol else None,
@@ -763,14 +771,25 @@ class BinanceAdapter(BaseExchangeAdapter):
         for row in rows:
             if not isinstance(row, dict):
                 continue
-            algo_id = str(row.get("algoId") or row.get("orderId") or "")
+            algo_id = str(row.get("algoId") or "").strip()
+            client_algo_id = str(row.get("clientAlgoId") or "").strip()
+            # `id` is the adapter-neutral cancellation key.  If Binance does
+            # not return algoId, retaining clientAlgoId prevents a silent skip.
+            cancel_id = algo_id or client_algo_id
             out.append({
-                "id": algo_id,
+                "venue": "binance",
+                "id": cancel_id,
                 "algo_id": algo_id,
+                "client_algo_id": client_algo_id,
                 "symbol": str(row.get("symbol") or ""),
                 "side": str(row.get("side") or "").lower(),
+                "position_side": str(row.get("positionSide") or "").lower(),
+                "quantity": row.get("quantity"),
+                "close_position": row.get("closePosition"),
+                "reduce_only": row.get("reduceOnly"),
+                "status": str(row.get("algoStatus") or "open").lower(),
                 "trigger_price": self._number(row.get("triggerPrice")),
-                "type": str(row.get("algoType") or row.get("type") or ""),
+                "type": str(row.get("algoType") or row.get("orderType") or ""),
                 "raw": row,
             })
         return out
@@ -792,12 +811,18 @@ class BinanceAdapter(BaseExchangeAdapter):
         )
 
     def cancel_algo_order(self, *, algo_id=None, client_algo_id=None) -> Any:
+        """Cancel one Binance conditional order by the official SDK key.
+
+        The generated SDK maps these names to ``algoId``/``clientAlgoId`` on
+        ``DELETE /fapi/v1/algoOrder``; do not route this through ordinary order
+        cancellation or the symbol-wide cancel endpoint.
+        """
         kwargs = {}
-        if algo_id is not None:
+        if algo_id is not None and str(algo_id).strip() != "":
             kwargs["algo_id"] = int(algo_id)
-        if client_algo_id:
+        elif client_algo_id and str(client_algo_id).strip():
             kwargs["client_algo_id"] = str(client_algo_id)
-        if not kwargs:
+        else:
             raise ValueError("撤销条件单需 algoId 或 clientAlgoId")
         return self._private_call("cancel_algo_order", **kwargs)
 

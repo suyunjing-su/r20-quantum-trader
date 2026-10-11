@@ -1007,12 +1007,43 @@ def sync_cloud_algo_stop(inst_id: str, pos_side: str, new_sl: float, reason: str
     """壳（第八十五刀搬至 `scripts/trader/cloud_protection.py`）。"""
     return _cloud_protection_sync_stop(inst_id, pos_side, new_sl, reason, okx_rest=okx_rest)
 
+def _query_scale_out_position(inst_id: str, pos_side: str, venue: str):
+    """Read one live position size for scale-out fill reconciliation.
+
+    A successful submit is not a fill proof. This adapter deliberately raises on
+    an unverified venue read so the durable scale-out operation stays retryable.
+    """
+    venue = str(venue or "okx").lower()
+    if venue == "okx":
+        ok, rows, error = query_positions()
+        if not ok:
+            raise RuntimeError(f"OKX 持仓核验失败: {error}")
+        for row in rows or []:
+            if (str(row.get("instId", "")).upper() == str(inst_id).upper()
+                    and str(row.get("posSide") or row.get("side") or "net").lower() in {str(pos_side).lower(), "net"}):
+                return row.get("pos", 0.0)
+        return 0.0
+    try:
+        mode = str(current_environment().mode)
+    except Exception as exc:
+        raise RuntimeError(f"周期环境不可核验: {exc}")
+    ok, snapshots, error = fetch_other_venue_positions(mode)
+    if not ok:
+        raise RuntimeError(f"{venue.upper()} 持仓核验失败: {error}")
+    base = str(inst_id).split("-")[0].upper()
+    for row in (snapshots or {}).get(venue, []) or []:
+        row_base = str(row.get("base") or row.get("inst_id") or "").replace("_USDT", "").replace("USDT", "").upper()
+        if row_base == base and str(row.get("side", "")).lower() == str(pos_side).lower():
+            return abs(float(row.get("size_signed", 0.0) or 0.0))
+    return 0.0
+
+
 def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, executed_actions):
     """壳（第八十九刀搬至 `scripts/trader/position_exit.py`，调用期同名注入）。"""
     try:
-        from scripts.trader.scale_out import execute_scale_out_if_eligible
-        execute_scale_out_if_eligible(
-            f, curr_pos, trackers, timestamp_full, executed_actions,
+        from scripts.trader.scale_out import (
+            execute_scale_out_if_eligible, recover_scale_out_operations)
+        _scale_out_args = dict(
             okx_rest=okx_rest,
             venue_registry=venue_registry,
             record_trade=record_trade,
@@ -1021,7 +1052,22 @@ def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, execu
             close_trade_payload=_close_trade_payload,
             TAKER_FEE_RATE=TAKER_FEE_RATE,
             ensure_cloud_position_protection=ensure_cloud_position_protection,
+            save_trackers=save_trackers,
+            query_position=_query_scale_out_position,
         )
+        _scale_tracker = trackers.get(
+            f"{f.get('instId', '')}_{curr_pos.get('side', 'long')}", {})
+        _has_recovery = isinstance(_scale_tracker, dict) and (
+            isinstance(_scale_tracker.get("scale_out_operation"), dict)
+            or _scale_tracker.get("scale_out_recovery_required"))
+        if _has_recovery:
+            recover_scale_out_operations(
+                f, curr_pos, trackers, timestamp_full, executed_actions,
+                **_scale_out_args)
+        else:
+            execute_scale_out_if_eligible(
+                f, curr_pos, trackers, timestamp_full, executed_actions,
+                **_scale_out_args)
     except Exception as _so_err:
         print(f"[Scale-Out] 分批止盈判定跳过: {_so_err}")
 

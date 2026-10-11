@@ -38,6 +38,12 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
+from scripts.trader.protection_identity import (
+    extract_protection_identities,
+    normalize_typed_identity,
+    protection_identity_key,
+)
+
 try:
     from scripts.tag_markers import normalize_legacy_markers
 except ImportError:      # scripts/ 在 sys.path 上（双拼写铁律）
@@ -66,8 +72,8 @@ DEFAULT_WATCHDOG_DEBOUNCE_S = 30 * 60
 #: 覆盖缺口容忍度（相对持仓量）：小于千分之一视为浮点噪音，不修
 DEFAULT_TOLERANCE_RATIO = 0.001
 #: 判定"这条腿属于本系统"的文本标记（Gate/Binance 均写入 `t-astrasl*` / `t-astratp*`）。
-OUR_SL_MARKERS = ("astrasl", "stop")
-OUR_TP_MARKERS = ("astratp", "take_profit")
+OUR_SL_MARKERS = ("astrasl",)
+OUR_TP_MARKERS = ("astratp",)
 
 
 def _as_float(value: Any) -> Optional[float]:
@@ -88,7 +94,8 @@ def _row_text(row: Dict[str, Any]) -> str:
     raw = row.get("raw") if isinstance(row.get("raw"), dict) else {}
     parts = [
         order.get("text"), initial.get("text"), row.get("text"),
-        row.get("type"), row.get("orderType"), raw.get("orderType"),
+        row.get("type"), row.get("order_type"), row.get("orderType"),
+        raw.get("order_type"), raw.get("orderType"),
         raw.get("type"), row.get("algoType"),
         # 客户端订单号（Binance `clientAlgoId`/`clientOrderId` 等）是稳定归属标签的
         # 主要载体；新建的 Algo 单由本系统写入 `t-astrasl*` / `t-astratp*`。
@@ -100,19 +107,73 @@ def _row_text(row: Dict[str, Any]) -> str:
     return normalize_legacy_markers(" ".join(str(p) for p in parts if p).lower())
 
 
-def _leg_kind(row: Dict[str, Any]) -> Optional[str]:
-    """`"sl"` / `"tp"` / None（None = 不是本系统的保护腿）。"""
-    text = _row_text(row)
-    if "astrasl" in text:
+def _ownership_text(row: Dict[str, Any]) -> str:
+    """Return only exchange-side ownership fields, never generic order types.
+
+    `type`/`orderType` says what a conditional order does, not who owns it.
+    Mixing those fields into ownership detection was the bug that made every
+    manual Binance STOP_MARKET look like an ASTRA leg.
+    """
+    order = row.get("order") if isinstance(row.get("order"), dict) else {}
+    initial = row.get("initial") if isinstance(row.get("initial"), dict) else {}
+    raw = row.get("raw") if isinstance(row.get("raw"), dict) else {}
+    parts = [
+        order.get("text"), initial.get("text"), row.get("text"), row.get("tag"),
+        row.get("clientAlgoId"), row.get("client_algo_id"),
+        row.get("clientOrderId"), row.get("client_order_id"),
+        row.get("algoClOrdId"), row.get("algo_cl_ord_id"),
+        row.get("attachAlgoClOrdId"), row.get("attach_algo_cl_ord_id"),
+        raw.get("text"), raw.get("tag"), raw.get("clientAlgoId"),
+        raw.get("clientOrderId"), raw.get("client_algo_id"),
+        raw.get("client_order_id"), raw.get("algoClOrdId"),
+        raw.get("algo_cl_ord_id"), raw.get("attachAlgoClOrdId"),
+        raw.get("attach_algo_cl_ord_id"),
+    ]
+    return normalize_legacy_markers(" ".join(str(p) for p in parts if p).lower())
+
+
+def _ownership_evidence(row: Dict[str, Any]) -> Optional[str]:
+    """Classify explicit exchange-side ASTRA ownership evidence.
+
+    A local ledger is deliberately not considered here.  It can explain a
+    row to an operator, but it cannot authorize an irreversible exchange call.
+    """
+    text = _ownership_text(row)
+    if any(marker in text for marker in OUR_SL_MARKERS + OUR_TP_MARKERS):
+        return "tag"
+    # OKX-style attached protection identifiers may survive in normalized
+    # cross-venue fixtures; they prove system provenance but not leg kind.
+    if "astraprotect" in text:
+        return "tag"
+    return None
+
+
+def _protection_kind(row: Dict[str, Any]) -> Optional[str]:
+    """Classify the physical protection type, independent of ownership."""
+    marker_text = _ownership_text(row)
+    if "astrasl" in marker_text:
         return "sl"
-    if "astratp" in text:
+    if "astratp" in marker_text:
         return "tp"
-    # 没有我们的标签时，只认明确的类型名（Binance STOP_MARKET / TAKE_PROFIT_MARKET）
-    if "take_profit" in text:
+    order = row.get("order") if isinstance(row.get("order"), dict) else {}
+    raw = row.get("raw") if isinstance(row.get("raw"), dict) else {}
+    type_parts = [
+        row.get("type"), row.get("order_type"), row.get("orderType"),
+        row.get("algoType"), order.get("type"), order.get("orderType"),
+        raw.get("type"), raw.get("order_type"), raw.get("orderType"),
+        raw.get("algoType"),
+    ]
+    text = " ".join(str(p) for p in type_parts if p).lower()
+    if "take_profit" in text or "takeprofit" in text:
         return "tp"
     if "stop" in text:
         return "sl"
     return None
+
+
+def _leg_kind(row: Dict[str, Any]) -> Optional[str]:
+    """`"sl"` / `"tp"` / None: physical type only, never ownership."""
+    return _protection_kind(row)
 
 
 def _is_live(row: Dict[str, Any]) -> bool:
@@ -138,7 +199,7 @@ def _leg_size(row: Dict[str, Any]) -> Optional[float]:
             if num is not None and num > 0:
                 return num
     for container in (row, raw, initial):
-        for key in ("size", "quantity", "origQty", "qty", "amount"):
+        for key in ("size", "quantity", "origQty", "qty", "amount", "sz"):
             num = _as_float(container.get(key))
             if num is not None and num > 0:
                 return num
@@ -395,37 +456,29 @@ def _base_of(symbol: Any) -> str:
 
 
 def _leg_contracts(row: Dict[str, Any]) -> List[str]:
-    """该腿行里所有**可能表示合约**的串（归一后）。用于"这腿是不是本仓合约"的判断。"""
+    """Return every candidate contract string; canonicalization happens at comparison time."""
     initial = row.get("initial") if isinstance(row.get("initial"), dict) else {}
-    out = []
-    for value in (row.get("contract"), row.get("symbol"), row.get("inst_id"), row.get("instId"),
-                  initial.get("contract"), initial.get("symbol")):
-        norm = _norm_contract(value)
-        if norm:
-            out.append(norm)
-    return out
+    raw = row.get("raw") if isinstance(row.get("raw"), dict) else {}
+    return [str(value) for value in (
+        row.get("contract"), row.get("symbol"), row.get("base"),
+        row.get("inst_id"), row.get("instId"), initial.get("contract"),
+        initial.get("symbol"), raw.get("symbol"), raw.get("contract"))
+        if value not in (None, "")]
 
 
 def _leg_matches_base(row: Dict[str, Any], base: str) -> bool:
-    """这条腿是否属于 `base` 这个币种。
-
-    ⚠️ 用"归一后 **前缀相等**"而不是原来的"原始串子串包含"：
-    子串包含会把 `WBTCUSDT`（包装币）当成 `BTC` 的腿；前缀相等不会。
-    两种常见形态都覆盖：`base="BTC"` ↔ `BTCUSDT`；`base="BTCUSDT"` ↔ `BTC_USDT`。
-    """
-    if not base:
+    """Match only exact canonical bases; never use prefix matching."""
+    wanted = _base_of(base)
+    if not wanted:
         return True
-    for norm in _leg_contracts(row):
-        if norm == base or norm.startswith(base) or base.startswith(norm):
-            return True
-    return False
-
+    return any(_base_of(candidate) == wanted for candidate in _leg_contracts(row))
 
 def scan_protective_orders(rows: Optional[Sequence[Dict[str, Any]]], *,
                            symbol: str,
                            pos_side: str,
                            position_size: float,
                            now_s: float,
+                           venue: Optional[str] = None,
                            renew_within_s: float = DEFAULT_RENEW_WITHIN_S,
                            tolerance_ratio: float = DEFAULT_TOLERANCE_RATIO,
                            require_symbol_match: bool = False) -> Dict[str, Any]:
@@ -474,10 +527,24 @@ def scan_protective_orders(rows: Optional[Sequence[Dict[str, Any]]], *,
         # 今天**不可达**（真机核对：Gate 6/6、Binance 18/18 都能读出方向）。
         # 将来若接入不报方向的所，这里应改判 `coverage_unknown`（而不是继续默认算覆盖）。
 
+        ownership_evidence = _ownership_evidence(row)
+        raw = row.get("raw") if isinstance(row.get("raw"), dict) else {}
         leg = {
             "id": str(row.get("id") or row.get("algo_id") or row.get("algoId")
                       or row.get("order_id") or row.get("ordId") or ""),
+            "id_string": str(row.get("id_string") or raw.get("id_string") or ""),
+            "algo_id": str(row.get("algo_id") or row.get("algoId")
+                             or raw.get("algoId") or ""),
+            "client_algo_id": str(row.get("client_algo_id") or row.get("clientAlgoId")
+                                    or raw.get("clientAlgoId") or ""),
+            "order_id": str(row.get("order_id") or row.get("ordId") or ""),
             "kind": kind,
+            "physical_kind": kind,
+            "ownership_evidence": ownership_evidence,
+            "owned": ownership_evidence == "tag",
+            "protection_identities": extract_protection_identities(
+                row, venue=_leg_venue(row, venue),
+                ownership_evidence=ownership_evidence, protection_kind=kind),
             "trigger_price": _trigger_price(row),
             # 第一百六十七刀：触发价类型（读不到 ⇒ None，由展示层披露成 unknown）
             "trigger_px_type": trigger_px_type(row),
@@ -509,10 +576,11 @@ def scan_protective_orders(rows: Optional[Sequence[Dict[str, Any]]], *,
 
         if exp_state in ("relative", "absolute"):
             assert expires_at is not None
-            if expires_at <= float(now_s):
-                expired.append(leg)
-            elif expires_at - float(now_s) <= float(renew_within_s):
-                expiring.append(leg)
+            if leg.get("owned"):
+                if expires_at <= float(now_s):
+                    expired.append(leg)
+                elif expires_at - float(now_s) <= float(renew_within_s):
+                    expiring.append(leg)
         elif exp_state == "unknown":
             # 没有到期字段：可能是"永不过期"之外的形态，也可能只是取数缺字段。
             # 不可判定 ⇒ 只登记，不擅自续期（续期是有成本的写操作），但也不当作安全。
@@ -552,10 +620,65 @@ def scan_protective_orders(rows: Optional[Sequence[Dict[str, Any]]], *,
     }
 
 
+def _leg_venue(row: Any, explicit: Optional[str] = None) -> str:
+    if explicit:
+        return str(explicit).strip().lower()
+    if not isinstance(row, dict):
+        return ""
+    raw = row.get("raw") if isinstance(row.get("raw"), dict) else {}
+    value = str(row.get("venue") or row.get("exchange") or raw.get("venue") or "").strip().lower()
+    if value in {"binance", "gate", "okx"}:
+        return value
+    if any(container.get(key) not in (None, "") for container in (row, raw)
+           for key in ("algoClOrdId", "algo_cl_ord_id", "attachAlgoClOrdId")):
+        return "okx"
+    if any(container.get(key) not in (None, "") for container in (row, raw)
+           for key in ("clientAlgoId", "client_algo_id")):
+        return "binance"
+    if any(container.get(key) not in (None, "") for container in (row, raw)
+           for key in ("id_string",)):
+        return "gate"
+    if isinstance(row.get("initial"), dict) or isinstance(row.get("trigger"), dict):
+        return "gate"
+    if row.get("instId") or raw.get("instId"):
+        return "okx"
+    if row.get("symbol") or raw.get("symbol"):
+        return "binance"
+    return ""
+
+
+def _adapter_venue(ad: Any, explicit: Optional[str] = None) -> str:
+    """Resolve a venue namespace; adapter capability probing is legacy-only."""
+    if isinstance(explicit, str) and explicit.strip():
+        return explicit.strip().lower()
+    capability = getattr(ad, "capabilities", None)
+    value = getattr(capability, "venue", None) or getattr(ad, "venue", None)
+    if isinstance(value, str) and value.strip():
+        return value.strip().lower()
+    # Older injected test/adapter wrappers do not expose their venue. Infer only
+    # the distinctive protection API, never the identity kind or its value.
+    if callable(getattr(ad, "cancel_price_order", None)):
+        return "gate"
+    if callable(getattr(ad, "cancel_algo_order", None)):
+        return "binance"
+    return ""
+
+
+def _identity_records_for_row(row: Any, venue: str) -> List[Dict[str, Any]]:
+    if not isinstance(row, dict):
+        return []
+    evidence = _ownership_evidence(row)
+    kind = _protection_kind(row)
+    return extract_protection_identities(
+        row, venue=_leg_venue(row, venue),
+        ownership_evidence=evidence, protection_kind=kind)
+
+
 def ensure_venue_protection(ad: Any, *, symbol: str, pos_side: str, position_size: float,
                             sl_px: Optional[float] = None,
                             tp_px: Optional[float] = None,
                             now_s: float,
+                            venue: Optional[str] = None,
                             expiration_s: int = 604800,
                             renew_within_s: float = DEFAULT_RENEW_WITHIN_S,
                             tolerance_ratio: float = DEFAULT_TOLERANCE_RATIO,
@@ -574,8 +697,12 @@ def ensure_venue_protection(ad: Any, *, symbol: str, pos_side: str, position_siz
       但 `ok=False` 提醒调用方"续期没成，得重试或告警"）；
     - 任何一步失败都**不回滚**已生效的保护（宁可双、不可裸），把事实写进 detail。
     """
+    venue_name = _adapter_venue(ad, venue)
     try:
-        rows = ad.list_protective_orders(symbol) or []
+        rows = ad.list_protective_orders(symbol)
+        if not isinstance(rows, (list, tuple)):
+            raise RuntimeError(f"保护单列表结构异常: {type(rows).__name__}")
+        rows = list(rows)
     except Exception as exc:
         # 读不到 ≠ 没有：不可判定时绝不去写单（可能重复挂），如实上报。
         return {"ok": False, "protected_now": None, "stage": "list",
@@ -587,6 +714,7 @@ def ensure_venue_protection(ad: Any, *, symbol: str, pos_side: str, position_siz
     # 返回全量腿，别的币的腿也不会被算进这个仓位的覆盖（`symbol` 常是合成 id，见 `_base_of`）。
     scan = scan_protective_orders(rows, symbol=symbol, pos_side=pos_side,
                                   position_size=position_size, now_s=now_s,
+                                  venue=venue_name,
                                   renew_within_s=renew_within_s,
                                   tolerance_ratio=tolerance_ratio,
                                   require_symbol_match=True)
@@ -606,11 +734,11 @@ def ensure_venue_protection(ad: Any, *, symbol: str, pos_side: str, position_siz
     resolved_sl = sl_px
     if resolved_sl is None:
         resolved_sl = next((leg["trigger_price"] for leg in scan["ours"]
-                            if leg["kind"] == "sl" and leg["trigger_price"]), None)
+                            if leg.get("owned") and leg["kind"] == "sl" and leg["trigger_price"]), None)
     resolved_tp = tp_px
     if resolved_tp is None:
         resolved_tp = next((leg["trigger_price"] for leg in scan["ours"]
-                            if leg["kind"] == "tp" and leg["trigger_price"]), None)
+                            if leg.get("owned") and leg["kind"] == "tp" and leg["trigger_price"]), None)
     if resolved_sl is None:
         result.update(ok=False, stage="no_price",
                       detail="既未传入止损价、现有腿上也没有触发价 —— 不猜价位，"
@@ -637,29 +765,129 @@ def ensure_venue_protection(ad: Any, *, symbol: str, pos_side: str, position_siz
 
     result["placed"] = placed
     result["stage"] = "placed"
+
+    # A successful attach response is only an acknowledgement. Relist and prove
+    # that new, ASTRA-tagged server identities now cover the target position.
+    try:
+        after_attach = ad.list_protective_orders(symbol)
+        if not isinstance(after_attach, (list, tuple)):
+            raise RuntimeError(f"挂载后保护单列表结构异常: {type(after_attach).__name__}")
+        after_attach = list(after_attach)
+        before_keys = {
+            key
+            for row in rows
+            for identity in _identity_records_for_row(row, venue_name)
+            for key in [protection_identity_key(identity)]
+            if key is not None
+        }
+        replacement_rows = []
+        key_owners: Dict[tuple, int] = {}
+        for row in after_attach:
+            if not isinstance(row, dict) or _ownership_evidence(row) != "tag":
+                continue
+            if not _leg_matches_base(row, _base_of(symbol)):
+                continue
+            row_side = _leg_position_side(row)
+            if row_side != pos_side:
+                continue
+            identities = _identity_records_for_row(row, venue_name)
+            keys = {key for item in identities
+                    for key in [protection_identity_key(item)] if key is not None}
+            fresh = keys - before_keys
+            if not fresh:
+                continue
+            replacement_rows.append((row, fresh))
+            for key in fresh:
+                key_owners[key] = key_owners.get(key, 0) + 1
+
+        if any(count != 1 for count in key_owners.values()):
+            raise RuntimeError("新保护腿服务端身份重复，无法唯一核验")
+        after_scan = scan_protective_orders(
+            after_attach, symbol=symbol, pos_side=pos_side, position_size=position_size,
+            now_s=now_s, venue=venue_name, renew_within_s=renew_within_s,
+            tolerance_ratio=tolerance_ratio, require_symbol_match=True)
+        new_kinds = {
+            _protection_kind(row): row for row, _keys in replacement_rows
+            if _protection_kind(row) in {"sl", "tp"}
+        }
+
+        def _trigger_matches(row: Dict[str, Any], target: Optional[float]) -> bool:
+            actual = _trigger_price(row)
+            if target is None:
+                return True
+            return actual is not None and abs(actual - float(target)) <= max(1e-8, abs(float(target)) * 1e-4)
+
+        new_sl_rows = [row for row, _keys in replacement_rows
+                       if _protection_kind(row) == "sl"]
+        new_tp_rows = [row for row, _keys in replacement_rows
+                       if _protection_kind(row) == "tp"]
+        if not any(_trigger_matches(row, float(resolved_sl)) for row in new_sl_rows):
+            raise RuntimeError("挂载后未发现带 ASTRA 标记、方向正确且止损价匹配的新止损腿")
+        if resolved_tp is not None and not any(
+                _trigger_matches(row, float(resolved_tp)) for row in new_tp_rows):
+            raise RuntimeError("挂载后未发现带 ASTRA 标记、方向正确且止盈价匹配的新止盈腿")
+        if not after_scan.get("has_live_sl") or after_scan.get("coverage_ok") is not True:
+            raise RuntimeError("挂载后保护列表未证明止损腿覆盖完整余仓")
+    except Exception as verify_exc:
+        result.update(ok=False, stage="verify",
+                      detail=f"新保护腿回读核验失败，旧腿保留: {verify_exc}",
+                      protected_now=protected_now,
+                      kept_old=[leg["id"] for leg in scan["ours"] if leg.get("id")])
+        return result
+
+    result["stage"] = "placed"
     result["protected_now"] = True
 
-    # ② 再撤旧（只撤**我们自己的**临期/已过期腿；人工腿永不触碰）
-    stale_ids = [leg["id"] for leg in (scan["expired"] + scan["expiring"]) if leg["id"]]
-    new_ids = {str(v) for v in (placed or {}).values() if v}
+    # ② 再撤旧（只撤**我们自己的**临期/已过期腿；人工腿永不触碰）。
+    stale_legs = [leg for leg in (scan["expired"] + scan["expiring"])
+                  if leg.get("owned") and leg.get("protection_identities")]
+    new_keys = {key for _row, keys in replacement_rows for key in keys}
+
     cancelled: List[str] = []
     kept_old: List[str] = []
-    for oid in stale_ids:
-        if oid in new_ids:
+    for leg in stale_legs:
+        leg_id = str(leg.get("id") or "").strip()
+        old_identities = [normalize_typed_identity(identity)
+                          for identity in (leg.get("protection_identities") or [])]
+        old_identities = [identity for identity in old_identities if identity]
+        old_keys = {key for identity in old_identities
+                    for key in [protection_identity_key(identity)] if key is not None}
+        if not old_identities or old_keys & new_keys:
+            kept_old.append(leg_id or "<unknown identity>")
+            log(f"[跨所保护续期] warn {symbol} 旧腿身份缺失/与新腿冲突，保守保留并报告")
             continue
         try:
-            if not cancel_protective_leg(ad, oid, symbol=symbol):
-                raise RuntimeError("该所适配器没有可用的撤腿方法")
-            cancelled.append(oid)
+            # Binance/Gate deletion APIs are selected by typed resource+kind.
+            # OKX has a separate service path and is not routed through this helper.
+            identity = old_identities[0]
+            if not cancel_protective_leg(ad, identity["identity_value"],
+                                         symbol=symbol, identity=identity,
+                                         venue=venue_name):
+                raise RuntimeError("该身份类型没有对应的条件单撤销能力")
+
+            after = ad.list_protective_orders(symbol)
+            if not isinstance(after, (list, tuple)):
+                raise RuntimeError(f"撤后列表结构异常: {type(after).__name__}")
+            remaining_keys = {
+                key
+                for row in after
+                for item in _identity_records_for_row(row, venue_name)
+                for key in [protection_identity_key(item)]
+                if key is not None
+            }
+            if old_keys & remaining_keys:
+                raise RuntimeError("撤旧后该腿的 typed identity 仍在交易所列表")
+            cancelled.append(leg_id or identity["identity_value"])
         except Exception as exc:
             # 宁可双、不可裸：撤旧失败不回滚新腿，只登记。
-            kept_old.append(oid)
-            log(f"[跨所保护续期] warn {symbol} 撤旧腿失败 {oid}: {exc}")
+            kept_old.append(leg_id or old_identities[0]["identity_value"])
+            log(f"[跨所保护续期] warn {symbol} 撤旧腿失败 {leg_id}: {exc}")
 
     result["cancelled"] = cancelled
     result["kept_old"] = kept_old
     action = "续期" if scan["needs_renew"] else "补挂"
-    detail = f"{action}完成：新腿 {placed}，撤旧 {len(cancelled)}/{len(stale_ids)}"
+    result["ok"] = not kept_old
+    detail = f"{action}{'完成' if not kept_old else '部分完成'}：新腿已回读核验，撤旧 {len(cancelled)}/{len(stale_legs)}"
     if kept_old:
         detail += f"，{len(kept_old)} 条旧腿未撤（新腿已生效，宁可双不可裸）"
     result["detail"] = detail
@@ -669,7 +897,8 @@ def ensure_venue_protection(ad: Any, *, symbol: str, pos_side: str, position_siz
 def attribute_protective_orders(positions: Optional[Sequence[Dict[str, Any]]],
                                legs: Optional[Sequence[Dict[str, Any]]],
                                ledger_rows: Optional[Sequence[Dict[str, Any]]] = None,
-                               *, tolerance_ratio: float = DEFAULT_TOLERANCE_RATIO
+                               *, tolerance_ratio: float = DEFAULT_TOLERANCE_RATIO,
+                               venue: Optional[str] = None
                                ) -> Dict[str, Any]:
     """逐腿归属：这条保护腿是**给当前哪个仓**挂的？纯判定，无 IO。
 
@@ -689,17 +918,18 @@ def attribute_protective_orders(positions: Optional[Sequence[Dict[str, Any]]],
     | evidence | 含义 | 可否自动清理 |
     |---|---|---|
     | `tag` | 带本系统标签（Gate `t-astrasl/t-astratp`）⇒ **可证明**是我们的 | ✅ |
-    | `ledger` | 无标签，但台账有**同向同量**记录 ⇒ 高度可能 | ✅ |
+    | `ledger` | 无标签，但台账有**同向同量**记录 ⇒ 仅作审计/人工复核线索 | ❌ 不得自动清理 |
     | `None` | 两者都没有 ⇒ **归属不可判定** | ❌ 绝不自动撤（可能是用户手单） |
 
     ## 分桶
 
     | state | 含义 |
     |---|---|
-    | `matched` | 有活动仓，腿保护它（整仓平腿 或 张数与仓量相符） |
+    | `matched` | 有活动仓，且腿有交易所侧 ASTRA ownership proof（整仓平腿或张数相符） |
+    | `matched_unattributed` | 物理上匹配活动仓，但没有交易所侧 ownership proof；只报告，不自动撤 |
     | `size_mismatch` | 有活动仓，但张数不符（且非整仓平）⇒ 多半旧仓遗留 |
     | `side_mismatch` | 有活动仓，但腿保护的是**另一个方向** ⇒ 来自已反手的旧仓 |
-    | `orphan_attributed` | 无活动仓，但证据为 `tag`/`ledger` |
+    | `orphan_attributed` | 无活动仓，但有台账线索或交易所侧 ASTRA ownership proof；只有 `tag` 可进入自动清理候选 |
     | `orphan_unattributed` | 无活动仓且无证据 ⇒ 不可判定 |
     | `unparsed` | 连币种都读不出的行 ⇒ 单独登记（**不得**伪装成"不可判定孤儿"） |
     | `foreign` | 无本系统保护腿特征（标签/类型名都不匹配） |
@@ -721,7 +951,7 @@ def attribute_protective_orders(positions: Optional[Sequence[Dict[str, Any]]],
             pos_count_by_base[base] = pos_count_by_base.get(base, 0) + 1
             pos_by_base.setdefault(base, p)
 
-    def _ledger_evidence(base: str, want_pos_side: Optional[str], size: float) -> Optional[Dict[str, Any]]:
+    def _ledger_evidence(base: str, want_pos_side: Optional[str], size: float, leg_venue: str) -> Optional[Dict[str, Any]]:
         """台账里同币、同向、同量的记录（含已平）→ 证据（可能为 None）。"""
         for r in reversed(list(ledger_rows or [])):
             if not isinstance(r, dict):
@@ -735,7 +965,15 @@ def attribute_protective_orders(positions: Optional[Sequence[Dict[str, Any]]],
                 r_side = "short"
             elif r_side in ("buy",):
                 r_side = "long"
-            if want_pos_side and r_side and r_side != want_pos_side:
+            status = str(r.get("status") or r.get("trade_status") or "").strip().lower()
+            if status not in {"closed", "close", "filled", "done"}:
+                continue
+            if r_side not in {"long", "short"} or want_pos_side not in {"long", "short"}:
+                continue
+            if r_side != want_pos_side:
+                continue
+            ledger_venue = str(r.get("venue") or r.get("exchange") or "").strip().lower()
+            if not leg_venue or not ledger_venue or leg_venue != ledger_venue:
                 continue
             r_sz = _as_float(r.get("sz") if r.get("sz") is not None else r.get("size"))
             if r_sz is None or size <= 0:
@@ -746,8 +984,10 @@ def attribute_protective_orders(positions: Optional[Sequence[Dict[str, Any]]],
         return None
 
     buckets: Dict[str, List[Dict[str, Any]]] = {
-        "matched": [], "size_mismatch": [], "side_mismatch": [],
-        "orphan_attributed": [], "orphan_unattributed": [], "unparsed": [], "foreign": []}
+        "matched": [], "matched_unattributed": [], "size_mismatch": [],
+        "side_mismatch": [], "ambiguous_position": [],
+        "orphan_attributed": [], "orphan_unattributed": [],
+        "unparsed": [], "foreign": []}
 
     for row in (legs or []):
         if not isinstance(row, dict):
@@ -764,59 +1004,112 @@ def attribute_protective_orders(positions: Optional[Sequence[Dict[str, Any]]],
         full_close = _is_full_close(row)
         size = abs(_as_float(_leg_size(row)) or 0.0)
         leg_side = _leg_position_side(row)
-        tagged = ("astrasl" in _row_text(row)) or ("astratp" in _row_text(row))
+        evidence = _ownership_evidence(row)
+        tagged = evidence == "tag"
+        raw_row = row.get("raw") if isinstance(row.get("raw"), dict) else {}
         entry = {"symbol": base, "kind": kind, "protects": leg_side,
                  "size": size, "full_close": bool(full_close),
                  "trigger_price": _trigger_price(row),
+                 "venue": _leg_venue(row, venue),
+                 "protection_identities": extract_protection_identities(
+                     row, venue=_leg_venue(row, venue), ownership_evidence=evidence,
+                     protection_kind=kind),
+                 # 保留所需的撤单身份：Binance 可退回 clientAlgoId，Gate
+                 # 优先使用 id_string 避免 int64 在中间层失真。
                  "id": str(row.get("id") or row.get("algo_id") or row.get("algoId")
-                           or row.get("order_id") or "")}
+                           or row.get("id_string") or row.get("client_algo_id")
+                           or row.get("clientAlgoId") or row.get("algoClOrdId")
+                           or row.get("order_id") or row.get("ordId") or ""),
+                 "id_string": str(row.get("id_string") or raw_row.get("id_string") or ""),
+                 "algo_id": str(row.get("algo_id") or row.get("algoId")
+                                  or raw_row.get("algoId") or ""),
+                 "client_algo_id": str(row.get("client_algo_id") or row.get("clientAlgoId")
+                                         or raw_row.get("clientAlgoId") or ""),
+                 "order_id": str(row.get("order_id") or row.get("ordId") or "")}
+
+        if pos_count_by_base.get(base, 0) > 1:
+            buckets["ambiguous_position"].append(dict(
+                entry, evidence=evidence, reason="同币多条活动仓/方向记录，无法唯一归属"))
+            continue
 
         pos = pos_by_base.get(base)
         if pos is not None:
             pos_side = str(pos.get("side") or "").lower() or None
             pos_size = abs(_as_float(pos.get("size_signed") or pos.get("pos")) or 0.0)
             if leg_side and pos_side and leg_side != pos_side:
-                buckets["side_mismatch"].append(dict(entry, position_side=pos_side,
+                buckets["side_mismatch"].append(dict(entry, evidence=evidence,
+                                                     position_side=pos_side,
                                                      position_size=pos_size))
                 continue
             if full_close:
-                buckets["matched"].append(dict(entry, position_size=pos_size))
+                bucket = "matched" if tagged else "matched_unattributed"
+                buckets[bucket].append(dict(entry, evidence=evidence,
+                                            position_size=pos_size))
                 continue
             same = size > 0 and pos_size > 0 and abs(size - pos_size) <= max(1e-6, pos_size * tol)
-            (buckets["matched"] if same else buckets["size_mismatch"]).append(
-                dict(entry, position_size=pos_size))
+            bucket = ("matched" if tagged else "matched_unattributed") if same else "size_mismatch"
+            buckets[bucket].append(dict(entry, evidence=evidence,
+                                        position_size=pos_size))
             continue
 
-        # 无活动仓 → 孤儿；证据优先级 tag > ledger > 无
+        # 无活动仓 → 孤儿；台账只能作为审计线索，不能授权撤销。
         if tagged:
             buckets["orphan_attributed"].append(dict(entry, evidence="tag"))
             continue
-        ev = _ledger_evidence(base, leg_side, size)
+        leg_venue = str(row.get("venue") or raw_row.get("venue") or "").strip().lower()
+        ev = _ledger_evidence(base, leg_side, size, leg_venue)
         if ev is not None:
             buckets["orphan_attributed"].append(dict(entry, evidence="ledger", ledger=ev))
         else:
-            buckets["orphan_unattributed"].append(entry)
+            buckets["orphan_unattributed"].append(dict(entry, evidence=None))
 
-    cleanup = (buckets["orphan_attributed"] + buckets["size_mismatch"]
-               + buckets["side_mismatch"])
+    # A duplicate typed identity may refer to more than one live exchange row.
+    # Such rows cannot authorize deletion, even when every row carries an ASTRA tag.
+    identity_rows: Dict[tuple, List[Dict[str, Any]]] = {}
+    for bucket_rows in buckets.values():
+        for leg in bucket_rows:
+            seen_for_leg = set()
+            for identity in (leg.get("protection_identities") or []):
+                key = protection_identity_key(identity)
+                if key is not None and key not in seen_for_leg:
+                    seen_for_leg.add(key)
+                    identity_rows.setdefault(key, []).append(leg)
+    duplicate_keys = {key for key, owners in identity_rows.items() if len(owners) > 1}
+    duplicate_entries = [dict(leg, reason="多个 live 条件单共享同一 typed identity，保守保留")
+                         for key in duplicate_keys for leg in identity_rows[key]]
+
+    # Only exchange-side ownership plus an unambiguous typed server identity can
+    # authorize an automatic cancellation.
+    cleanup = []
+    for leg in buckets["orphan_attributed"]:
+        keys = {key for identity in (leg.get("protection_identities") or [])
+                for key in [protection_identity_key(identity)] if key is not None}
+        if str(leg.get("evidence")) == "tag" and keys and not (keys & duplicate_keys):
+            cleanup.append(leg)
     return {
         **buckets,
-        #: 同币多仓（>1 行）的币种：腿会被对到**首个**仓位上 ⇒ 可能张冠李戴，须人工复核
         "ambiguous_positions": sorted(b for b, n in pos_count_by_base.items() if n > 1),
+        "duplicate_identities": duplicate_entries,
         "counts": {k: len(v) for k, v in buckets.items()},
-        #: 可安全清理的候选（**仅当**调用方要清理时）：可归因孤儿 + 旧量/旧向腿
         "cleanup_candidates": cleanup,
-        #: 需要人看但不能自动动的（归属不可判定 / 读不出的行）
-        "needs_human": buckets["orphan_unattributed"] + buckets["unparsed"],
+        "needs_human": ([leg for leg in buckets["orphan_attributed"]
+                         if str(leg.get("evidence")) != "tag"]
+                        + buckets["matched_unattributed"]
+                        + buckets["ambiguous_position"]
+                        + buckets["orphan_unattributed"] + buckets["unparsed"]
+                        + duplicate_entries),
         "legs_total": sum(len(v) for v in buckets.values()),
         "orphan_total": len(buckets["orphan_attributed"]) + len(buckets["orphan_unattributed"]),
+        "ledger_only": [leg for leg in buckets["orphan_attributed"]
+                        if str(leg.get("evidence")) == "ledger"],
     }
 
 
 def select_legs_to_cancel_after_close(closed_position: Optional[Dict[str, Any]],
                                       legs: Optional[Sequence[Dict[str, Any]]],
                                       ledger_rows: Optional[Sequence[Dict[str, Any]]] = None,
-                                      *, tolerance_ratio: float = DEFAULT_TOLERANCE_RATIO
+                                      *, tolerance_ratio: float = DEFAULT_TOLERANCE_RATIO,
+                                      venue: Optional[str] = None
                                       ) -> Dict[str, Any]:
     """**平仓已核验归零之后**，挑出该撤的腿（纯选择，不发单）。
 
@@ -837,31 +1130,63 @@ def select_legs_to_cancel_after_close(closed_position: Optional[Dict[str, Any]],
     """
     r = attribute_protective_orders([closed_position] if closed_position else [],
                                    legs, ledger_rows,
-                                   tolerance_ratio=tolerance_ratio)
+                                   tolerance_ratio=tolerance_ratio, venue=venue)
     out: List[Dict[str, Any]] = []
+    duplicate_keys = {
+        key
+        for leg in (r.get("duplicate_identities") or [])
+        for identity in (leg.get("protection_identities") or [])
+        for key in [protection_identity_key(identity)]
+        if key is not None
+    }
+
+    def _has_safe_identity(leg: Dict[str, Any]) -> bool:
+        keys = {key for identity in (leg.get("protection_identities") or [])
+                for key in [protection_identity_key(identity)] if key is not None}
+        return bool(keys) and not (keys & duplicate_keys)
+
+    def _candidate(leg: Dict[str, Any], reason: str) -> Dict[str, Any]:
+        # Keep the full cancellation identity instead of collapsing every row
+        # to `id`: Binance may only expose clientAlgoId and Gate exposes id_string.
+        return {"id": leg.get("id"), "id_string": leg.get("id_string"),
+                "algo_id": leg.get("algo_id"),
+                "client_algo_id": leg.get("client_algo_id"),
+                "order_id": leg.get("order_id"),
+                "protection_identities": list(leg.get("protection_identities") or []),
+                "symbol": leg.get("symbol"), "kind": leg.get("kind"),
+                "reason": reason}
+
     for leg in r["matched"]:
-        out.append({"id": leg.get("id"), "symbol": leg.get("symbol"), "kind": leg.get("kind"),
-                    "reason": "matched"})
+        if _has_safe_identity(leg):
+            out.append(_candidate(leg, "matched"))
     for leg in r["orphan_attributed"]:
-        if str(leg.get("evidence")) == "tag":
-            out.append({"id": leg.get("id"), "symbol": leg.get("symbol"), "kind": leg.get("kind"),
-                        "reason": "tag"})
-    ids = [x["id"] for x in out if x.get("id")]
+        if str(leg.get("evidence")) == "tag" and _has_safe_identity(leg):
+            out.append(_candidate(leg, "tag"))
+    ids = [str(x.get("id_string") or x.get("id") or x.get("algo_id")
+                or x.get("client_algo_id") or x.get("order_id") or "")
+           for x in out
+           if str(x.get("id_string") or x.get("id") or x.get("algo_id")
+                  or x.get("client_algo_id") or x.get("order_id") or "")]
     return {
         "to_cancel": out,
         "ids": ids,
         "not_touched": {
+            "matched_unattributed": r["matched_unattributed"],
             "size_mismatch": r["size_mismatch"],
             "side_mismatch": r["side_mismatch"],
+            "ambiguous_position": r["ambiguous_position"],
+            "duplicate_identities": r.get("duplicate_identities", []),
+            "orphan_attributed_ledger": r.get("ledger_only", []),
             "orphan_unattributed": r["orphan_unattributed"],
             "unparsed": r["unparsed"],
             "foreign": r["foreign"],
         },
         "counts": {
             "to_cancel": len(out),
-            "not_touched": sum(len(r[k]) for k in
-                               ("size_mismatch", "side_mismatch", "orphan_unattributed",
-                                "unparsed", "foreign")),
+            "not_touched": sum(len(r.get(k) or []) for k in
+                               ("matched_unattributed", "size_mismatch", "side_mismatch",
+                                "ambiguous_position", "duplicate_identities", "ledger_only",
+                                "orphan_unattributed", "unparsed", "foreign")),
         },
         "attribution": r,
     }
@@ -910,30 +1235,97 @@ def read_ledger_rows(path: Any, *, log: Any = print) -> Optional[List[Dict[str, 
     return [r for r in data if isinstance(r, dict)]
 
 
-def cancel_protective_leg(ad: Any, leg_id: Any, *, symbol: Any = None) -> bool:
-    """按**能力探针**撤一条保护腿；撤不动返回 False（不抛）。
+def _cancel_response_is_explicit_success(result: Any) -> bool:
+    """Return True only for an exchange response with terminal success semantics.
 
-    ⚠️ 为什么必须有这个探针（第一百九十一刀，真机核对）：三个适配器的撤腿能力**各不相同** ——
-    `cancel_price_order` 只有 **Gate** 有，`cancel_algo_order` 只有 **Binance** 有，
-    OKX 走 `okx_rest` 自己的路径。本模块的跨所孤儿腿清理此前直接 `ad.cancel_price_order(leg_id)`，
-    于是对 **Binance 恒失败**（`AttributeError` 被登记成 error、腿留着）——
-    而 Binance 恰恰是孤儿腿最多的那个所（真机：17 条腿）。本文件另一处早就用了
-    `hasattr` 阶梯 ⇒ 同一语义两种写法，这里统一成一个探针。
-
-    顺序与既有实现一致：`cancel_price_order` → `cancel_algo_order` → `cancel_order(symbol, id)`。
+    A method returning without raising is not proof that the conditional order
+    disappeared.  Gate returns a finished/cancelled order object, Binance
+    returns an explicit success code, and test/dry adapters must model one of
+    those shapes.  ``None``/empty/opaque responses remain ambiguous.
     """
-    leg_id = str(leg_id or "")
-    if not leg_id:
+    if not isinstance(result, dict) or not result:
         return False
-    if hasattr(ad, "cancel_price_order"):
-        ad.cancel_price_order(leg_id)
+    for key in ("error", "error_code"):
+        value = result.get(key)
+        if value not in (None, "", 0, "0"):
+            return False
+    for key in ("code", "sCode"):
+        if key not in result:
+            continue
+        value = result.get(key)
+        if value in (0, "0") or (key == "code" and value in (200, "200")):
+            return True
+        if value not in (None, ""):
+            return False
+    if result.get("ok") is True or result.get("success") is True or result.get("complete") is True:
         return True
-    if hasattr(ad, "cancel_algo_order"):
-        ad.cancel_algo_order(algo_id=leg_id)
-        return True
-    if symbol is not None and hasattr(ad, "cancel_order"):
-        ad.cancel_order(symbol, leg_id)
-        return True
+    status = str(result.get("status") or result.get("algoStatus") or "").strip().lower()
+    finish_as = str(result.get("finish_as") or result.get("finishAs") or "").strip().lower()
+    return (status in {"canceled", "cancelled", "closed", "finished", "expired"}
+            or finish_as in {"canceled", "cancelled", "succeeded", "success"})
+
+
+def cancel_protective_leg(ad: Any, leg_id: Any, *, symbol: Any = None,
+                          algo_id: Any = None, client_algo_id: Any = None,
+                          id_string: Any = None, identity: Any = None,
+                          venue: Optional[str] = None) -> bool:
+    """Cancel by the exact typed resource family and identity namespace.
+
+    Legacy arguments remain accepted for existing Gate/Binance call sites, but
+    they are resolved only through the venue-specific conditional-order API.
+    Ordinary ``cancel_order`` is never a fallback.
+    """
+    legacy_id = str(leg_id or "").strip()
+    if identity is not None:
+        typed = normalize_typed_identity(identity)
+        if typed is None:
+            return False
+        venue_name = _adapter_venue(ad, venue or typed["venue"])
+        if venue_name != typed["venue"]:
+            return False
+        value = typed["identity_value"]
+        if typed["venue"] == "gate" and typed["resource_family"] == "price_order" \
+                and typed["identity_kind"] in {"id_string", "id"}:
+            cancel = getattr(ad, "cancel_price_order", None)
+            if not callable(cancel):
+                return False
+            return _cancel_response_is_explicit_success(cancel(value))
+        if typed["venue"] == "binance" and typed["resource_family"] == "algo_order":
+            cancel = getattr(ad, "cancel_algo_order", None)
+            if not callable(cancel):
+                return False
+            if typed["identity_kind"] == "algo_id":
+                response = cancel(algo_id=value)
+            elif typed["identity_kind"] == "client_algo_id":
+                response = cancel(client_algo_id=value)
+            else:
+                return False
+            return _cancel_response_is_explicit_success(response)
+        # OKX algo IDs require its dedicated service call, not a venue adapter's
+        # ordinary order endpoint.
+        return False
+
+    if not legacy_id and not id_string and not algo_id and not client_algo_id:
+        return False
+    venue_name = _adapter_venue(ad, venue)
+    if venue_name == "gate":
+        cancel = getattr(ad, "cancel_price_order", None)
+        if not callable(cancel):
+            return False
+        return _cancel_response_is_explicit_success(cancel(str(id_string or legacy_id).strip()))
+    if venue_name == "binance":
+        cancel = getattr(ad, "cancel_algo_order", None)
+        if not callable(cancel):
+            return False
+        numeric = str(algo_id or "").strip()
+        client = str(client_algo_id or "").strip()
+        if numeric:
+            response = cancel(algo_id=numeric)
+        elif client:
+            response = cancel(client_algo_id=client)
+        else:
+            return False
+        return _cancel_response_is_explicit_success(response)
     return False
 
 
@@ -967,12 +1359,12 @@ def cancel_orphan_attributed_legs(ad: Any, *,
     for row in (positions or []):
         if not isinstance(row, dict):
             continue
-        base = str(row.get("base") or row.get("symbol") or "").split("_")[0].split("-")[0].upper()
+        base = _base_of(row.get("base") or row.get("symbol") or row.get("inst_id") or row.get("instId"))
         if base:
             pos_by_base.setdefault(base, []).append(row)
 
     for symbol in symbols:
-        base = str(symbol or "").split("_")[0].split("-")[0].upper()
+        base = _base_of(symbol)
         if not base:
             report["skipped"].append({"symbol": symbol, "why": "币种解析不出"})
             continue
@@ -988,30 +1380,55 @@ def cancel_orphan_attributed_legs(ad: Any, *,
             report["errors"].append({"symbol": base, "stage": "list",
                                      "detail": f"{type(exc).__name__}: {exc}"})
             continue
-        att = attribute_protective_orders([], legs, ledger_rows)
-        # 归属层自己给了 counts（且含 cleanup_candidates/needs_human 等派生键）⇒ 直接用，不重算
+        att = attribute_protective_orders([], legs, ledger_rows,
+                                           venue=_adapter_venue(ad))
+        # 归属层输出 typed identity 唯一且 ASTRA-tagged 的 cleanup_candidates；
+        # 不再从平铺 orphan 列表重新推断删除授权。
         report["attribution"][base] = {"counts": att.get("counts") or {}}
         for leg in att.get("orphan_attributed", []):
-            leg_id = str(leg.get("id") or "")
+            if str(leg.get("evidence")) != "tag":
+                report["not_touched"].append({"symbol": base, "id": leg.get("id"),
+                                              "bucket": "orphan_attributed_ledger",
+                                              "why": "仅台账证据，不能授权自动撤销"})
+            elif not leg.get("protection_identities"):
+                report["skipped"].append({"symbol": base, "id": leg.get("id"),
+                                          "why": "ASTRA 保护腿没有 id/typed identity，保守保留"})
+        for leg in att.get("cleanup_candidates", []):
+            identities = [normalize_typed_identity(value)
+                          for value in (leg.get("protection_identities") or [])]
+            identities = [value for value in identities if value]
+            venue_name = _adapter_venue(ad, leg.get("venue"))
+            if venue_name == "gate":
+                identity = next((x for x in identities if x["identity_kind"] == "id_string"), None)
+                identity = identity or next((x for x in identities if x["identity_kind"] == "id"), None)
+            elif venue_name == "binance":
+                identity = next((x for x in identities if x["identity_kind"] == "algo_id"), None)
+                identity = identity or next((x for x in identities if x["identity_kind"] == "client_algo_id"), None)
+            else:
+                identity = None
+            leg_id = str(leg.get("id") or (identity or {}).get("identity_value") or "")
             item = {"symbol": base, "id": leg_id, "kind": leg.get("kind"),
                     "trigger_price": leg.get("trigger_price"),
-                    "evidence": leg.get("evidence")}
-            if not leg_id:
-                report["skipped"].append(dict(item, why="腿没有 id ⇒ 无法逐腿撤（不用按合约全撤）"))
+                    "evidence": leg.get("evidence"),
+                    "protection_identities": identities}
+            if not identity:
+                report["skipped"].append(dict(item, why="没有可唯一使用的 typed identity，保守保留"))
                 continue
             if dry_run:
                 report["would_cancel"].append(item)
                 continue
             try:
-                if not cancel_protective_leg(ad, leg_id, symbol=symbol):
-                    raise RuntimeError("该所适配器没有可用的撤腿方法"
-                                       "（cancel_price_order/cancel_algo_order/cancel_order 均无）")
+                if not cancel_protective_leg(
+                        ad, identity["identity_value"], symbol=symbol,
+                        identity=identity, venue=venue_name):
+                    raise RuntimeError("typed identity 未匹配到场所条件单撤销能力")
                 report["cancelled"].append(item)
                 log(f"[跨所保护清理] 已撤销孤儿腿 {base} {item['kind']} id={leg_id}")
             except Exception as exc:
                 report["errors"].append(dict(item, stage="cancel",
                                              detail=f"{type(exc).__name__}: {exc}"))
-        for bucket in ("orphan_unattributed", "side_mismatch", "size_mismatch"):
+        for bucket in ("matched_unattributed", "orphan_unattributed", "side_mismatch",
+                       "size_mismatch", "ambiguous_position", "duplicate_identities"):
             for leg in att.get(bucket, []):
                 report["not_touched"].append({"symbol": base, "id": leg.get("id"),
                                               "bucket": bucket,
@@ -1028,6 +1445,7 @@ def audit_cross_venue_protection(xv_positions_by_venue: Optional[Dict[str, Any]]
                                  expiration_s: int = 604800,
                                  dry_run: bool = False,
                                  ledger_rows: Optional[Sequence[Dict[str, Any]]] = None,
+                                 qualified_keys: Optional[Sequence[str]] = None,
                                  log: Any = print) -> Dict[str, Any]:
     """对**已冻结的**跨所持仓快照做一遍保护巡检（每周期调用一次）。
 
@@ -1056,6 +1474,7 @@ def audit_cross_venue_protection(xv_positions_by_venue: Optional[Dict[str, Any]]
                               "errors": [], "skipped": [], "would": [],
                               "attribution": {}, "dry_run": bool(dry_run)}
     snapshot = xv_positions_by_venue or {}
+    qualified = {str(key) for key in (qualified_keys or ()) if str(key)}
     for venue in venues:
         rows = snapshot.get(venue)
         if rows is None:
@@ -1078,7 +1497,12 @@ def audit_cross_venue_protection(xv_positions_by_venue: Optional[Dict[str, Any]]
                 report["skipped"].append({"venue": venue, "why": f"行字段不足: {row!r}"[:160]})
                 continue
             venue_stat["checked"] += 1
-            if dry_run:
+            scan = None
+            would = "noop"
+            if dry_run or qualified_keys is not None:
+                # In a debounced real pass, re-evaluate each row read-only and
+                # use that *current* gap identity as the write permit.  Never
+                # run ensure first and filter its report afterwards.
                 try:
                     prows = ad.list_protective_orders(symbol) or []
                 except Exception as exc:
@@ -1086,22 +1510,17 @@ def audit_cross_venue_protection(xv_positions_by_venue: Optional[Dict[str, Any]]
                     report["errors"].append({"venue": venue, "inst": symbol, "stage": "list",
                                              "detail": f"{type(exc).__name__}: {exc}"})
                     continue
-                # 第一百八十刀：同 ensure 的双保险（本处 symbol 是合成 id `GATE:BTC_USDT`）。
                 scan = scan_protective_orders(prows, symbol=symbol, pos_side=pos_side,
-                                              position_size=size, now_s=now,
+                                              position_size=size, now_s=now, venue=venue,
                                               renew_within_s=renew_within_s,
                                               require_symbol_match=True)
-                would = "noop"
-                # 第一百八十刀：判据用 `needs_repair`（= 没有活止损 **或** 覆盖不足），
-                # 而不是只看 `has_live_sl`。此前"有活止损但量不够"（覆盖率 40% 这种）
-                # 会落成 `noop` ⇒ **既不进 critical 也不进 would**，运营完全看不到缺口
-                # （本刀的新用例当场把它抓出来）。
                 if scan["needs_repair"]:
                     would = "repair"
                 elif scan["needs_renew"]:
                     would = "renew"
                 elif scan["needs_verify"]:
                     would = "verify"
+
                 item = {"venue": venue, "inst": symbol, "side": pos_side, "would": would,
                         "covered_size": scan["covered_size"],
                         "missing_size": scan["missing_size"],
@@ -1113,8 +1532,6 @@ def audit_cross_venue_protection(xv_positions_by_venue: Optional[Dict[str, Any]]
                 if would == "repair":
                     venue_stat["missing"] += 1
                     if scan["has_live_sl"]:
-                        # 有活止损、只是**量不够/方向不覆盖** ⇒ 需要补量。
-                        # 这不改 `critical` 的语义（docstring：critical = **完全没有**止损腿）。
                         item["why"] = ("覆盖不足：有活止损但量不够（covered="
                                        f"{scan.get('covered_size')}, missing={scan.get('missing_size')}）")
                         report["would"].append(item)
@@ -1126,10 +1543,20 @@ def audit_cross_venue_protection(xv_positions_by_venue: Optional[Dict[str, Any]]
                     venue_stat["renewed"] += 1
                 elif would == "repair":
                     venue_stat["repaired"] += 1
-                continue
+
+                if dry_run or would not in {"repair", "renew"}:
+                    continue
+                key = watchdog_gap_key(item)
+                if qualified_keys is not None and key not in qualified:
+                    report["skipped"].append({
+                        "venue": venue, "inst": symbol,
+                        "why": "缺口未通过防抖，禁止真实写入",
+                    })
+                    continue
+
             try:
                 res = ensure_venue_protection(ad, symbol=symbol, pos_side=pos_side,
-                                              position_size=size, now_s=now,
+                                              position_size=size, now_s=now, venue=venue,
                                               renew_within_s=renew_within_s,
                                               expiration_s=expiration_s, log=log)
             except Exception as exc:      # 巡检自身异常绝不上抛（它只是加固层）
@@ -1138,6 +1565,11 @@ def audit_cross_venue_protection(xv_positions_by_venue: Optional[Dict[str, Any]]
                                          "detail": f"{type(exc).__name__}: {exc}"})
                 continue
             item = {"venue": venue, "inst": symbol, "side": pos_side,
+                    "stage": res.get("stage"), "detail": res.get("detail")}
+            scan_result = res.get("scan") if isinstance(res, dict) else None
+            item = {"venue": venue, "inst": symbol, "side": pos_side,
+                    "would": "repair" if isinstance(scan_result, dict) and scan_result.get("needs_repair")
+                    else "renew",
                     "stage": res.get("stage"), "detail": res.get("detail")}
             if res.get("scan") and res["scan"].get("needs_repair") and not res["scan"].get("has_live_sl"):
                 venue_stat["missing"] += 1
@@ -1160,8 +1592,8 @@ def audit_cross_venue_protection(xv_positions_by_venue: Optional[Dict[str, Any]]
         try:
             all_legs = ad.list_protective_orders(None) or []
             report["attribution"][venue] = attribute_protective_orders(
-                rows, all_legs, ledger_rows,
-                tolerance_ratio=DEFAULT_TOLERANCE_RATIO)
+                rows, all_legs, ledger_rows, tolerance_ratio=DEFAULT_TOLERANCE_RATIO,
+                venue=venue)
         except Exception as exc:
             report["errors"].append({"venue": venue, "stage": "attribution",
                                      "detail": f"{type(exc).__name__}: {str(exc)[:120]}"})
@@ -1176,7 +1608,7 @@ def watchdog_gap_key(item: Dict[str, Any]) -> str:
     """
     return "|".join((str(item.get("venue") or "").lower(),
                      str(item.get("inst") or ""),
-                     str(item.get("stage") or "")))
+                     str(item.get("stage") or item.get("would") or "")))
 
 
 def watchdog_debounce_step(state: Optional[Dict[str, Any]],

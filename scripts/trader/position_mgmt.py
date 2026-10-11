@@ -92,7 +92,8 @@ def execute_ai_position_management(real_pos_dict, trackers, timestamp_full, exec
                 continue
             closed, close_detail = close_position_confirmed(inst_id, pos_side, float(position.get("pos", 0) or 0), venue=pos_venue)
             if closed:
-                executed_actions.append(f"[{name}] AI高置信度整仓退出 ({pos_venue.upper()}): {reason}")
+                executed_actions.append(
+                    f"[{name}] AI高置信度整仓退出 ({pos_venue.upper()}): {reason}; {close_detail}")
                 trackers.pop(f"{inst_id}_{pos_side}", None)
             else:
                 executed_actions.append(f"[{name}] AI平仓请求未获交易所确认，仓位保持不变: {close_detail}")

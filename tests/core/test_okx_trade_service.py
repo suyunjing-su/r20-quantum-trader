@@ -293,19 +293,40 @@ class FastCloseTests(_Base):
         self.assertIn("无法撤销", str(ctx.exception))
         self.assertIn("bad", str(ctx.exception))
 
-    def test_algo_orders_are_cancelled_and_failures_only_warn(self):
-        self._wire([[_pos()], []], algo=[{"algoId": "a1", "posSide": "long"},
+    def test_algo_orders_are_cancelled_and_unidentified_rows_block_close(self):
+        self._wire([[_pos()], []], algo=[{"algoId": "a1", "algoClOrdId": "astraprotect-a1", "posSide": "long"},
                                          {"algoId": "a2", "posSide": "short"},
                                          {"algoId": "", "posSide": "long"}])
         token, confirmation = self._intent()
-        out = OT.fast_close_confirmed(token, confirmation)
-        self.assertEqual(out["canceled_entry_orders"], ["algo:a1"])
+        with self.assertRaises(RuntimeError) as ctx:
+            OT.fast_close_confirmed(token, confirmation)
+        self.assertIn("条件单", str(ctx.exception))
+        self.assertIn("algoId", str(ctx.exception))
+        self.assertEqual(self.close_calls, [], "条件单身份不可核验时不得继续平仓")
 
-    def test_algo_scan_failure_is_swallowed(self):
+    def test_algo_cancel_failure_blocks_close_and_other_side_is_untouched(self):
+        self._wire([[_pos()], []], algo=[
+            {"algoId": "a1", "algoClOrdId": "astraprotect-a1", "posSide": "long"},
+            {"algoId": "a2", "posSide": "short"},
+        ])
+        self.cancel_algo.side_effect = RuntimeError("撤条件单被拒")
+        token, confirmation = self._intent()
+        with self.assertRaises(RuntimeError) as ctx:
+            OT.fast_close_confirmed(token, confirmation)
+        self.assertIn("条件单", str(ctx.exception))
+        self.assertIn("撤条件单被拒", str(ctx.exception))
+        self.assertEqual(self.close_calls, [], "撤单未成功不得提交平仓")
+        self.cancel_algo.assert_called_once()
+        self.assertEqual(self.cancel_algo.call_args.args[0], [{"instId": "BTC-USDT-SWAP", "algoId": "a1"}])
+
+    def test_algo_scan_failure_blocks_close(self):
+        """条件单清单读不到时不得继续平仓并留下未核验保护腿。"""
         self._wire([[_pos()], []], algo_error=RuntimeError("扫描失败"))
         token, confirmation = self._intent()
-        out = OT.fast_close_confirmed(token, confirmation)
-        self.assertEqual(out["status"], "confirmed_closed")
+        with self.assertRaises(RuntimeError) as ctx:
+            OT.fast_close_confirmed(token, confirmation)
+        self.assertIn("条件单", str(ctx.exception))
+        self.assertIn("扫描失败", str(ctx.exception))
 
     def test_close_payload_uses_the_target_margin_mode(self):
         request = self._wire([[_pos(mgn_mode="isolated")], []])

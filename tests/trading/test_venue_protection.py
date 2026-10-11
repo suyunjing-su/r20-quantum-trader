@@ -40,14 +40,28 @@ def gate_sl_row(oid="sl1", *, size=0, close=True, created=None, expiration=60480
     """Gate `price_orders` 形状：标签在 initial.text，到期在 trigger.expiration。"""
     return {
         "id": oid, "status": status, "contract": contract,
-        "initial": {"contract": contract, "size": size, "close": close, "text": text},
+        "initial": {"contract": contract, "size": size, "close": close,
+                    "direction": "short", "text": text},
         "trigger": {"price": trigger, "rule": 2, "expiration": expiration},
         "create_time": NOW - 100 if created is None else created,
     }
 
 
+def gate_tp_row(oid="tp1", *, size=0, close=True, created=None, expiration=604800,
+                text="t-astratp12345", contract="BTC_USDT", trigger="85000"):
+    """Gate take-profit price-order row for post-attach verification fixtures."""
+    return {
+        "id": oid, "status": "open", "contract": contract,
+        "initial": {"contract": contract, "size": size, "close": close,
+                    "direction": "short", "text": text},
+        "trigger": {"price": trigger, "rule": 1, "expiration": expiration},
+        "create_time": NOW - 100 if created is None else created,
+    }
+
+
 def binance_leg_row(oid="b1", *, kind="STOP_MARKET", size=3, trigger=78000, side="SELL",
-                    time_in_force="GTC", good_till_date=0, close_position=False):
+                    time_in_force="GTC", good_till_date=0, close_position=False,
+                    client_algo_id=""):
     """Binance `algoOrder` 形状 —— **照适配器真实回包写**（本机实跑核对）：
 
     ⚠️ 顶层**没有** `size`：数量在 `raw.quantity`（`actualQty` 是已成交量，不能用）；
@@ -64,8 +78,38 @@ def binance_leg_row(oid="b1", *, kind="STOP_MARKET", size=3, trigger=78000, side
             "triggerPrice": str(trigger), "reduceOnly": True,
             "closePosition": close_position, "algoStatus": "NEW",
             "goodTillDate": good_till_date, "createTime": int(NOW * 1000),
+            "clientAlgoId": client_algo_id,
         },
     }
+
+
+class _StatefulGateRenewAdapter:
+    """续期测试用的最小 Gate 假适配器：回执和后续列表都反映真实状态。"""
+
+    def __init__(self, rows):
+        self.rows = [dict(row) for row in rows]
+        self.attach_calls = []
+        self.cancel_calls = []
+
+    def list_protective_orders(self, symbol=None):
+        return [dict(row) for row in self.rows]
+
+    def attach_protective_orders(self, symbol, pos_side, **kwargs):
+        self.attach_calls.append((symbol, pos_side, dict(kwargs)))
+        new_id = "new-sl"
+        self.rows.append(gate_sl_row(new_id, size=kwargs.get("contracts", 10), close=False,
+                                     created=NOW, trigger=str(kwargs["sl_px"])))
+        if kwargs.get("tp_px") is not None:
+            self.rows.append(gate_sl_row("new-tp", size=kwargs.get("contracts", 10),
+                                         close=False, created=NOW,
+                                         trigger=str(kwargs["tp_px"]), text="t-astratp-new"))
+        return {"sl": new_id, "tp": "new-tp" if kwargs.get("tp_px") is not None else None}
+
+    def cancel_price_order(self, order_id):
+        self.cancel_calls.append(order_id)
+        self.rows = [row for row in self.rows
+                     if str(row.get("id") or "") != str(order_id)]
+        return {"status": "finished", "id": order_id}
 
 
 class ScanTest(unittest.TestCase):
@@ -145,14 +189,16 @@ class BinanceRealShapeTest(unittest.TestCase):
 
     def test_gtc_means_never_expire_not_unknown(self):
         """GTC 是明确语义（撤销前一直有效）⇒ 不能当'到期不可判定'，否则全是噪音。"""
-        scan = scan_protective_orders([binance_leg_row("b1")], symbol="BTCUSDT",
+        row = binance_leg_row("b1", client_algo_id="t-astrasl-gtc")
+        scan = scan_protective_orders([row], symbol="BTCUSDT",
                                       pos_side="long", position_size=3, now_s=NOW)
         self.assertEqual(scan["needs_renew"], False)
         self.assertEqual(scan["needs_verify"], False)
         self.assertEqual(scan["ours"][0]["expiry_state"], "never")
 
     def test_good_till_date_is_absolute_expiry(self):
-        row = binance_leg_row("b1", good_till_date=int((NOW + 600) * 1000))   # 毫秒
+        row = binance_leg_row("b1", good_till_date=int((NOW + 600) * 1000),
+                               client_algo_id="t-astrasl-expiry")   # 毫秒
         scan = scan_protective_orders([row], symbol="BTCUSDT", pos_side="long",
                                       position_size=3, now_s=NOW)
         self.assertEqual([leg["id"] for leg in scan["expiring"]], ["b1"])
@@ -242,12 +288,33 @@ class ExpiryTest(unittest.TestCase):
 class EnsureActionTest(unittest.TestCase):
     def _ad(self, rows, *, attach_raises=None, cancel_raises=None):
         ad = MagicMock()
-        ad.list_protective_orders.return_value = rows
+        state = list(rows or [])
+
+        def list_rows(_symbol=None):
+            return [dict(row) for row in state]
+
+        def attach(symbol, pos_side, **kwargs):
+            state.append(gate_sl_row("new-sl", size=kwargs.get("contracts", 10),
+                                     close=False, created=NOW, trigger=str(kwargs["sl_px"]),
+                                     text="t-astrasl-new"))
+            if kwargs.get("tp_px") is not None:
+                state.append(gate_sl_row("new-tp", size=kwargs.get("contracts", 10),
+                                         close=False, created=NOW, trigger=str(kwargs["tp_px"]),
+                                         text="t-astratp-new"))
+            return {"tp": "new-tp", "sl": "new-sl"}
+
+        def cancel(order_id):
+            if cancel_raises is not None:
+                raise cancel_raises
+            state[:] = [row for row in state if str(row.get("id") or "") != str(order_id)]
+            return {"status": "finished", "id": order_id}
+
+        ad.list_protective_orders.side_effect = list_rows
         if attach_raises is not None:
             ad.attach_protective_orders.side_effect = attach_raises
         else:
-            ad.attach_protective_orders.return_value = {"tp": "new-tp", "sl": "new-sl"}
-        ad.cancel_price_order.side_effect = cancel_raises
+            ad.attach_protective_orders.side_effect = attach
+        ad.cancel_price_order.side_effect = cancel
         return ad
 
     def test_no_action_when_coverage_healthy(self):
@@ -268,16 +335,30 @@ class EnsureActionTest(unittest.TestCase):
         self.assertEqual(res["placed"], {"tp": "new-tp", "sl": "new-sl"})
 
     def test_renew_places_new_before_cancelling_old(self):
-        """铁律①：新腿必须先挂上，旧腿才允许撤。"""
+        """铁律①：新腿必须先挂上，旧腿才允许撤，并回读确认旧腿消失。"""
         order = []
-        ad = self._ad([gate_sl_row("old-sl", created=NOW - (604800 - 60))])
-        ad.attach_protective_orders.side_effect = lambda *a, **k: order.append("attach") or {"sl": "new-sl"}
-        ad.cancel_price_order.side_effect = lambda oid: order.append(f"cancel:{oid}")
+        ad = _StatefulGateRenewAdapter(
+            [gate_sl_row("old-sl", created=NOW - (604800 - 60))])
+        original_attach = ad.attach_protective_orders
+        original_cancel = ad.cancel_price_order
+
+        def attach(*args, **kwargs):
+            order.append("attach")
+            return original_attach(*args, **kwargs)
+
+        def cancel(oid):
+            order.append(f"cancel:{oid}")
+            return original_cancel(oid)
+
+        ad.attach_protective_orders = attach
+        ad.cancel_price_order = cancel
         res = ensure_venue_protection(ad, symbol="BTC_USDT", pos_side="long",
                                       position_size=10, tp_px=85000, sl_px=78000, now_s=NOW)
-        self.assertTrue(res["ok"])
+        self.assertTrue(res["ok"], res["detail"])
         self.assertEqual(order, ["attach", "cancel:old-sl"], "撤旧发生在新挂之前 ⇒ 裸仓窗口")
         self.assertEqual(res["cancelled"], ["old-sl"])
+        self.assertFalse(any(row.get("id") == "old-sl" for row in ad.rows),
+                         "仅收到撤单回执不够，必须验证旧腿从后续列表消失")
 
     def test_attach_failure_keeps_old_legs(self):
         """铁律①（失败分支）：挂新失败 ⇒ 绝不撤旧（旧腿到期前仍在保护）。
@@ -304,7 +385,7 @@ class EnsureActionTest(unittest.TestCase):
         res = ensure_venue_protection(ad, symbol="BTC_USDT", pos_side="long",
                                       position_size=10, tp_px=85000, sl_px=78000, now_s=NOW,
                                       log=warned.append)
-        self.assertTrue(res["ok"], "新腿已生效 ⇒ 仓位是受保护的")
+        self.assertFalse(res["ok"], "新腿已生效但旧腿仍在，续期目标未完成")
         self.assertEqual(res["kept_old"], ["old-sl"])
         self.assertEqual(len(warned), 1)
         self.assertIn("warn", warned[0])
@@ -370,14 +451,58 @@ class RenewReusesExistingPricesTest(unittest.TestCase):
 
     def test_renew_without_passed_prices_reuses_leg_triggers(self):
         rows = [gate_sl_row("old-sl", created=NOW - (604800 - 60), trigger="77000")]
-        ad = self._ad(rows)
+        ad = _StatefulGateRenewAdapter(rows)
         res = ensure_venue_protection(ad, symbol="BTC_USDT", pos_side="long",
                                       position_size=10, now_s=NOW)   # 不传价位
         self.assertTrue(res["ok"], res["detail"])
-        kwargs = ad.attach_protective_orders.call_args.kwargs
+        kwargs = ad.attach_calls[0][2]
         self.assertEqual(kwargs["sl_px"], 77000.0, "续期改写了原有止损价 ⇒ 偷偷改策略")
 
+    def test_binance_renewal_preserves_numeric_and_client_identity(self):
+        """Binance stale cleanup must use its explicit DELETE parameter family."""
+        for identity_kind in ("algo_id", "client_algo_id"):
+            with self.subTest(identity_kind=identity_kind):
+                old = binance_leg_row(
+                    "old-algo" if identity_kind == "algo_id" else "t-astrasl-client-old",
+                    size=10, good_till_date=int((NOW + 60) * 1000),
+                    client_algo_id="t-astrasl-client-old")
+                if identity_kind == "client_algo_id":
+                    old.pop("algo_id", None)
+                    old["id"] = "t-astrasl-client-old"
+                    old["raw"].pop("algoId", None)
+                class _Binance:
+                    def __init__(self):
+                        self.rows = [old]
+                        self.cancel_calls = []
+
+                    def list_protective_orders(self, symbol=None):
+                        return [dict(row, raw=dict(row.get("raw") or {})) for row in self.rows]
+
+                    def attach_protective_orders(self, symbol, pos_side, **kwargs):
+                        self.rows.append(binance_leg_row(
+                            "new-algo", size=10, client_algo_id="t-astrasl-new"))
+                        return {"sl": "new-algo"}
+
+                    def cancel_algo_order(self, *, algo_id=None, client_algo_id=None):
+                        self.cancel_calls.append((algo_id, client_algo_id))
+                        identity = str(algo_id or client_algo_id or "")
+                        self.rows = [row for row in self.rows
+                                     if str(row.get("id") or "") != identity
+                                     and str((row.get("raw") or {}).get("clientAlgoId") or "") != identity]
+                        return {"code": "200", "msg": "success"}
+
+                ad = _Binance()
+                out = ensure_venue_protection(ad, symbol="BTCUSDT", pos_side="long",
+                                              position_size=10, sl_px=78000, now_s=NOW)
+                self.assertTrue(out["ok"], out["detail"])
+                expected = (("old-algo", None) if identity_kind == "algo_id"
+                            else (None, "t-astrasl-client-old"))
+                self.assertEqual(ad.cancel_calls, [expected])
+                self.assertEqual(out["cancelled"], ["old-algo" if identity_kind == "algo_id"
+                                                     else "t-astrasl-client-old"])
+
     def test_scan_exposes_trigger_prices(self):
+
         scan = scan_protective_orders([gate_sl_row(trigger="77000")], symbol="BTC_USDT",
                                       pos_side="long", position_size=10, now_s=NOW)
         self.assertEqual(scan["ours"][0]["trigger_price"], 77000.0)
@@ -404,19 +529,72 @@ class AuditCrossVenueTest(unittest.TestCase):
         return {"venue": "gate", "inst_id": inst, "base": inst.split("_")[0],
                 "side": side, "size_signed": size}
 
+    def test_qualified_keys_gate_actual_writes_not_just_action_reporting(self):
+        class _MultiSymbolGate:
+            def __init__(self):
+                self.rows = [
+                    gate_sl_row("btc-old", created=NOW - (604800 - 60), contract="BTC_USDT"),
+                    gate_sl_row("eth-old", created=NOW - (604800 - 60), contract="ETH_USDT"),
+                ]
+                self.attach_calls = []
+                self.cancel_calls = []
+
+            def list_protective_orders(self, symbol=None):
+                base = str(symbol or "").split("_")[0].split(":")[-1].upper()
+                if not base:
+                    return list(self.rows)
+                return [row for row in self.rows
+                        if row["initial"]["contract"].split("_")[0] == base]
+
+            def attach_protective_orders(self, symbol, pos_side, **kwargs):
+                self.attach_calls.append(symbol)
+                oid = f"new-{symbol}"
+                self.rows.append(gate_sl_row(oid, created=NOW,
+                                             contract=f"{symbol.split('_')[0]}_USDT"))
+                return {"sl": oid}
+
+            def cancel_price_order(self, oid):
+                self.cancel_calls.append(oid)
+                self.rows = [row for row in self.rows if row["id"] != oid]
+                return {"status": "finished"}
+
+        gate = _MultiSymbolGate()
+        reg = self._registry({"gate": gate, "binance": MagicMock()})
+        snapshot = {"gate": [self._row("BTC_USDT"), self._row("ETH_USDT")],
+                    "binance": []}
+        report = audit_cross_venue_protection(
+            snapshot, venue_registry=reg, environment="demo", now_s=NOW,
+            qualified_keys=["gate|BTC_USDT|renew"])
+        self.assertEqual(gate.attach_calls, ["BTC_USDT"],
+                         "未合格 ETH 缺口不得触发 ensure/attach 写入")
+        self.assertEqual(gate.cancel_calls, ["btc-old"],
+                         "qualified BTC 续期仍按先挂新后撤旧完成")
+        self.assertTrue(any(item.get("inst") == "ETH_USDT"
+                            for item in report["skipped"]))
+
+    def test_empty_qualified_set_blocks_every_real_write(self):
+        gate = _StatefulGateRenewAdapter([
+            gate_sl_row("old-sl", created=NOW - (604800 - 60))])
+        reg = self._registry({"gate": gate, "binance": MagicMock()})
+        report = audit_cross_venue_protection(
+            {"gate": [self._row()]}, venue_registry=reg, environment="demo", now_s=NOW,
+            qualified_keys=[])
+        self.assertEqual(gate.attach_calls, [])
+        self.assertEqual(gate.cancel_calls, [])
+        self.assertTrue(report["skipped"])
+
     def test_expiring_leg_is_renewed_with_its_own_price(self):
-        gate = MagicMock()
-        gate.list_protective_orders.return_value = [
-            gate_sl_row("old-sl", created=NOW - (604800 - 60), trigger="77000")]
-        gate.attach_protective_orders.return_value = {"sl": "new-sl"}
+
+        gate = _StatefulGateRenewAdapter([
+            gate_sl_row("old-sl", created=NOW - (604800 - 60), trigger="77000")])
         reg = self._registry({"gate": gate, "binance": MagicMock()})
         report = audit_cross_venue_protection(
             {"gate": [self._row()]}, venue_registry=reg, environment="demo", now_s=NOW)
         self.assertEqual(report["venues"]["gate"]["renewed"], 1)
         self.assertEqual(len(report["actions"]), 1)
         self.assertEqual(report["critical"], [])
-        gate.attach_protective_orders.assert_called_once()
-        self.assertEqual(gate.cancel_price_order.call_args[0][0], "old-sl")
+        self.assertEqual(len(gate.attach_calls), 1)
+        self.assertEqual(gate.cancel_calls, ["old-sl"])
 
     def test_position_without_stop_leg_is_critical_and_not_written(self):
         gate = MagicMock()
@@ -493,8 +671,20 @@ class AuditCrossVenueTest(unittest.TestCase):
         # 腿量不足（**非整仓平**且量小于仓位）⇒ needs_repair 而非 needs_renew
         # ⚠️ `gate_sl_row` 默认 `close=True`（整仓平腿）⇒ 那种腿天然"覆盖全部"，
         # 只能靠 `close=False` + 小 size 才构造出"覆盖不全"。
-        gate.list_protective_orders.return_value = [gate_sl_row(size=1, close=False)]
-        gate.attach_protective_orders.return_value = {"sl": "new-sl"}
+        rows = [gate_sl_row(size=1, close=False)]
+        gate.list_protective_orders.side_effect = lambda *_args, **_kwargs: list(rows)
+
+        def attach_repair(symbol, pos_side, **kwargs):
+            rows.append(gate_sl_row(
+                "new-sl", size=kwargs.get("contracts", 10), close=False,
+                created=NOW, trigger=str(kwargs["sl_px"])))
+            if kwargs.get("tp_px") is not None:
+                rows.append(gate_tp_row(
+                    "new-tp", size=kwargs.get("contracts", 10), close=False,
+                    created=NOW, trigger=str(kwargs["tp_px"])))
+            return {"sl": "new-sl", "tp": "new-tp" if kwargs.get("tp_px") is not None else None}
+
+        gate.attach_protective_orders.side_effect = attach_repair
         reg = self._registry({"gate": gate, "binance": MagicMock()})
         report = audit_cross_venue_protection(
             {"gate": [self._row(size=10.0)]}, venue_registry=reg, environment="demo", now_s=NOW)
@@ -673,16 +863,15 @@ class DryRunTest(unittest.TestCase):
 
     def test_non_dry_run_actually_writes(self):
         """对照组：同一输入、dry_run=False 时必须真的动单（否则预演成了唯一行为）。"""
-        gate = MagicMock()
-        gate.list_protective_orders.return_value = [
-            gate_sl_row("old-sl", created=NOW - (604800 - 60), trigger="77000")]
-        gate.attach_protective_orders.return_value = {"sl": "new-sl"}
+        gate = _StatefulGateRenewAdapter([
+            gate_sl_row("old-sl", created=NOW - (604800 - 60), trigger="77000")])
         reg = self._registry({"gate": gate, "binance": MagicMock()})
         report = audit_cross_venue_protection(
             {"gate": [{"inst_id": "BTC_USDT", "side": "long", "size_signed": 1.0}]},
             venue_registry=reg, environment="demo", now_s=NOW, dry_run=False)
         self.assertEqual(len(report["actions"]), 1)
-        gate.attach_protective_orders.assert_called_once()
+        self.assertEqual(len(gate.attach_calls), 1)
+        self.assertEqual(gate.cancel_calls, ["old-sl"])
 
     def test_dry_run_listing_failure_is_reported_not_faked(self):
         gate = MagicMock()
@@ -1065,9 +1254,9 @@ class CancelOrphanAttributedLegsTest(unittest.TestCase):
                          "raw": {"algoId": "o-1", "orderType": "TAKE_PROFIT_MARKET",
                                  "clientAlgoId": "t-astratp261158", "quantity": "0"}}]
 
-            def cancel_algo_order(self, *, algo_id=None):
-                calls.append(algo_id)
-                return {"algoId": algo_id}
+            def cancel_algo_order(self, *, algo_id=None, client_algo_id=None):
+                calls.append(algo_id or client_algo_id)
+                return {"code": "200"}
 
         rep = cancel_orphan_attributed_legs(_BinanceLike(), positions=[],
                                             symbols=["DOGE_USDT"], dry_run=False)
@@ -1095,23 +1284,24 @@ class CancelOrphanAttributedLegsTest(unittest.TestCase):
         seen = []
 
         class _Gate:
-            def cancel_price_order(self, oid): seen.append(("price", oid)); return {}
+            def cancel_price_order(self, oid): seen.append(("price", oid)); return {"status": "finished"}
 
         class _Binance:
-            def cancel_algo_order(self, *, algo_id=None): seen.append(("algo", algo_id)); return {}
+            def cancel_algo_order(self, *, algo_id=None): seen.append(("algo", algo_id)); return {"code": "200"}
 
         class _Legacy:
-            def cancel_order(self, symbol, oid): seen.append(("order", symbol, oid)); return {}
+            def cancel_order(self, symbol, oid): seen.append(("order", symbol, oid)); return {"code": "0"}
 
         class _Nothing:
             pass
 
         self.assertTrue(cancel_protective_leg(_Gate(), "g1"))
-        self.assertTrue(cancel_protective_leg(_Binance(), "b1"))
-        self.assertTrue(cancel_protective_leg(_Legacy(), "l1", symbol="BTC_USDT"))
+        self.assertTrue(cancel_protective_leg(_Binance(), "b1", algo_id="b1"))
+        self.assertFalse(cancel_protective_leg(_Legacy(), "l1", symbol="BTC_USDT"),
+                         "普通 cancel_order 不是条件单 ownership-safe 能力")
         self.assertFalse(cancel_protective_leg(_Nothing(), "n1"))
         self.assertFalse(cancel_protective_leg(_Gate(), ""), "空 id 不得撤")
-        self.assertEqual(seen, [("price", "g1"), ("algo", "b1"), ("order", "BTC_USDT", "l1")])
+        self.assertEqual(seen, [("price", "g1"), ("algo", "b1")])
 
     def test_symbol_with_a_live_position_is_skipped_whole(self):
         """合约仍有活动持仓 ⇒ 整合约跳过（孤儿判定可能只是取数缺失，宁留腿不裸奔）。"""
@@ -1225,14 +1415,15 @@ class LedgerEvidenceTest(unittest.TestCase):
     def test_ledger_evidence_promotes_an_unattributed_leg(self):
         """台账有同币同向同量已平记录 ⇒ 腿从"归属不可判定"升为"可归因孤儿"（证据 ledger）。"""
         from scripts.trader.venue_protection import attribute_protective_orders
-        leg = {"id": "b-1", "symbol": "XRPUSDT", "type": "TAKE_PROFIT_MARKET",
+        leg = {"id": "b-1", "venue": "binance", "symbol": "XRPUSDT", "side": "BUY",
+               "type": "TAKE_PROFIT_MARKET",
                "raw": {"orderType": "TAKE_PROFIT_MARKET", "triggerPrice": "1.3255",
                        "quantity": "826.5"}}
         without = attribute_protective_orders([], [leg], None)
         self.assertEqual(len(without["orphan_unattributed"]), 1, "无台账 ⇒ 归属不可判定")
         with_ledger = attribute_protective_orders(
-            [], [leg], [{"inst": "XRP", "side": "空", "sz": 826.5, "status": "closed",
-                         "id": "binance_closed_1"}])
+            [], [leg], [{"inst": "XRP", "venue": "binance", "side": "空", "sz": 826.5,
+                         "status": "closed", "id": "binance_closed_1"}])
         self.assertEqual(len(with_ledger["orphan_attributed"]), 1, "有台账 ⇒ 可归因")
         self.assertEqual(with_ledger["orphan_attributed"][0].get("evidence"), "ledger")
 
@@ -1570,7 +1761,7 @@ class ContractMatchRobustnessTest(unittest.TestCase):
         src = (_p.Path(__file__).resolve().parents[2] / "scripts" / "trader"
                / "venue_protection.py").read_text(encoding="utf-8")
         # 注意：docstring 里也提到该开关 ⇒ 只数**调用实参**那种写法（带右括号）
-        self.assertEqual(src.count("require_symbol_match=True)"), 2,
+        self.assertGreaterEqual(src.count("require_symbol_match=True)"), 2,
                          "ensure 与 audit 两个站点都应显式开启合约匹配")
 
 class AmbiguousPositionsTest(unittest.TestCase):
@@ -1583,6 +1774,26 @@ class AmbiguousPositionsTest(unittest.TestCase):
         self.assertEqual(rep["ambiguous_positions"], ["BTC"],
                          "同币两仓只在报告里给一个仓位 ⇒ 另一侧静默消失")
         self.assertIn("ambiguous_positions", rep)
+
+    def test_ambiguous_position_makes_tagged_leg_report_only(self):
+        rep = attribute_protective_orders(
+            [{"base": "BTC", "side": "long", "size_signed": 1.0},
+             {"base": "BTC", "side": "short", "size_signed": -1.0}],
+            [gate_sl_row("sl-ambiguous")], None, venue="gate")
+        self.assertEqual(rep["ambiguous_positions"], ["BTC"])
+        self.assertEqual(len(rep["ambiguous_position"]), 1)
+        self.assertEqual(rep["cleanup_candidates"], [])
+        self.assertTrue(rep["needs_human"])
+
+    def test_duplicate_typed_identity_is_reported_and_never_cleanup_candidate(self):
+        legs = [
+            binance_leg_row("42", client_algo_id="t-astrasl-first"),
+            binance_leg_row("42", client_algo_id="t-astrasl-second"),
+        ]
+        rep = attribute_protective_orders([], legs, None, venue="binance")
+        self.assertEqual(len(rep["duplicate_identities"]), 2)
+        self.assertEqual(rep["cleanup_candidates"], [])
+        self.assertEqual(len(rep["needs_human"]), 2)
 
     def test_single_position_is_not_flagged(self):
         rep = attribute_protective_orders([{"base": "BTC", "side": "long", "size_signed": 1.0}],
@@ -1717,9 +1928,21 @@ class EnsureStaleCancelEdgeTest(unittest.TestCase):
 
     def test_adapter_without_cancel_capability_registers_error_not_silence(self):
         """撤旧用能力探针；适配器**三样撤腿方法都没有** ⇒ 诚实登记错误，不静默当成功。"""
+        rows = [gate_sl_row("old-sl", created=NOW - (604800 - 60))]
         ad = SimpleNamespace()
-        ad.list_protective_orders = lambda symbol: [gate_sl_row("old-sl", created=NOW - (604800 - 60))]
-        ad.attach_protective_orders = lambda *a, **k: {"sl": "new-sl"}
+        ad.list_protective_orders = lambda symbol: list(rows)
+
+        def attach(symbol, pos_side, **kwargs):
+            rows.append(gate_sl_row(
+                "new-sl", size=kwargs.get("contracts", 10), close=False,
+                created=NOW, trigger=str(kwargs["sl_px"])))
+            if kwargs.get("tp_px") is not None:
+                rows.append(gate_tp_row(
+                    "new-tp", size=kwargs.get("contracts", 10), close=False,
+                    created=NOW, trigger=str(kwargs["tp_px"])))
+            return {"sl": "new-sl", "tp": "new-tp" if kwargs.get("tp_px") is not None else None}
+
+        ad.attach_protective_orders = attach
         # 既无 cancel_price_order / cancel_algo_order / cancel_order
         res = ensure_venue_protection(ad, symbol="BTC_USDT", pos_side="long",
                                       position_size=10, tp_px=85000, sl_px=78000, now_s=NOW)

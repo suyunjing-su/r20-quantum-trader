@@ -133,11 +133,11 @@ class AttributionEdgeTest(unittest.TestCase):
     LEG = {"id": "s1", "initial": {"contract": "BTC_USDT", "text": "t-astrasl"},
            "size": 10.0, "side": "long"}
     # 没有本系统标签、但有明确类型名的腿（Binance 真机形态）⇒ 走**台账证据**那条路
-    # `positionSide` 是 Binance 侧的持仓方向字段；**没有它**时腿的方向读不出来，
-    # 「同向」这个过滤条件就形同虚设（本刀实测：方向过滤只在能读出腿方向时才生效）
+    # Binance `side` 是平仓方向：SELL ⇒ 保护多仓；这里把方向做成可读，
+    # 让正向台账用例真正覆盖「同向同量」证据，而不是退化成不可判定。
     UNTAGGED = {"id": "b1", "initial": {"contract": "BTC_USDT"},
-                "type": "STOP_MARKET", "size": 10.0, "side": "long",
-                "positionSide": "LONG"}
+                "type": "STOP_MARKET", "size": 10.0, "side": "sell",
+                "positionSide": "LONG", "venue": "binance"}
 
     def test_non_dict_positions_and_legs_are_skipped(self):
         """`positions` 与 `legs` 里的非 dict 行都要跳过（脏数据不得带偏循环）。"""
@@ -152,7 +152,8 @@ class AttributionEdgeTest(unittest.TestCase):
         """
         r = attribute_protective_orders(
             [], [self.UNTAGGED],
-            ["垃圾", {"inst": "BTC_USDT", "side": "多", "sz": 10.0}],
+            ["垃圾", {"inst": "BTC_USDT", "venue": "binance",
+                       "side": "多", "sz": 10.0, "status": "closed"}],
             tolerance_ratio=0.0)
         self.assertEqual(r["counts"]["orphan_attributed"], 1,
                          f"中文方向词必须归一：{r['orphan_attributed']}")
@@ -166,36 +167,34 @@ class AttributionEdgeTest(unittest.TestCase):
         """
         r = attribute_protective_orders(
             [], [self.UNTAGGED],
-            [{"inst": "BTC_USDT", "side": "long", "sz": 10.0}, "垃圾"],
+            [{"inst": "BTC_USDT", "venue": "binance", "side": "long",
+              "sz": 10.0, "status": "closed"}, "垃圾"],
             tolerance_ratio=0.0)
         self.assertEqual(r["counts"]["orphan_attributed"], 1)
         self.assertEqual(r["orphan_attributed"][0]["evidence"], "ledger")
 
     def test_sell_and_buy_words_map_to_short_and_long(self):
         """台账里用 `sell`/`buy` 写方向 ⇒ 必须归一为 `short`/`long` 才能参与同向判定。"""
-        for word in ("sell", "buy"):
+        # 每个方向都配一条语义相符的平仓方向，避免把「方向不可读」混入
+        # 方向词归一化用例：SELL 平多，BUY 平空。
+        for word, close_side in (("sell", "buy"), ("buy", "sell")):
             with self.subTest(word=word):
+                leg = dict(self.UNTAGGED, side=close_side)
                 r = attribute_protective_orders(
-                    [], [self.UNTAGGED],
-                    [{"inst": "BTC_USDT", "side": word, "sz": 10.0}], tolerance_ratio=0.0)
+                    [], [leg], [{"inst": "BTC_USDT", "venue": "binance",
+                                 "side": word, "sz": 10.0, "status": "closed"}], tolerance_ratio=0.0)
                 self.assertEqual(r["counts"]["orphan_attributed"], 1,
                                  f"{word} 必须被归一：{r['counts']}")
 
-    def test_side_filter_only_applies_when_the_leg_side_is_readable(self):
-        """⚠️ **实测边界（如实记录，不是"应该"）**：台账的「同向」过滤**只在腿自己的方向
-        读得出来时才生效** —— 腿方向读不出（`_leg_position_side` 返回 None）时，
-        `_ledger_evidence` 收到 `want_pos_side=None`，于是**反向的台账行也算证据**。
-
-        影响面有限：`ledger` 档证据**不自动撤腿**（只有交易所侧 `tag` 才算「可证明」，
-        上一刀已钉），所以后果是**报告层面**的归属偏宽，而非误撤。
-        ⇒ 记在这里，作为"要不要让方向不可读时也不产生证据"的待议项（改它会动归属报告口径）。
-        """
+    def test_unreadable_leg_direction_does_not_create_ledger_evidence(self):
+        """方向不可读时宁可不归因，不能把反向台账当成证据。"""
+        leg = dict(self.UNTAGGED, side="long")
         r = attribute_protective_orders(
-            [], [self.UNTAGGED],
-            [{"inst": "BTC_USDT", "side": "short", "sz": 10.0}], tolerance_ratio=0.0)
-        self.assertEqual(r["counts"]["orphan_attributed"], 1,
-                         "腿方向不可读 ⇒ 反向台账行也成了证据（已如实记录该边界）")
-        self.assertEqual(r["orphan_attributed"][0]["evidence"], "ledger")
+            [], [leg], [{"inst": "BTC_USDT", "venue": "binance",
+                         "side": "short", "sz": 10.0}], tolerance_ratio=0.0)
+        self.assertEqual(r["counts"]["orphan_attributed"], 0,
+                         "腿方向不可读 ⇒ 不能产生 ledger 证据")
+        self.assertEqual(r["counts"]["orphan_unattributed"], 1)
 
     def test_ledger_row_without_size_is_not_evidence(self):
         """台账行**没有数量** ⇒ 不作证据（量对不上就没法证明归属）。"""
@@ -207,9 +206,11 @@ class AttributionEdgeTest(unittest.TestCase):
 
 
 class CancelProtectiveLegProbeTest(unittest.TestCase):
-    """撤腿必须走**能力探针**：三所能力各不相同（Gate 只有 `cancel_price_order`、
-    Binance 只有 `cancel_algo_order`、OKX 走 `cancel_order`）。旧写法直接调
-    `cancel_price_order` ⇒ 对 Binance **恒失败**，而 Binance 恰是孤儿腿最多的所。"""
+    """撤腿必须走**条件单专用能力**，且必须收到明确成功回执。
+
+    Gate 只有 `cancel_price_order`、Binance 只有 `cancel_algo_order`；
+    普通 `cancel_order` 不是条件单 ownership-safe fallback。
+    """
 
     class _Gate:
         def __init__(self):
@@ -217,13 +218,15 @@ class CancelProtectiveLegProbeTest(unittest.TestCase):
 
         def cancel_price_order(self, oid):
             self.cancelled.append(("price", oid))
+            return {"status": "finished"}
 
     class _Binance:
         def __init__(self):
             self.cancelled = []
 
-        def cancel_algo_order(self, algo_id=None):
-            self.cancelled.append(("algo", algo_id))
+        def cancel_algo_order(self, algo_id=None, client_algo_id=None):
+            self.cancelled.append(("algo", algo_id or client_algo_id))
+            return {"code": "200"}
 
     class _Okx:
         def __init__(self):
@@ -248,13 +251,13 @@ class CancelProtectiveLegProbeTest(unittest.TestCase):
 
     def test_binance_uses_algo_order(self):
         ad = self._Binance()
-        self.assertTrue(cancel_protective_leg(ad, "b1"))
+        self.assertTrue(cancel_protective_leg(ad, "b1", algo_id="b1"))
         self.assertEqual(ad.cancelled, [("algo", "b1")])
 
-    def test_okx_falls_back_to_symbol_scoped_cancel(self):
+    def test_okx_generic_cancel_is_not_an_ownership_safe_fallback(self):
         ad = self._Okx()
-        self.assertTrue(cancel_protective_leg(ad, "o1", symbol="BTC-USDT-SWAP"))
-        self.assertEqual(ad.cancelled, [("BTC-USDT-SWAP", "o1")])
+        self.assertFalse(cancel_protective_leg(ad, "o1", symbol="BTC-USDT-SWAP"))
+        self.assertEqual(ad.cancelled, [])
 
     def test_okx_without_symbol_cannot_cancel(self):
         """OKX 的撤单**需要 symbol** ⇒ 没给 symbol 就诚实地报「撤不动」（False）。"""

@@ -57,6 +57,10 @@ class OkxCloseConfirmTest(unittest.TestCase):
     def _call(self, *, rest=None, query=None, before_size=10.0, pos_side="long",
               inst_id="BTC-USDT-SWAP"):
         rest = rest or _OkxRest()
+        if not hasattr(rest, "pending_algo_orders"):
+            rest.pending_algo_orders = lambda *a, **k: []
+        if not hasattr(rest, "cancel_algo_orders"):
+            rest.cancel_algo_orders = lambda *a, **k: []
         ok, detail = close_position_confirmed(
             inst_id, pos_side, before_size, "okx",
             okx_rest=rest,

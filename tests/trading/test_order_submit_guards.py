@@ -71,6 +71,7 @@ class Rig:
         self.geometry_calls = []
 
     def run(self, *, venue_ctx=None, src=None, pos_side="long", execution_open=True, **over):
+        from astra_backend import execution_router
         params = dict(
             confirm_signal_reservation=lambda r: self.confirmed.append(r),
             record_open_intent=lambda i, s: self.recorded.append((i, s)),
@@ -101,13 +102,33 @@ class Rig:
              patch("scripts.order_risk.validate_quote_geometry_and_rr",
                    side_effect=lambda *a, **k: (self.geometry_calls.append(a),
                                                 self.geometry)[1]), \
+             patch.object(execution_router, "collect_cross_venue_positions",
+                          return_value=([], [], [])), \
              _direct_venue_gate_adapter():
             return submit_protected_limit_order(
                 INST, "buy" if pos_side == "long" else "sell", pos_side, 3.0,
                 self.price, self.tp, self.sl, venue_ctx=venue_ctx, **params)
 
 
-class RoutingGateTest(unittest.TestCase):
+class _ClaimIsolatedTest(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+        from scripts.trader import open_entry_guard
+
+        self._claim_tmp = tempfile.TemporaryDirectory(prefix="astra-submit-claims-")
+        self.addCleanup(self._claim_tmp.cleanup)
+        self._claim_patch = patch.object(
+            open_entry_guard, "OPEN_ENTRY_CLAIMS_FILE",
+            Path(self._claim_tmp.name) / "claims.json")
+        self._claim_patch.start()
+        self.addCleanup(self._claim_patch.stop)
+        self._data_patch = patch.dict(os.environ, {"ASTRA_DATA_DIR": self._claim_tmp.name})
+        self._data_patch.start()
+        self.addCleanup(self._data_patch.stop)
+
+
+class RoutingGateTest(_ClaimIsolatedTest):
     def test_routing_refusal_blocks_the_order(self):
         rig = Rig(routing={"ok": False, "error": "预算不足"})
         ok, why = rig.run(venue_ctx={"notional_usdt": 100, "margin_usdt": 50, "intent_id": "i1"})
@@ -131,6 +152,27 @@ class RoutingGateTest(unittest.TestCase):
         self.assertIn("执行已关闸", why)
         self.assertEqual(rig.okx.orders, [], "关闸必须覆盖不带 venue_ctx 的直下入口")
 
+    def test_persistent_entry_claim_blocks_second_submission_after_stale_snapshot(self):
+        import tempfile
+        from pathlib import Path
+        from scripts.trader import open_entry_guard
+
+        with tempfile.TemporaryDirectory(prefix="astra-submit-claim-") as td:
+            with patch.object(open_entry_guard, "OPEN_ENTRY_CLAIMS_FILE",
+                              Path(td) / "claims.json"),                  patch("scripts.order_risk.validate_quote_geometry_and_rr",
+                       return_value=(True, "", 2.5)):
+                rig = Rig()
+                ctx = {"notional_usdt": 100, "margin_usdt": 50,
+                       "entry_dedupe_v1": True, "intent_id": "different-cycle-1"}
+                first = rig.run(venue_ctx=ctx)
+                ctx2 = dict(ctx, intent_id="different-cycle-2")
+                second = rig.run(venue_ctx=ctx2)
+
+        self.assertTrue(first[0], first)
+        self.assertFalse(second[0], second)
+        self.assertIn("开仓防重拒绝", second[1])
+        self.assertEqual(len(rig.okx.orders), 1, "新 timestamp 不得绕过同标的防重")
+
     def test_reservation_is_confirmed_on_success(self):
         rig = Rig()
         ok, order_id = rig.run(venue_ctx={"notional_usdt": 100, "margin_usdt": 50})
@@ -140,7 +182,7 @@ class RoutingGateTest(unittest.TestCase):
         self.assertEqual(rig.recorded, [(INST, "buy")], "成功要记录开仓意图")
 
 
-class SafetyReverificationTest(unittest.TestCase):
+class SafetyReverificationTest(_ClaimIsolatedTest):
     def test_geometry_failure_rejects_and_releases(self):
         rig = Rig()
         rig.geometry = (False, "R:R 不足", 0.5)
@@ -152,7 +194,7 @@ class SafetyReverificationTest(unittest.TestCase):
         self.assertEqual(rig.okx.orders, [])
 
 
-class PriceAnchorGateTest(unittest.TestCase):
+class PriceAnchorGateTest(_ClaimIsolatedTest):
     """LLM 幻觉价锚定：几何/R:R 只验三者关系，从不比对现价 ⇒ 这里补上现价比对。"""
 
     def _run_with(self, *, price, pos_side="long"):
@@ -161,11 +203,16 @@ class PriceAnchorGateTest(unittest.TestCase):
         # 本类验的是**限价单**的穿价闸（"BUY 挂在现价上方即拒"）。市价单不按计划价
         # 成交、路径上会先把三价重锚到现价，穿价闸对它本就不适用 ⇒ 必须钉死限价模式，
         # 否则运维一切到 market，本类用例会因为"市价单不判穿价"而红（设计如此）。
+        from tests.venue_gate_stub import direct_venue_gate_adapter
+        from astra_backend import execution_router
         with patch.dict(os.environ, {"ASTRA_ORDER_MODE": "limit"}), \
              patch("astra_backend.exchanges.listing.ensure_contract_listed",
                    return_value=SimpleNamespace(ok=True, reason="")), \
              patch("scripts.order_risk.validate_quote_geometry_and_rr",
-                   return_value=(True, "", 1.0)):
+                   return_value=(True, "", 1.0)), \
+             patch.object(execution_router, "collect_cross_venue_positions",
+                          return_value=([], [], [])), \
+             direct_venue_gate_adapter():
             return rig, submit_protected_limit_order(
                 INST, "buy" if pos_side == "long" else "sell", pos_side, 3.0, price,
                 105000.0, 95000.0, venue_ctx=ctx,
@@ -250,8 +297,8 @@ class PriceAnchorGateTest(unittest.TestCase):
         self.assertEqual(rig.okx.orders, [])
 
 
-class MultiVenueRouteTest(unittest.TestCase):
-    def _run(self, router, venue="binance"):
+class MultiVenueRouteTest(_ClaimIsolatedTest):
+    def _run(self, router, venue="binance", **over):
         rig = Rig(venue=venue, routing={"ok": True, "reservation": "res-9", "venue": venue})
         # ⚠️ 必须 patch **真模块的属性**：代码写的是 `from astra_backend import execution_router`
         # ⇒ 一旦该模块被别处导入过，`from … import …` 走的是**包属性**，
@@ -264,7 +311,7 @@ class MultiVenueRouteTest(unittest.TestCase):
              patch("scripts.order_risk.validate_quote_geometry_and_rr",
                    return_value=(True, "", 1.0)):
             return rig, rig.run(venue_ctx={"notional_usdt": 100, "margin_usdt": 50,
-                                           "leverage": 5, "confidence": 90})
+                                           "leverage": 5, "confidence": 90}, **over)
 
     def test_router_success_records_intent_and_confirms(self):
         calls = []
@@ -283,6 +330,46 @@ class MultiVenueRouteTest(unittest.TestCase):
         self.assertEqual(rig.recorded, [(INST, "buy")])
         self.assertEqual(rig.confirmed, ["res-9"])
 
+    def test_callback_failure_after_acceptance_keeps_claim_and_blocks_retry(self):
+        import tempfile
+        from pathlib import Path
+        from scripts.trader import open_entry_guard
+
+        calls = []
+
+        def accepted(payload, **kw):
+            calls.append(payload)
+            return {"ok": True, "order_id": "bn-accepted-1"}
+
+        with tempfile.TemporaryDirectory(prefix="astra-submit-accepted-") as td:
+            with patch.object(open_entry_guard, "OPEN_ENTRY_CLAIMS_FILE",
+                              Path(td) / "claims.json"):
+                rig, first = self._run(
+                    accepted,
+                    record_open_intent=lambda *_: (_ for _ in ()).throw(ValueError("bad intent")))
+                _, second = self._run(accepted)
+
+        self.assertFalse(first[0])
+        self.assertIn("bad intent", first[1])
+        self.assertFalse(second[0])
+        self.assertIn("开仓防重拒绝", second[1])
+        self.assertEqual(len(calls), 1, "accepted order identity must keep durable claim")
+
+    def test_unknown_router_outcome_persists_claim_and_blocks_retry(self):
+        calls = []
+
+        def unknown(payload, **kw):
+            calls.append(payload)
+            return {"ok": False, "detail": "transport outcome unavailable"}
+
+        _rig, first = self._run(unknown)
+        _retry_rig, second = self._run(unknown)
+
+        self.assertFalse(first[0])
+        self.assertFalse(second[0])
+        self.assertIn("开仓防重拒绝", second[1])
+        self.assertEqual(len(calls), 1, "an unclassified router outcome must remain fail-closed")
+
     def test_router_refusal_releases_the_reservation(self):
         rig, (ok, why) = self._run(lambda payload, **kw: {"ok": False, "detail": "深度不足"})
         self.assertFalse(ok)
@@ -299,7 +386,7 @@ class MultiVenueRouteTest(unittest.TestCase):
         self.assertEqual(rig.released, [("res-9", "多所执行异常: 路由器炸了")])
 
 
-class OkxDirectTest(unittest.TestCase):
+class OkxDirectTest(_ClaimIsolatedTest):
     def test_leverage_alignment_is_attempted_before_order(self):
         rig = Rig()
         with patch("scripts.order_risk.validate_quote_geometry_and_rr",
@@ -425,7 +512,7 @@ class OkxDirectTest(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 
-class DemoRescaleTest(unittest.TestCase):
+class DemoRescaleTest(_ClaimIsolatedTest):
     """demo 沙盒与真实盘价差 >5% 时按沙盒价**重算**报价与保护价（否则必然废单）。
 
     重算后还要**再验一遍几何边界**：long 的 SL 必须低于入场、TP 必须高于入场（short 反之），
@@ -472,7 +559,7 @@ class DemoRescaleTest(unittest.TestCase):
         self.assertAlmostEqual(kw["px"], 100000.0, places=4, msg="价差在阈值内不该改价")
 
 
-class GarbageLeverageInCtxTest(unittest.TestCase):
+class GarbageLeverageInCtxTest(_ClaimIsolatedTest):
     def test_garbage_leverage_is_treated_as_absent(self):
         """`venue_ctx` 里的杠杆是垃圾值 ⇒ 视同没给（不设档、不抛）。"""
         rig = Rig()
@@ -480,7 +567,7 @@ class GarbageLeverageInCtxTest(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(rig.okx.leverage_calls, [], "垃圾杠杆值不许拿去设档")
 
-class ListingGateTest(unittest.TestCase):
+class ListingGateTest(_ClaimIsolatedTest):
     """环境维合约对账（US-007）：已下架/未上市 ⇒ fail-closed 拒单并释放预留。"""
 
     def test_delisted_contract_is_rejected(self):
@@ -500,7 +587,7 @@ class ListingGateTest(unittest.TestCase):
         self.assertTrue(ok, "对账不可用不该阻断下单")
 
 
-class RescaleFailureTraceTest(unittest.TestCase):
+class RescaleFailureTraceTest(_ClaimIsolatedTest):
     def test_rescale_failure_is_traced_and_does_not_block(self):
         """重算过程出异常 ⇒ **不阻断**，但必须**出声**（原来这里是静默 `pass`）。
 
@@ -523,7 +610,7 @@ class RescaleFailureTraceTest(unittest.TestCase):
                         "即便重算中途失败，**核心安全复验也必须仍然跑到**（不可绕过）")
 
 
-class LongStopPushBackTest(unittest.TestCase):
+class LongStopPushBackTest(_ClaimIsolatedTest):
     def test_long_stop_above_entry_after_rescale_is_pushed_below(self):
         """重算把 SL 推到入场上方 ⇒ 必须按比例压回下方（否则多头的止损方向反了）。"""
         rig = Rig(price=100000.0, tp=105000.0, sl=101000.0, ticker="95000", simulated=True)

@@ -27,6 +27,7 @@ from __future__ import annotations
 import math
 import os
 import time
+import uuid
 from typing import Any, Dict, Optional, Tuple
 
 #: 走 `astra_backend.execution_router.open_protected_position` 落地下单的场所。
@@ -524,6 +525,30 @@ def submit_protected_limit_order(inst_id: str, side: str, pos_side: str, size: f
                 release_signal_reservation(_reservation, "入场闸门拒绝")
             return False, f"入场闸门拒绝: {_gate_why}"
 
+    # 最终提交边界的持久化防重：周期快照和下单后意图簿都可能滞后，
+    # 因此不能把同一标的的第二次请求交给交易所再决定。这里不再是 opt-in
+    # 开关；所有最终开仓写请求都必须先持有 durable claim。
+    _entry_claim_id = ""
+    _accepted_server_order_id = ""
+    from scripts.trader.open_entry_guard import (
+        claim_open_entry, commit_open_entry, mark_open_entry_submitting,
+        mark_open_entry_unknown, release_open_entry)
+
+    def _claim_before_submit() -> Tuple[bool, str]:
+        nonlocal _entry_claim_id
+        _claim_ok, _claim_reason, _entry_claim_id = claim_open_entry(
+            environment=str(env.mode), venue=target_venue, inst_id=inst_id,
+            side=pos_side)
+        if not _claim_ok:
+            return False, str(_claim_reason or "")
+        if not mark_open_entry_submitting(_entry_claim_id):
+            return False, "开仓防重状态无法持久化为 submitting，安全拒绝下单"
+        return True, ""
+
+    def _release_entry_claim() -> None:
+        if _entry_claim_id:
+            release_open_entry(_entry_claim_id, confirmed_not_sent=True)
+
     # 多所平权执行：若路由选定 Gate 或 Binance，走统一原生受保护执行路由
     if target_venue in ("gate", "binance"):
         try:
@@ -549,6 +574,10 @@ def submit_protected_limit_order(inst_id: str, side: str, pos_side: str, size: f
                 lever_val = default_lever
             lever_val = max(float(MIN_LEVERAGE or 1.0), min(float(MAX_LEVERAGE or 20.0), lever_val))
 
+            _claim_ok, _claim_reason = _claim_before_submit()
+            if not _claim_ok:
+                release_signal_reservation(_reservation, _claim_reason)
+                return False, f"开仓防重拒绝: {_claim_reason}"
             res = execution_router.open_protected_position({
                 "venue": target_venue,
                 "asset": asset_canonical,
@@ -561,16 +590,37 @@ def submit_protected_limit_order(inst_id: str, side: str, pos_side: str, size: f
                 "take_profit_price": effective_tp,
                 "stop_loss_price": effective_sl,
                 "environment": str(env.mode),
+                "inst_id": inst_id,
+                "entry_claim_id": _entry_claim_id,
                 "order_mode": order_mode,
                 # 审计 P1-7：per-venue min_confidence 生效所需的原始 AI 置信度（缺失=不做该检查）
                 "confidence": float(venue_ctx.get("confidence") or 0.0) if isinstance(venue_ctx, dict) else 0.0,
             }, environment=str(env.mode))
             if not res.get("ok"):
                 detail = res.get("detail") or "多所执行路由拒绝"
+                # A router failure without an explicit state is treated as
+                # unknown, never as permission to retry. The production router
+                # always supplies this field; the conservative default protects
+                # future/manual implementations too.
+                _submission_state = str(res.get("submission_state") or "")
+                if _submission_state == "rejected_before_send":
+                    _release_entry_claim()
+                elif _submission_state != "accepted_with_id" and _entry_claim_id:
+                    mark_open_entry_unknown(_entry_claim_id, str(detail))
                 release_signal_reservation(_reservation, detail)
                 return False, f"{target_venue.upper()} 下单失败: {detail}"
 
-            order_id = str(res.get("order_id") or res.get("tp_id") or f"{target_venue}-ok")
+            order_id = str(res.get("order_id") or "").strip()
+            if not order_id:
+                # Successful control flow without a server identity is not a
+                # confirmed entry. Keep the claim for reconciliation.
+                if _entry_claim_id:
+                    mark_open_entry_unknown(_entry_claim_id, "accepted response without order id")
+                release_signal_reservation(_reservation, "交易所未返回可核验订单号")
+                return False, "exchange accepted response without a verifiable order id"
+            # A server identity proves acceptance. Later bookkeeping exceptions
+            # must never release the claim and enable a duplicate entry retry.
+            _accepted_server_order_id = order_id
             # ⚠️ 通知/巡检文案必须说**实提交**的量与保证金。多所路径按
             # 「保证金 × 杠杆 ÷ 现价」反推该所**原生**数量（币安=币数、Gate=张），
             # 与 OKX 的"张"完全不是一个口径；而调用方手里只有 OKX 张数
@@ -592,10 +642,22 @@ def submit_protected_limit_order(inst_id: str, side: str, pos_side: str, size: f
                     persist_venue_execution_evidence(res["execution_evidence"])
                 except Exception as evidence_exc:
                     print(f"[binance execution evidence] warn persist skipped: {evidence_exc}")
+            # 交易所已返回可核验订单号：保留 claim，阻止快照延迟期间的重复开仓。
+            if _entry_claim_id:
+                commit_open_entry(_entry_claim_id, order_id)
             record_open_intent(inst_id, side)
             confirm_signal_reservation(_reservation)
             return True, order_id
         except Exception as exc:
+            # 路由器异常可能发生在交易所已受理但响应未返回的窗口；只有
+            # 明确的发单前拒绝才能释放 claim。超时、网络异常和未知异常
+            # 必须保留 claim，等待对账恢复，不能立即重试第二笔订单。
+            if _entry_claim_id and not _accepted_server_order_id:
+                from scripts.trader.open_entry_guard import classify_entry_submission_exception
+                if classify_entry_submission_exception(exc) == "rejected_before_send":
+                    _release_entry_claim()
+                else:
+                    mark_open_entry_unknown(_entry_claim_id, str(exc))
             release_signal_reservation(_reservation, f"多所执行异常: {exc}")
             return False, f"{target_venue.upper()} 执行异常: {exc}"
 
@@ -662,13 +724,27 @@ def submit_protected_limit_order(inst_id: str, side: str, pos_side: str, size: f
                                f"—— 请提高单笔保证金或改用其他标的")
             size = _okx_size_from_margin
 
+    _claim_ok, _claim_reason = _claim_before_submit()
+    if not _claim_ok:
+        release_signal_reservation(_reservation, _claim_reason)
+        return False, f"开仓防重拒绝: {_claim_reason}"
+
     try:
         rows = okx_rest.place_order(
             inst_id, side, f"{size:g}",
             pos_side=pos_side, td_mode="cross", ord_type=ord_type,
             px=entry_px, attach_tp=effective_tp, attach_sl=effective_sl,
+            attach_algo_cl_ord_id=f"astraprotect{uuid.uuid4().hex[:12]}",
         )
     except Exception as exc:
+        # Only a demonstrable local/explicit venue refusal may release the
+        # claim. Timeout, transport reset, and unknown OKX responses remain
+        # durable recovery work.
+        from scripts.trader.open_entry_guard import classify_entry_submission_exception
+        if classify_entry_submission_exception(exc) == "rejected_before_send":
+            _release_entry_claim()
+        elif _entry_claim_id:
+            mark_open_entry_unknown(_entry_claim_id, str(exc))
         release_signal_reservation(_reservation, "下单异常")
         return False, str(exc)
     order_id = None
@@ -677,8 +753,13 @@ def submit_protected_limit_order(inst_id: str, side: str, pos_side: str, size: f
         if order_id:
             break
     if not order_id:
+        # 回执存在但没有可核验订单号，状态属于 unknown；claim 不得释放。
+        if _entry_claim_id:
+            mark_open_entry_unknown(_entry_claim_id, "accepted response without order id")
         release_signal_reservation(_reservation, "交易所未返回可核验订单号")
         return False, "exchange accepted response without a verifiable order id"
+    if _entry_claim_id:
+        commit_open_entry(_entry_claim_id, str(order_id))
     record_open_intent(inst_id, side)
     confirm_signal_reservation(_reservation)
     return True, str(order_id)

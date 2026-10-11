@@ -28,6 +28,68 @@ class _FakeAdapter:
         return {"orderId": "12345"}
 
 
+class _ProtectedAdapter(_FakeAdapter):
+    def __init__(self, size_signed: float):
+        super().__init__(size_signed)
+        self.canceled = []
+        self.protection_rows = [
+            {"id": "", "symbol": "ETHUSDT", "side": "sell",
+             "quantity": "0.275", "type": "STOP_MARKET",
+             "clientAlgoId": "t-astrasl-test"},
+            {"id": "manual-1", "symbol": "ETHUSDT", "side": "sell",
+             "quantity": "0.275", "type": "LIMIT",
+             "clientAlgoId": "user-order"},
+        ]
+
+    def list_protective_orders(self, symbol=None):
+        return [dict(row) for row in self.protection_rows]
+
+    def cancel_algo_order(self, *, algo_id=None, client_algo_id=None):
+        identity = str(algo_id or client_algo_id or "")
+        self.canceled.append(identity)
+        self.protection_rows = [row for row in self.protection_rows
+                                if str(row.get("id") or row.get("algoId") or "") != identity
+                                and str(row.get("clientAlgoId") or "") != identity]
+        return {"ok": True}
+
+
+class _HedgeProtectedAdapter:
+    def __init__(self):
+        self.rows = [
+            {"venue": "binance", "inst_id": "ETHUSDT", "base": "ETH",
+             "size_signed": -0.275, "side": "short"},
+            {"venue": "binance", "inst_id": "ETHUSDT", "base": "ETH",
+             "size_signed": 0.5, "side": "long"},
+        ]
+        self.protection_rows = [
+            {"id": "1", "algoId": "1", "symbol": "ETHUSDT", "side": "buy",
+             "quantity": "0.275", "type": "STOP_MARKET",
+             "clientAlgoId": "t-astrasl-short"},
+            {"id": "2", "algoId": "2", "symbol": "ETHUSDT", "side": "sell",
+             "quantity": "0.5", "type": "STOP_MARKET",
+             "clientAlgoId": "t-astrasl-long"},
+        ]
+        self.canceled = []
+
+    def positions(self):
+        return list(self.rows)
+
+    def fast_close_position(self, symbol: str, pos_side=None):
+        self.rows = [row for row in self.rows if row["side"] != pos_side]
+        return {"orderId": "close-short"}
+
+    def list_protective_orders(self, symbol=None):
+        return [dict(row) for row in self.protection_rows]
+
+    def cancel_algo_order(self, *, algo_id=None, client_algo_id=None):
+        identity = str(algo_id or client_algo_id or "")
+        self.canceled.append(identity)
+        self.protection_rows = [row for row in self.protection_rows
+                                if str(row.get("id") or row.get("algoId") or "") != identity
+                                and str(row.get("clientAlgoId") or "") != identity]
+        return {"ok": True, "algoId": algo_id, "clientAlgoId": client_algo_id}
+
+
 class CloseIntentTests(unittest.TestCase):
     def setUp(self):
         close_intent._INTENTS.clear()
@@ -112,6 +174,27 @@ class CloseIntentTests(unittest.TestCase):
             self.assertIn("已轮换", str(ctx.exception))
         self.assertEqual(adapter.close_calls, [])
         self.assertIsNotNone(close_intent.peek(token))  # 预检失败不烧令牌
+
+    def test_manual_close_cancels_only_attributed_protection_legs(self):
+        token, confirmation = self._make_intent()
+        adapter = _ProtectedAdapter(0.275)
+        with patch("astra_backend.exchanges.get_adapter", return_value=adapter):
+            result = close_intent.venue_fast_close("binance", "demo", token, confirmation)
+        self.assertEqual(result["status"], "confirmed_closed")
+        self.assertEqual(adapter.canceled, ["t-astrasl-test"],
+                         "只有 clientAlgoId 时必须使用 Binance 官方 client_algo_id 撤单键")
+        self.assertIn("保护腿已核验撤除 1 张", result["protection_cleanup"])
+
+    def test_hedge_manual_close_cleans_only_the_closed_direction(self):
+        token, confirmation = close_intent.create(
+            venue="binance", environment="demo", display_inst="ETH-USDT-SWAP",
+            symbol="ETH", pos_side="short", expected_size=0.275)
+        adapter = _HedgeProtectedAdapter()
+        with patch("astra_backend.exchanges.get_adapter", return_value=adapter):
+            result = close_intent.venue_fast_close("binance", "demo", token, confirmation)
+        self.assertEqual(result["status"], "confirmed_closed")
+        self.assertEqual(adapter.canceled, ["1"])
+        self.assertNotIn("2", adapter.canceled, "仍有多仓时不得误撤多仓保护腿")
 
     def test_happy_path_closes_market_and_confirms_zero(self):
         token, confirmation = self._make_intent()

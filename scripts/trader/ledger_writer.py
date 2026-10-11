@@ -79,6 +79,14 @@ def record_trade(trade_data, *, LEDGER_JSON_FILE: str, _atomic_write_json,
         if os.path.exists(LEDGER_JSON_FILE):
             with open(LEDGER_JSON_FILE, "r", encoding="utf-8") as f:
                 ledger = json.load(f)
+        # Scale-out recovery may replay after a crash between the ledger write
+        # and tracker finalization. An operation identity makes that replay
+        # idempotent without deduplicating unrelated trades.
+        _operation_id = trade_data.get("operation_id") if isinstance(trade_data, dict) else None
+        if _operation_id and any(
+                isinstance(row, dict) and row.get("operation_id") == _operation_id
+                for row in ledger):
+            return LEDGER_JSON_FILE
         ledger.append(trade_data)
         # 审计③(2026-09-13)：生产台账直 open("w") 覆写 → 原子替换。读者（熔断/
         # 日报/备份/面板）不再可能撞见半截 JSON。

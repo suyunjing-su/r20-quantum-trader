@@ -52,9 +52,23 @@ class _CloseAdapter:
 
     def cancel_price_order(self, order_id):
         self.cancel_price_calls.append(order_id)
+        wanted = str(order_id)
+        self.protective_legs = [
+            row for row in self.protective_legs
+            if not any(str(row.get(key) or "") == wanted
+                       for key in ("id", "id_string", "order_id"))
+        ]
+        return {"status": "finished"}
 
-    def cancel_algo_order(self, *, algo_id):
-        self.cancel_algo_calls.append(algo_id)
+    def cancel_algo_order(self, *, algo_id=None, client_algo_id=None):
+        identity = str(algo_id or client_algo_id or "")
+        self.cancel_algo_calls.append(identity)
+        self.protective_legs = [
+            row for row in self.protective_legs
+            if not any(str(row.get(key) or "") == identity
+                       for key in ("id", "algo_id", "client_algo_id"))
+        ]
+        return {"code": "200", "msg": "success"}
 
 
 def _adapter(accept_pos_side=False, **kwargs):
@@ -88,19 +102,16 @@ class _Base(unittest.TestCase):
         self.require = self._start(mock.patch.object(ER, "require_execution"))
         self._start(mock.patch.object(ER, "is_sandbox_environment",
                                       side_effect=lambda e: str(e) in ("demo", "sandbox")))
-        self._start(mock.patch.object(
-            ER, "canonical_base",
-            side_effect=lambda s: str(s or "").upper().split("-")[0]))
 
 
 class VerifyFlatTests(_Base):
-    def _flat(self, rows, *, tries=None):
+    def _flat(self, rows, *, tries=None, pos_side=None):
         self.adapter.rows = rows
         self.pos_mock = mock.Mock(side_effect=lambda: list(self.adapter.rows))
         self.adapter.positions = self.pos_mock
         if tries is not None:
             self._start(mock.patch.object(ER, "CLOSE_FLAT_POLL_TRIES", tries))
-        return ER._verify_symbol_flat(self.adapter, "BTC")
+        return ER._verify_position_side_flat(self.adapter, "BTC", pos_side)
 
     def test_no_positions_at_all_is_flat(self):
         self.assertEqual(self._flat([]), (True, 0.0))
@@ -127,6 +138,17 @@ class VerifyFlatTests(_Base):
         flat, remaining = self._flat([{"base": "BTC", "size_signed": 4.0}])
         self.assertIs(flat, False)
         self.assertEqual(remaining, 4.0)
+
+    def test_target_side_with_unreadable_direction_is_not_claimed_flat(self):
+        flat, remaining = self._flat([{"base": "BTC", "size_signed": "很多"}], pos_side="short")
+        self.assertFalse(flat, "方向和数量读不出时不能假设该仓是对向 hedge 仓")
+        self.assertEqual(remaining, 1.0)
+
+    def test_known_opposite_direction_does_not_block_target_flatness(self):
+        flat, remaining = self._flat([{"base": "BTC", "side": "long", "size_signed": 2.0}],
+                                     pos_side="short")
+        self.assertTrue(flat, "已知对向仓仍在不应阻止目标方向归零核验")
+        self.assertEqual(remaining, 0.0)
 
     def test_non_dict_rows_are_skipped(self):
         self.assertEqual(self._flat(["junk", None, {"base": "BTC", "size_signed": 0}]),
@@ -244,8 +266,16 @@ class CancelProvenOwnLegsTests(_Base):
 
     def _cancel(self, legs, to_cancel, not_touched=0, before=None):
         self.adapter.protective_legs = legs
-        self.select.return_value = {"to_cancel": list(to_cancel),
-                                    "counts": {"not_touched": not_touched}}
+        result = {"to_cancel": list(to_cancel),
+                  "counts": {"not_touched": not_touched}}
+        if not_touched:
+            result["not_touched"] = {
+                "orphan_unattributed": [
+                    {"id": f"untouched-{index}"}
+                    for index in range(not_touched)
+                ]
+            }
+        self.select.return_value = result
         return ER._cancel_proven_own_legs(self.adapter, "BTC", before)
 
     def test_only_legs_of_this_contract_are_considered(self):
@@ -272,29 +302,33 @@ class CancelProvenOwnLegsTests(_Base):
         self._cancel([], [])
         self.assertIsNone(self.select.call_args[0][2])
 
-    def test_protective_listing_failure_means_no_legs(self):
+    def test_protective_listing_failure_is_explicit_and_selector_is_not_faked(self):
         self.adapter.list_protective_orders = mock.Mock(side_effect=RuntimeError("读不到"))
         note = self._cancel([], [])
-        self.assertEqual(self.select.call_args[0][1], [])
-        self.assertIn("保护腿已撤 0 张", note)
+        self.assertIsNone(self.select.call_args)
+        self.assertIn("保护腿清单读取失败", note)
+        self.assertFalse(note.ok)
 
     def test_price_order_cancel_is_preferred(self):
         note = self._cancel([], [{"id": "leg-1"}])
         self.assertEqual(self.adapter.cancel_price_calls, ["leg-1"])
-        self.assertIn("保护腿已撤 1 张", note)
+        self.assertIn("保护腿已核验撤除 1 张", note)
+        self.assertTrue(note.ok)
 
     def test_algo_cancel_is_the_fallback(self):
         class _AlgoOnly:
             def list_protective_orders(self, symbol):
                 return []
 
-            def cancel_algo_order(self, *, algo_id):
-                self.seen = algo_id
+            def cancel_algo_order(self, *, algo_id=None, client_algo_id=None):
+                self.seen = algo_id or client_algo_id
+                return {"code": "200"}
 
         self.adapter = _AlgoOnly()
-        note = self._cancel([], [{"id": "leg-2"}])
+        note = self._cancel([], [{"id": "leg-2", "algo_id": "leg-2"}])
         self.assertEqual(self.adapter.seen, "leg-2")
-        self.assertIn("保护腿已撤 1 张", note)
+        self.assertIn("保护腿已核验撤除 1 张", note)
+        self.assertTrue(note.ok)
 
     def test_absent_cancel_methods_count_as_failed(self):
         class _NoCancel:
@@ -303,34 +337,42 @@ class CancelProvenOwnLegsTests(_Base):
 
         self.adapter = _NoCancel()
         note = self._cancel([], [{"id": "leg-3"}])
-        self.assertIn("撤单失败 1 张", note)
-        self.assertIn("需人工核对", note)
+        self.assertIn("缺少逐腿撤单能力", note)
+        self.assertFalse(note.ok)
+        self.assertFalse(note.attempted)
 
-    def test_items_without_an_id_are_skipped(self):
+    def test_items_without_an_id_are_explicit_cleanup_failures(self):
         note = self._cancel([], [{"id": ""}, {}])
-        self.assertIn("保护腿已撤 0 张", note)
-        self.assertNotIn("失败", note)
+        self.assertIn("保护腿已核验撤除 0 张", note)
+        self.assertIn("Gate price_order 身份缺失", note)
+        self.assertFalse(note.ok)
 
     def test_per_leg_failure_is_counted_not_raised(self):
         self.adapter.cancel_price_order = mock.Mock(side_effect=RuntimeError("撤不动"))
         note = self._cancel([], [{"id": "leg-4"}])
-        self.assertIn("撤单失败 1 张", note)
+        self.assertIn("清理未完成", note)
+        self.assertFalse(note.ok)
+        self.assertEqual(note.failures[0], "leg-4: 撤不动")
 
-    def test_untouched_legs_are_reported(self):
+    def test_untouched_legs_are_reported_without_being_cleanup_failures(self):
         note = self._cancel([], [], not_touched=3)
-        self.assertIn("另有 3 张**未撤**", note)
-        self.assertIn("归属审计", note)
+        self.assertIn("另有 3 张归属/方向未确认", note)
+        self.assertIn("需人工核对", note)
+        self.assertTrue(note.ok, "未获所有权授权的腿是安全保留，不是本方撤单失败")
+        self.assertEqual(len(note.report_only), 3)
+        self.assertEqual({row["bucket"] for row in note.report_only}, {"orphan_unattributed"})
 
     def test_clean_note_has_no_extra_clauses(self):
         note = self._cancel([], [])
-        self.assertEqual(note, "；保护腿已撤 0 张")
+        self.assertEqual(note, "；保护腿已核验撤除 0 张")
+        self.assertTrue(note.ok)
 
     def test_contract_match_requires_the_canonical_form(self):
         """⚠️ 这里**不**做大小写归一：过滤条件是 `leg_base(l) == canonical_inst(base)`。
         所以 `leg_base` 必须返回规范形态，否则该腿会被静默排除
         （第 189 刀踩过的正是这类"静默排除"）。"""
         self._cancel([{"symbol": "btcusdt", "id": "a"}], [])
-        self.assertEqual(self.select.call_args[0][1], [])
+        self.assertEqual(len(self.select.call_args[0][1]), 1)
         self._cancel([{"symbol": "BTCUSDT", "id": "a"}], [])
         self.assertEqual(len(self.select.call_args[0][1]), 1)
 
@@ -343,7 +385,10 @@ class ClosePositionTests(_Base):
         # （需要真跑它的那一条用例会把原函数重新盖回去，见下。）
         self._real_cancel = ER._cancel_proven_own_legs
         self._start(mock.patch.object(ER, "_cancel_proven_own_legs",
-                                      return_value="；保护腿已撤 0 张"))
+                                      return_value=ER.ProtectionCleanupResult(
+                                          "；保护腿已核验撤除 0 张", ok=True,
+                                          attempted=True, applicable=True,
+                                          verified=True)))
 
     def _close(self, adapter=None, venue="gate", pass_adapter=False, **kwargs):
         ad = adapter or self.adapter
@@ -488,7 +533,10 @@ class CloseCleanupTests(_Base):
         self.flat = self._start(mock.patch.object(ER, "_verify_symbol_flat",
                                                  return_value=(True, 0.0)))
         self.cancel = self._start(mock.patch.object(
-            ER, "_cancel_proven_own_legs", return_value="；保护腿已撤 2 张"))
+            ER, "_cancel_proven_own_legs",
+            return_value=ER.ProtectionCleanupResult(
+                "；保护腿已核验撤除 2 张", ok=True, attempted=True,
+                applicable=True, verified=True)))
 
     def _close(self, venue="gate", **kwargs):
         return ER.close_position("BTC", venue=venue, adapter=self.adapter, **kwargs)
@@ -497,7 +545,7 @@ class CloseCleanupTests(_Base):
         out = self._close()
         self.assertEqual(self.flat.call_count, 1)
         self.cancel.assert_called_once()
-        self.assertIn("保护腿已撤 2 张", out["detail"])
+        self.assertIn("保护腿已核验撤除 2 张", out["detail"])
 
     def test_cleanup_uses_the_pre_close_snapshot(self):
         self._close()
@@ -508,13 +556,15 @@ class CloseCleanupTests(_Base):
         self.flat.return_value = (False, 3.5)
         out = self._close()
         self.cancel.assert_not_called()
-        self.assertIn("未核验归零（同合约仍有 3.5）", out["detail"])
+        self.assertFalse(out["ok"])
+        self.assertIn("未核验归零", out["detail"])
         self.assertIn("保护腿保持不动", out["detail"])
 
     def test_not_flat_without_a_readable_size_says_so(self):
         self.flat.return_value = (False, 0.0)
         out = self._close()
-        self.assertIn("未核验归零（持仓读不到）", out["detail"])
+        self.assertFalse(out["ok"])
+        self.assertIn("未核验归零", out["detail"])
 
     def test_okx_skips_the_cleanup_entirely(self):
         out = self._close(venue="okx")
@@ -532,8 +582,8 @@ class CloseCleanupTests(_Base):
     def test_cleanup_exception_never_changes_the_close_verdict(self):
         self.flat.side_effect = RuntimeError("核验炸了")
         out = self._close()
-        self.assertIs(out["ok"], True, "收尾失败不得让上层以为平仓失败并重试")
-        self.assertIn("保护腿收尾异常", out["detail"])
+        self.assertIs(out["ok"], False, "收尾失败必须显式失败闭锁")
+        self.assertIn("条件单清理未完成", out["detail"])
         self.assertIn("需人工核对", out["detail"])
 
     def test_cleanup_failure_does_not_leak_the_exception_text(self):
@@ -544,7 +594,7 @@ class CloseCleanupTests(_Base):
     def test_detail_keeps_the_adapter_payload_and_the_note(self):
         out = self._close()
         self.assertIn("市价全平已提交", out["detail"])
-        self.assertIn("保护腿已撤 2 张", out["detail"])
+        self.assertIn("保护腿已核验撤除 2 张", out["detail"])
 
     def test_truncation_of_the_adapter_payload(self):
         self.adapter2 = _adapter(closed={"closed": True, "blob": "x" * 500})

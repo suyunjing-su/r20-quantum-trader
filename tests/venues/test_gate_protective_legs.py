@@ -123,6 +123,26 @@ class ListAndCancelProtectiveTest(_Base):
         with self.assertRaises(GateAPIError):
             self.ad.list_protective_orders("BTC")
 
+    def test_list_pages_all_open_price_orders_and_prefers_id_string(self):
+        first = [{"id": index, "id_string": str(index), "status": "open",
+                  "initial": {"contract": "BTC_USDT"}}
+                 for index in range(100)]
+        second = [{"id": 100, "id_string": "100", "status": "open",
+                   "initial": {"contract": "BTC_USDT"}}]
+        calls = []
+
+        def _paged(method, path, params=None, body=None, **kwargs):
+            calls.append(dict(params or {}))
+            return first if len(calls) == 1 else second
+
+        self.ad.signed_request = _paged
+        rows = self.ad.list_protective_orders("BTC")
+        self.assertEqual(len(rows), 101)
+        self.assertEqual([call["offset"] for call in calls], [0, 100])
+        self.assertEqual(rows[-1]["id"], "100")
+        self.assertEqual(rows[-1]["id_string"], "100")
+        self.assertEqual(calls[0]["contract"], "BTC_USDT")
+
     def test_cancel_protective_orders_swallows_failures_into_a_print(self):
         """⚠️ **实测边界（列待议）**：这只实现了「尽力撤」—— 某条失败**只 `print`**，
         返回列表**只含成功项**，调用方**无法区分**「全部撤掉」与「部分失败」。

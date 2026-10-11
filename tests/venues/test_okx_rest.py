@@ -261,6 +261,16 @@ class OKXRestHttpBoundaryTests(unittest.TestCase):
         self.assertEqual(body["slTriggerPxType"], "mark")
         self.assertEqual(headers["content-type"], "application/json")
 
+    def test_oco_can_carry_astra_ownership_marker(self):
+        freeze_environment(DEMO_ENV)
+        self.urlopen.return_value = _response(data=[{"algoId": "a-marked"}])
+        okx_rest.place_algo_oco("BTC-USDT-SWAP", "sell", 2, pos_side="long",
+                                tp_trigger_px=29000, sl_trigger_px=26000,
+                                algo_client_id="astraprotectabc123")
+        _, _, _, data = _captured(self.urlopen)
+        self.assertEqual(json.loads(data.decode("utf-8"))["algoClOrdId"],
+                         "astraprotectabc123")
+
     def test_cancel_algo_orders_uses_array_body(self):
         freeze_environment(DEMO_ENV)
         self.urlopen.return_value = _response(data=[{"algoId": "a-1", "sCode": "0"}])

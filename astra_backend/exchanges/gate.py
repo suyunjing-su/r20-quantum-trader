@@ -684,17 +684,56 @@ class GateAdapter(BaseExchangeAdapter):
         return placed
 
     def list_protective_orders(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
-        params = {"status": "open", "limit": "100"}
+        """List every open Gate futures price-triggered order.
+
+        Gate returns at most ``limit`` rows per page.  A close cleanup must not
+        silently inspect only the first 100 account-wide rows, so walk the
+        documented ``offset`` pagination until the API returns a short page.
+        ``id_string`` is preferred because the API documents it as the
+        int64-safe representation of the same auto-order ID.
+        """
+        limit = 100
+        base_params: Dict[str, Any] = {"status": "open", "limit": limit}
         if symbol:
-            params["contract"] = self.native_symbol(symbol)
-        try:
-            data = self.signed_request("GET", "/api/v4/futures/usdt/price_orders",
-                                       params=params)
-            return data if isinstance(data, list) else []
-        except GateAPIError as err:
-            if "CONTRACT_NOT_FOUND" in str(err) or "not found" in str(err).lower():
-                return []
-            raise
+            base_params["contract"] = self.native_symbol(symbol)
+        rows: List[Dict[str, Any]] = []
+        offset = 0
+        seen_pages = set()
+        while True:
+            params = dict(base_params)
+            params["offset"] = offset
+            try:
+                data = self.signed_request("GET", "/api/v4/futures/usdt/price_orders",
+                                           params=params)
+            except GateAPIError as err:
+                if "CONTRACT_NOT_FOUND" in str(err) or "not found" in str(err).lower():
+                    return []
+                raise
+            if not isinstance(data, list):
+                raise GateAPIError("bad_response", "price_orders 列表回包结构异常")
+            if not data:
+                break
+            # An offset-ignoring proxy/API would otherwise loop forever and
+            # report a false complete scan.  Fail closed instead.
+            page_key = tuple(str((item or {}).get("id_string") or (item or {}).get("id") or "")
+                             for item in data if isinstance(item, dict))
+            if page_key and page_key in seen_pages:
+                raise GateAPIError("pagination", "price_orders 分页未前进，拒绝把重复页当作完整清单")
+            if page_key:
+                seen_pages.add(page_key)
+            for item in data:
+                if isinstance(item, dict):
+                    normalized = dict(item)
+                    normalized.setdefault("venue", "gate")
+                    ident = str(item.get("id_string") or item.get("id") or "").strip()
+                    if ident:
+                        normalized["id"] = ident
+                        normalized["id_string"] = str(item.get("id_string") or ident)
+                    rows.append(normalized)
+            if len(data) < limit:
+                break
+            offset += len(data)
+        return rows
 
     def cancel_price_order(self, order_id: Any) -> Any:
         return self.signed_request("DELETE", f"/api/v4/futures/usdt/price_orders/{order_id}")

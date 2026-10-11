@@ -27,6 +27,7 @@ import hmac
 import json
 import os
 import re
+import uuid
 import urllib.parse
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -296,6 +297,7 @@ def place_order(
     attach_tp_ord_px: Any = "-1",
     attach_sl_ord_px: Any = "-1",
     attach_trigger_px_type: str = "mark",
+    attach_algo_cl_ord_id: str | None = None,
     attach_algo_ords: Sequence[Mapping[str, Any]] | None = None,
     extra: Mapping[str, Any] | None = None,
     env: OKXEnvironment | None = None,
@@ -339,6 +341,11 @@ def place_order(
             leg["slTriggerPx"] = attach_sl
             leg["slOrdPx"] = attach_sl_ord_px
             leg["slTriggerPxType"] = attach_trigger_px_type
+        if attach_algo_cl_ord_id:
+            # OKX returns this client id as ``attachAlgoClOrdId`` in the
+            # attach response, which lets cleanup distinguish ASTRA-created
+            # legs from a user's manual TP/SL without canceling by symbol.
+            leg["attachAlgoClOrdId"] = str(attach_algo_cl_ord_id)
         legs.append(leg)
     if legs:
         params["attachAlgoOrds"] = legs
@@ -512,6 +519,7 @@ def place_algo_oco(
     tp_trigger_px: Any,
     sl_trigger_px: Any,
     tag: str | None = None,
+    algo_client_id: str | None = None,
     tp_ord_px: Any = "-1",
     sl_ord_px: Any = "-1",
     reduce_only: bool = True,
@@ -534,6 +542,11 @@ def place_algo_oco(
         "reduceOnly": reduce_only, "cxlOnClosePos": cxl_on_close_pos,
     }
     _with_broker_tag(params, tag)
+    if algo_client_id is not None:
+        marker = str(algo_client_id).strip()
+        if not re.fullmatch(r"[0-9A-Za-z]{1,32}", marker):
+            raise ValueError("algo_client_id must be 1..32 alphanumeric characters")
+        params["algoClOrdId"] = marker
     if extra:
         params.update(extra)
     _required(params.get("instId"), "instId")

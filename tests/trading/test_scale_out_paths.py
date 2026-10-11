@@ -32,6 +32,13 @@ class _Ad:
         self.placed = []
         self.cancelled = []
         self.attached = []
+        self.protective_rows = [{"id": "old-protection", "algoId": "old-protection",
+                                 "symbol": "BTCUSDT", "side": "sell",
+                                 "quantity": str(abs(float(POS["pos"]))), "type": "STOP_MARKET",
+                                 "clientAlgoId": "t-astrasl-old"}]
+        if venue == "binance":
+            # Binance has no Gate-style cancel_price_order capability.
+            self.cancel_price_order = None
 
     def native_symbol(self, symbol):
         return f"{symbol}_NATIVE"
@@ -47,28 +54,56 @@ class _Ad:
             raise RuntimeError("取消失败")
         self.cancelled.append(symbol)
 
+    def list_protective_orders(self, symbol=None):
+        return list(self.protective_rows)
+
+    def cancel_price_order(self, order_id):
+        if self.cancel_raises:
+            raise RuntimeError("取消失败")
+        self.cancelled.append(order_id)
+        self.protective_rows = [row for row in self.protective_rows
+                                if str(row.get("id") or "") != str(order_id)]
+        return {"status": "finished", "id_string": str(order_id)}
+
+    def cancel_algo_order(self, *, algo_id=None, client_algo_id=None):
+        if self.cancel_raises:
+            raise RuntimeError("取消失败")
+        identity = str(algo_id or client_algo_id or "")
+        self.cancelled.append(identity)
+        self.protective_rows = [row for row in self.protective_rows
+                                if str(row.get("algoId") or row.get("id") or "") != identity]
+        return {"algoId": algo_id, "clientAlgoId": client_algo_id, "code": "200"}
+
     def cancel_all_algo_open_orders(self, *, symbol):
         self.cancelled.append(symbol)
 
     def attach_protective_orders(self, name, pos_side, *, tp_px, sl_px, contracts):
         self.attached.append((name, pos_side, tp_px, sl_px, contracts))
-        return {"sl": "new"}
+        self.protective_rows.append({"id": "new", "algoId": "new", "symbol": "BTCUSDT",
+                                     "side": "sell" if pos_side == "long" else "buy",
+                                     "quantity": str(contracts), "type": "STOP_MARKET",
+                                     "triggerPrice": str(sl_px), "reduceOnly": True,
+                                     "clientAlgoId": "t-astrasl-new"})
+        if tp_px is not None:
+            self.protective_rows.append({"id": "new-tp", "algoId": "new-tp", "symbol": "BTCUSDT",
+                                         "side": "sell" if pos_side == "long" else "buy",
+                                         "quantity": str(contracts), "type": "TAKE_PROFIT_MARKET",
+                                         "triggerPrice": str(tp_px), "reduceOnly": True,
+                                         "clientAlgoId": "t-astratp-new-tp"})
+        return {"sl": "new", "tp": "new-tp" if tp_px is not None else None}
 
 
 class _AdOnlyProtective(_Ad):
-    """只实现 `cancel_protective_orders`（老适配器）⇒ 必须走那一条分支。"""
+    """只有按合约全撤能力的旧适配器：该能力不得被部分平仓路径使用。"""
+
+    list_protective_orders = None
 
     def cancel_all_algo_open_orders(self, *, symbol):      # 故意不可用
         raise AttributeError("本适配器没有这个方法")
 
 
 class _AdOnlyAlgoBulk:
-    """**没有** `cancel_protective_orders` 属性（不是"有但会抛"）⇒ 必须走 `elif` 那一条。
-
-    ⚠️ 第一版让它继承 `_Ad` 并把方法写成"调用即抛 AttributeError"——但 `hasattr` 看的是
-    **属性是否存在**，于是仍走 217 分支、方法抛错被吞 ⇒ 218 永远不执行。
-    "能力探测"要用**真的没有那个属性**来测。
-    """
+    """只有按合约全撤能力：部分平仓不得退化为 symbol-wide cancel。"""
 
     def __init__(self):
         self.placed = []
@@ -104,16 +139,26 @@ class _Okx:
     def __init__(self):
         self.placed = []
         self.cancelled = []
+        self.rows = []
 
     def place_order(self, inst_id, side, sz, **kw):
         self.placed.append((inst_id, side, sz, kw))
         return {"ordId": "okx1"}
 
     def pending_algo_orders(self, inst_id):
-        return []
+        return [dict(row) for row in self.rows]
+
+    def ensure_protection(self, inst_id, pos_side, size, tp_px, sl_px):
+        self.rows.append({"algoId": "okx-new", "algoClOrdId": "t-astraProtect-okx-new",
+                          "instId": inst_id, "posSide": pos_side,
+                          "side": "sell" if pos_side == "long" else "buy",
+                          "ordType": "oco", "sz": str(size), "reduceOnly": True,
+                          "slTriggerPx": str(sl_px), "tpTriggerPx": str(tp_px)})
+        return True, "ok"
 
     def cancel_algo_orders(self, ids, *, inst_id):
         self.cancelled.append((ids, inst_id))
+        return [{"sCode": "0"}]
 
 
 class Base(unittest.TestCase):
@@ -128,18 +173,20 @@ class Base(unittest.TestCase):
         tr = {KEY: {"scale_out_phase": 0, "takeProfitPx": 0.0, "stage_desc": ""}} \
             if trackers is None else trackers
         reg = _Registry(ads if ads is not None else {}) if registry else None
+        okx_adapter = okx if okx is not None else _Okx()
+        protection_fn = protection or okx_adapter.ensure_protection
         with patch.object(so, "SCALE_OUT_ENABLED", enabled), \
              patch.object(so, "SCALE_OUT_RATIO", float(ratio)), \
              patch.object(so, "SCALE_OUT_TRIGGER_ATR", 1.2):
             with redirect_stdout(self.printed):
                 return so.execute_scale_out_if_eligible(
                     f, p, tr, "2026-09-21 12:00:00", self.actions,
-                    okx_rest=okx if okx is not None else _Okx(),
+                    okx_rest=okx_adapter,
                     venue_registry=reg, record_trade=lambda *a, **k: None,
                     notify_trade_close=lambda **k: None,
                     close_fee=lambda *a, **k: 0.5,
                     close_trade_payload=lambda **k: k,
-                    ensure_cloud_position_protection=protection or (lambda *a, **k: (True, "ok")),
+                    ensure_cloud_position_protection=protection_fn,
                     **kw)
 
 
@@ -236,50 +283,74 @@ class GateAndGenericRoutingTest(Base):
         self.assertFalse(ok)
         self.assertTrue(any("未提供 GATE 适配器注册表" in a for a in self.actions), self.actions)
 
-    def test_generic_venue_success(self):
+    def test_generic_venue_fails_closed_before_partial_close(self):
+        """未实现 typed protection identity 的 venue 不得走通用下单兜底。"""
         ad = _Ad(venue="kraken")
-        self._run(pos=self._pos("kraken"), ads={"kraken": ad})
-        self.assertEqual(len(ad.placed), 1, "多所兜底路径要能下单")
-        self.assertTrue(ad.placed[0][3].get("reduce_only"))
-
-    def test_generic_venue_failure_and_missing_registry(self):
-        ok, _ = self._run(pos=self._pos("kraken"),
-                          ads={"kraken": _Ad(venue="kraken", raises=True)})
+        ok, why = self._run(pos=self._pos("kraken"), ads={"kraken": ad})
         self.assertFalse(ok)
-        self.assertTrue(any("KRAKEN" in a and "失败" in a for a in self.actions), self.actions)
-        ok2, _ = self._run(pos=self._pos("kraken"), registry=False)
+        self.assertIn("旧保护身份不可核验", why)
+        self.assertEqual(ad.placed, [], "无安全保护单快照能力时不得提交减仓")
+        self.assertEqual(ad.cancelled, [])
+
+    def test_generic_venue_with_or_without_registry_fails_closed(self):
+        ad = _Ad(venue="kraken", raises=True)
+        ok, why = self._run(pos=self._pos("kraken"), ads={"kraken": ad})
+        self.assertFalse(ok)
+        self.assertIn("旧保护身份不可核验", why)
+        self.assertEqual(ad.placed, [], "不支持的 venue 必须在下单前拒绝")
+
+        ok2, why2 = self._run(pos=self._pos("kraken"), registry=False)
         self.assertFalse(ok2)
-        self.assertTrue(any("未提供 KRAKEN 适配器注册表" in a for a in self.actions), self.actions)
+        self.assertIn("旧保护身份不可核验", why2)
 
 
 class ProtectionCleanupTest(Base):
-    def test_old_protection_is_cancelled_before_rebuilding(self):
+    def test_old_symbol_wide_capability_is_not_used(self):
         ad = _Ad()
         ok, why = self._run(ads={"binance": ad})
         self.assertTrue(ok, why)
-        self.assertEqual(ad.cancelled, ["BTC"],
-                         "下单成功后必须清掉旧保护单（否则超额单量可能反向开仓）")
-        self.assertEqual(len(ad.attached), 1, "并且要为剩余仓位重建保护")
+        self.assertEqual(ad.cancelled, ["old-protection"],
+                         "有逐腿列表时必须按单腿撤销，不得调用 symbol-wide 接口")
 
-    def test_cleanup_failure_only_warns(self):
+    def test_cleanup_failure_enters_recovery_and_blocks_a_second_partial_close(self):
         ad = _Ad(cancel_raises=True)
-        ok, _ = self._run(ads={"binance": ad})
-        self.assertTrue(ok, "旧保护单清理失败只告警，不该让已成交的减仓判失败")
-        self.assertIn("旧保护单异常", self.printed.getvalue())
+        tr = {KEY: {"scale_out_phase": 0, "takeProfitPx": 0.0}}
+        ok, why = self._run(trackers=tr, ads={"binance": ad})
+        self.assertFalse(ok, "未核验清理完成不能向调用方报告生命周期成功")
+        self.assertIn("恢复状态", why)
+        self.assertTrue(tr[KEY]["scale_out_recovery_required"])
+        self.assertEqual(tr[KEY]["currentSz"], 0.4)
+        self.assertEqual(len(ad.placed), 1)
+        self.assertEqual(len(ad.attached), 1, "先挂的新余仓保护必须保留")
 
-    def test_older_adapter_without_algo_bulk_cancel_still_cleans_up(self):
-        """能力只在 `cancel_protective_orders` 上的适配器也要能清旧保护单（能力探测分支）。"""
+        # Replaying the same cycle must stop at the recovery guard, before another order.
+        ok2, why2 = self._run(trackers=tr, ads={"binance": ad})
+        self.assertFalse(ok2)
+        self.assertIn("禁止重复", why2)
+        self.assertEqual(len(ad.placed), 1, "recovery state must prevent duplicate partial close")
+
+    def test_older_adapter_without_leg_listing_fails_closed_before_submit(self):
+        """旧适配器没有逐腿枚举能力时，必须在部分平仓前拒绝。"""
         ad = _AdOnlyProtective()
         ok, why = self._run(ads={"binance": ad})
-        self.assertTrue(ok, why)
-        self.assertEqual(ad.cancelled, ["BTC"])
+        self.assertFalse(ok, why)
+        self.assertIn("旧保护身份不可核验", why)
+        self.assertEqual(ad.placed, [])
+        self.assertEqual(ad.cancelled, [])
+        self.assertEqual(ad.attached, [])
 
-    def test_adapter_with_only_algo_bulk_cancel_still_cleans_up(self):
-        """能力只在 `cancel_all_algo_open_orders` 上的适配器也要能清旧保护单。"""
+    def test_adapter_with_only_algo_bulk_cancel_fails_closed_without_using_it(self):
+        """只有 symbol-wide algo cancel 的适配器不得提交部分平仓或被全撤。"""
         ad = _AdOnlyAlgoBulk()
-        ok, why = self._run(ads={"binance": ad})
-        self.assertTrue(ok, why)
-        self.assertEqual(ad.cancelled, ["BTC_NATIVE"], "走 elif 分支时传的是本所符号")
+        tr = {KEY: {"scale_out_phase": 0, "takeProfitPx": 0.0}}
+        ok, why = self._run(trackers=tr, ads={"binance": ad})
+        self.assertFalse(ok, why)
+        self.assertIn("旧保护身份不可核验", why)
+        self.assertEqual(ad.placed, [], "保护腿无法枚举就不能先改变实际仓位")
+        self.assertEqual(ad.cancelled, [])
+        self.assertEqual(ad.attached, [])
+        self.assertFalse(tr[KEY].get("scale_out_recovery_required", False),
+                         "未提交平仓时不应伪造成交后的恢复状态")
 
     def test_trackers_are_locked_after_a_successful_scale_out(self):
         tr = {KEY: {"scale_out_phase": 0, "takeProfitPx": 0.0}}

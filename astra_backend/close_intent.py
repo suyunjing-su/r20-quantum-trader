@@ -110,18 +110,31 @@ def venue_fast_close(venue: str, environment: str, token: str, confirmation: str
     expected = float(intent["expected_size"])
     want_side = str(intent["pos_side"])
 
-    def _live_size() -> float:
+    def _live_position(side: str | None = None) -> tuple[float, str]:
+        """Return target-side size and the actual signed side observed."""
+        requested = str(want_side if side is None else side or "").strip().lower()
+        if requested not in {"long", "short"}:
+            requested = ""
         for row in (ad.positions() or []):
+            if not isinstance(row, dict):
+                continue
             base = str(row.get("base") or (str(row.get("symbol") or "").split("-")[0]))
             if base != sym:
                 continue
-            amt = float(row.get("size_signed", 0) or 0)
-            if abs(amt) < 1e-12 or _pos_side(amt) != want_side:
+            try:
+                amt = float(row.get("size_signed", 0) or 0)
+            except (TypeError, ValueError):
                 continue
-            return abs(amt)
-        return 0.0
+            row_side = _pos_side(amt) if abs(amt) >= 1e-12 else ""
+            if not row_side or (requested and row_side != requested):
+                continue
+            return abs(amt), row_side
+        return 0.0, requested
 
-    current = _live_size()
+    def _live_size() -> float:
+        return _live_position()[0]
+
+    current, observed_side = _live_position()
     if current <= 1e-12:
         raise ValueError("目标仓位已不存在，请刷新")
     tolerance = max(1e-12, current * 1e-6)
@@ -129,9 +142,10 @@ def venue_fast_close(venue: str, environment: str, token: str, confirmation: str
         raise ValueError(f"仓位数量已从 {expected:g} 变化为 {current:g}，请刷新")
     import inspect
     kwargs: dict[str, Any] = {}
+    close_side = observed_side if observed_side in {"long", "short"} else want_side
     try:
         if "pos_side" in inspect.signature(ad.fast_close_position).parameters:
-            kwargs["pos_side"] = want_side
+            kwargs["pos_side"] = close_side
     except (TypeError, ValueError):
         pass
     raw = ad.fast_close_position(sym, **kwargs)
@@ -140,12 +154,51 @@ def venue_fast_close(venue: str, environment: str, token: str, confirmation: str
     remaining = current
     for _ in range(6):
         time.sleep(0.6)
-        remaining = _live_size()
+        remaining = _live_position(observed_side)[0]
         if remaining <= tolerance:
             break
     if remaining > tolerance:
         raise RuntimeError(f"平仓请求已受理但仓位未确认归零，剩余 {remaining:g}；请刷新，禁止重复点击")
+
+    # 保护腿是独立资源，fast_close_position 本身不会替我们清掉它们。
+    # 目标方向已经由上面的 _live_position() 归零；即使对冲方向仍在，也只
+    # 按平仓前的目标方向/数量证据撤腿，绝不把同合约另一方向的保护腿当成残留。
+    protection_note = ""
+    cleanup_status = "incomplete"
+    try:
+        from astra_backend import execution_router
+        before_side = observed_side if observed_side in {"long", "short"} else want_side
+        before_position = {
+            "base": sym,
+            "side": before_side,
+            "size_signed": current if before_side == "long" else -current,
+        }
+        cleanup = execution_router._cancel_proven_own_legs(ad, sym, before_position)
+        protection_note = str(cleanup)
+        cleanup_ok = bool(getattr(cleanup, "ok", True))
+        if any(marker in protection_note for marker in
+               ("保护腿清单读取失败", "撤单失败", "保护腿撤单标识缺失",
+                "保护腿归属未完成", "保护腿清理异常")):
+            cleanup_ok = False
+        if not cleanup_ok:
+            raise RuntimeError("仓位已归零但条件单清理未完成：" + protection_note)
+        cleanup_status = "complete"
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        raise RuntimeError(
+            f"仓位已归零但条件单清理异常（{type(exc).__name__}: {exc}），需人工核对"
+        ) from exc
+    try:
+        from scripts.trader.open_entry_guard import release_open_entries_for
+        sides = ("long", "short") if want_side == "net" else (want_side,)
+        for side in sides:
+            release_open_entries_for(environment=str(environment),
+                                     inst_id=str(intent["display_inst"]), side=side)
+    except Exception:
+        pass
     return {"status": "confirmed_closed", "environment": str(environment), "venue": venue,
             "instId": str(intent["display_inst"]), "posSide": want_side, "closed_size": current,
-            "close_result": raw}
+            "close_result": raw, "protection_cleanup": protection_note,
+            "protection_cleanup_status": cleanup_status}
 

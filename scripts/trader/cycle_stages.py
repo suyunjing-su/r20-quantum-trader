@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import os
 import time
+import inspect
 from typing import Any, Dict, List, Optional, Tuple
 
 
@@ -764,6 +765,12 @@ def venue_protection_watchdog_stage(*,
         return None
 
     _now = time.time() if now_s is None else float(now_s)
+    # Keep the watchdog key local to this extracted stage: the stage receives
+    # injected collaborators and must not rely on an import-time facade.
+    def _gap_key(item):
+        return "|".join((str(item.get("venue") or "").lower(),
+                          str(item.get("inst") or ""),
+                          str(item.get("would") or item.get("stage") or "")))
     _debounce_on = bool(state_path) and callable(debounce_step)
     _observe = None
     _new_state: Dict[str, Any] = {}
@@ -771,16 +778,24 @@ def venue_protection_watchdog_stage(*,
     _qualified: List[str] = []
     _qualify_min = 0.0 if debounce_s is None else max(0.0, float(debounce_s)) / 60.0
 
-    def _run_audit(_dry):
-        return audit_cross_venue_protection(
-            xv_positions_by_venue,
-            venue_registry=venue_registry,
-            environment=env_mode,
-            dry_run=bool(_dry),
-            # 第一百七十四刀：台账行供**归属取证**（`ledger` 档证据＝同币同向同量已平记录）。
-            # 读不到（None）⇒ 不产生证据 ⇒ 腿留在"归属不可判定" ⇒ 绝不自动撤。
-            ledger_rows=ledger_rows,
-        )
+    def _run_audit(_dry, *, _qualified_keys=None):
+        args = (xv_positions_by_venue,)
+        kwargs = {
+            "venue_registry": venue_registry,
+            "environment": env_mode,
+            "dry_run": bool(_dry),
+            "ledger_rows": ledger_rows,
+        }
+        if _qualified_keys is not None:
+            # Keep injected legacy audit doubles source-compatible while the
+            # production audit receives the write permit.
+            try:
+                return audit_cross_venue_protection(
+                    *args, **kwargs, qualified_keys=_qualified_keys)
+            except TypeError as exc:
+                if "qualified_keys" not in str(exc):
+                    raise
+        return audit_cross_venue_protection(*args, **kwargs)
 
     if _debounce_on:
         # 观察轮：**只判定不写单**，拿到"本来会做"的动作（真模式与它同源）
@@ -821,7 +836,7 @@ def venue_protection_watchdog_stage(*,
         report = _observe
     else:
         try:
-            report = _run_audit(False)
+            report = _run_audit(False, _qualified_keys=_qualified)
         except Exception as exc:
             print(f"[跨所保护巡检] warn 巡检异常（不影响本周期）: {exc}")
             return None
@@ -840,6 +855,32 @@ def venue_protection_watchdog_stage(*,
                   f"{item.get('detail') or ''}").strip()
             print(_w)
             executed_actions.append(_w)
+    # A real audit may observe several gaps while only a subset has survived
+    # debounce.  Never let an unqualified action escape through the report.
+    if _debounce_on and not dry_run:
+        qualified = set(_qualified)
+        qualified_by_identity = {}
+        for key in qualified:
+            parts = str(key).split("|", 2)
+            if len(parts) == 3:
+                qualified_by_identity.setdefault((parts[0], parts[1]), []).append(key)
+        filtered_actions = []
+        for item in (report.get("actions") or []):
+            if not isinstance(item, dict):
+                continue
+            key = _gap_key(item)
+            if key in qualified:
+                filtered_actions.append(item)
+                continue
+            # Legacy audit adapters may omit stage on an action.  It is safe to
+            # recover only when venue+instrument identify exactly one qualified
+            # gap; ambiguous or incomplete actions remain suppressed.
+            identity = (str(item.get("venue") or "").lower(),
+                        str(item.get("inst") or ""))
+            candidates = qualified_by_identity.get(identity, [])
+            if not item.get("stage") and len(candidates) == 1:
+                filtered_actions.append(item)
+        report["actions"] = filtered_actions
     for item in report.get("actions") or []:
         executed_actions.append(
             f"[跨所保护] {item['venue'].upper()} {item['inst']} {item['detail']}")

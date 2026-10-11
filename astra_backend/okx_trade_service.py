@@ -85,20 +85,16 @@ def fast_close_confirmed(close_token: str, confirmation: str) -> dict[str, Any]:
             except Exception as exc:
                 cancel_failures.append(f"{order_id}: {exc}")
 
-    # Also cancel any attached/standalone algo orders (such as native cloud OCO orders) to avoid conflicts
-    try:
-        for ao in pending_algo_orders(intent["instId"], env=env):
-            ao_side = str(ao.get("posSide") or "net").lower()
-            if ao_side in {target_side, "net"}:
-                algo_id = str(ao.get("algoId") or "")
-                if algo_id:
-                    try:
-                        cancel_algo_orders([algo_id], inst_id=intent["instId"], env=env)
-                        canceled.append(f"algo:{algo_id}")
-                    except Exception as exc:
-                        logger.warning("Cancel algo order %s failed during close: %s", algo_id, exc)
-    except Exception as exc:
-        logger.warning("Scanning algo orders failed during close: %s", exc)
+    # Also cancel attached/standalone algo orders (native TP/SL/OCO).  This is
+    # a separate OKX resource; `auto_cxl=True` is not treated as cleanup proof.
+    from scripts.trader.venue_query import cancel_okx_algo_orders_for_close
+    _algo_ok, _algo_canceled, _algo_failures = cancel_okx_algo_orders_for_close(
+        intent["instId"], target_side, env,
+        pending_algo_orders=pending_algo_orders,
+        cancel_algo_orders=cancel_algo_orders)
+    canceled.extend(f"algo:{item}" for item in _algo_canceled)
+    if not _algo_ok:
+        raise RuntimeError("平仓前存在无法撤销的条件单：" + "; ".join(_algo_failures))
 
     if cancel_failures:
         raise RuntimeError("平仓前存在无法撤销的同仓位委托：" + "; ".join(cancel_failures))
@@ -118,6 +114,27 @@ def fast_close_confirmed(close_token: str, confirmation: str) -> dict[str, Any]:
         remaining=abs(float(current.get("pos",0) or 0)) if current else 0.0
         if remaining<=tolerance: break
     if remaining>tolerance: raise RuntimeError(f"平仓请求已受理但仓位未确认归零，剩余 {remaining}；请刷新，禁止重复点击")
+
+    # Re-scan after the position is flat: attached orders can materialize or
+    # remain live independently of the close response.
+    _post_ok, _post_canceled, _post_failures = cancel_okx_algo_orders_for_close(
+        intent["instId"], target_side, env,
+        pending_algo_orders=pending_algo_orders,
+        cancel_algo_orders=cancel_algo_orders)
+    for item in _post_canceled:
+        marker = f"algo:{item}"
+        if marker not in canceled:
+            canceled.append(marker)
+    if not _post_ok:
+        raise RuntimeError("仓位已归零但条件单清理失败：" + "; ".join(_post_failures))
+    try:
+        from scripts.trader.open_entry_guard import release_open_entries_for
+        sides = ("long", "short") if target_side == "net" else (target_side,)
+        for side in sides:
+            release_open_entries_for(environment=str(env.mode),
+                                     inst_id=intent["instId"], side=side)
+    except Exception:
+        pass
     return {"status":"confirmed_closed","environment":env.mode,"instId":intent["instId"],"posSide":intent["posSide"],"closed_size":actual,"canceled_entry_orders":canceled,"close_result":close_result}
 
 

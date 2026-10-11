@@ -30,7 +30,8 @@ from scripts.trader.cloud_protection import (amend_venue_stop_loss,
 
 def _oco(**kw):
     base = dict(state="live", posSide="long", side="sell", tpTriggerPx="74000",
-                slTriggerPx="68000", reduceOnly="true", sz=3.0)
+                slTriggerPx="68000", reduceOnly="true", sz=3.0,
+                algoClOrdId="astraprotect-test")
     base.update(kw)
     return base
 
@@ -71,6 +72,12 @@ class LiveOcoCoverageFilterTest(unittest.TestCase):
         self.assertEqual(self._cov([_oco(reduceOnly="false")]), 0.0,
                          "非 reduce-only 的单可能反手开仓 ⇒ 不许当保护单")
 
+    def test_unmarked_manual_oco_does_not_count(self):
+        row = _oco()
+        row.pop("algoClOrdId")
+        self.assertEqual(self._cov([row]), 0.0,
+                         "没有 ASTRA ownership marker 的手工 OCO 不得证明覆盖")
+
     def test_net_and_matching_pos_side_count(self):
         self.assertEqual(self._cov([_oco(posSide="net")]), 3.0)
         self.assertEqual(self._cov([_oco()], pos_side="long"), 3.0)
@@ -97,6 +104,12 @@ class _Ad:
         if self._cancel_raises:
             raise RuntimeError("cancel boom")
         self.cancelled.append(oid)
+        wanted = str(oid)
+        self._rows = [row for row in self._rows
+                      if not isinstance(row, dict) or all(
+                          str(row.get(key) or "") != wanted
+                          for key in ("id", "id_string", "algo_id", "client_algo_id"))]
+        return {"status": "finished"}
 
     def attach_protective_orders(self, symbol, pos_side, *, sl_px, contracts):
         return self._attach if self._attach is not None else {"sl": "new-sl"}
@@ -206,19 +219,19 @@ class AmendStopLossFailureToleranceTest(unittest.TestCase):
                 return {"sl": "new-sl"}
 
         ok, detail = amend_venue_stop_loss(_Boom(), "BTC_USDT", "long", 68000.0, 1.0)
-        self.assertTrue(ok, f"枚举旧单失败不该让棘轮整体失败（先挂新才是关键）：{detail}")
+        self.assertFalse(ok, "无法证明旧腿清单时不得挂新单，避免无法收尾")
+        self.assertIn("未执行改单/挂新", detail)
 
     def test_cancel_falls_back_to_cancel_order(self):
         ad = _BareAd([_sl_row("sl-1"), _sl_row("sl-2")])
         ok, detail = amend_venue_stop_loss(ad, "BTC_USDT", "long", 68000.0, 1.0)
-        self.assertTrue(ok)
-        self.assertEqual(ad.called, ["sl-1", "sl-2"],
-                         f"没有 cancel_price_order/cancel_algo_order 时必须退到 cancel_order：{ad.called}")
+        self.assertFalse(ok, "普通 cancel_order 不是条件单 ownership-safe fallback")
+        self.assertEqual(ad.called, [], "不得把条件单退化成普通订单撤单")
 
     def test_cancel_failure_only_warns_and_keeps_the_new_stop(self):
         ad = _Ad([_sl_row("sl-1")], cancel_raises=True)
         ok, detail = amend_venue_stop_loss(ad, "BTC_USDT", "long", 68000.0, 1.0)
-        self.assertTrue(ok, f"撤旧单失败只该告警（新单已生效，宁可双不可裸）：{detail}")
+        self.assertFalse(ok, "撤旧条件单失败时生命周期不能报告成功")
         self.assertEqual(ad.cancelled, [], "撤单抛错 ⇒ 不会记录成功撤单")
         self.assertIn("撤旧 0/1", detail, f"detail 要如实说「没撤掉」：{detail}")
 

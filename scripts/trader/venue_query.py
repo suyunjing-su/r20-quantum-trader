@@ -33,6 +33,117 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 
+def cancel_okx_algo_orders_for_close(
+    inst_id: str, pos_side: str, env: Any, *, pending_algo_orders, cancel_algo_orders
+) -> Tuple[bool, List[str], List[str]]:
+    """Cancel only attributable target-side OKX conditional orders.
+
+    OKX algo orders are a separate resource from ordinary orders.  A matching
+    symbol/position side alone is not ownership proof: the user may have placed
+    a manual TP/SL.  System-created rows carry the broker tag (or a legacy
+    ASTRA client id); unattributed rows remain untouched and are reported as a
+    failure so callers cannot claim that cleanup completed.
+
+    This helper is shared by AI/automatic closes and the settings-panel close
+    path.  It intentionally receives the two REST functions as arguments so
+    existing facade patch seams remain effective.
+    """
+    if not callable(pending_algo_orders) or not callable(cancel_algo_orders):
+        # Compatibility for injected legacy test/adaptor doubles that expose
+        # only ordinary orders.  Real OKX production wiring supplies both
+        # functions; the absence is disclosed rather than mistaken for a
+        # successful cancel when a scan/cancel capability is required.
+        return False, [], ["OKX 条件单扫描或撤销能力不可用"]
+
+    try:
+        rows = pending_algo_orders(inst_id, env=env, ord_type="conditional,oco")
+    except Exception as exc:
+        return False, [], [f"扫描条件单失败: {exc}"]
+
+    try:
+        from scripts.okx_rest import effective_broker_tag
+        system_tag = str(effective_broker_tag() or "").strip()
+    except Exception:
+        system_tag = ""
+
+    target = str(pos_side or "net").lower()
+    expected_close_side = {
+        "long": "sell",
+        "short": "buy",
+    }.get(target, "")
+    selected: List[dict[str, str]] = []
+    failures: List[str] = []
+    for row in (rows or []):
+        if not isinstance(row, dict):
+            failures.append("条件单列表含无法解析的行，拒绝把未核验残留当作已清理")
+            continue
+        if str(row.get("instId") or inst_id) != str(inst_id):
+            continue
+        row_side = str(row.get("posSide") or "net").lower()
+        if row_side not in {target, "net"}:
+            # The other hedge direction is intentionally retained.  It is not
+            # a cleanup failure for the direction being closed.
+            continue
+        close_side = str(row.get("side") or "").lower()
+        if expected_close_side and close_side and close_side != expected_close_side:
+            # A same-symbol row with the wrong close side may protect the
+            # opposite direction; never cancel it through this close request.
+            continue
+
+        algo_id = str(row.get("algoId") or "").strip()
+        client_id = str(row.get("algoClOrdId") or "").strip()
+        if not algo_id and not client_id:
+            failures.append(
+                "条件单缺少 algoId/algoClOrdId，归属无法证明，已保留未撤"
+            )
+            continue
+        row_tag = str(row.get("tag") or "").strip()
+        legacy_id = f"{algo_id} {client_id}".lower()
+        attributable = bool(system_tag and row_tag == system_tag)
+        attributable = attributable or any(marker in legacy_id for marker in (
+            "astrasl", "astratp", "astraprotect"))
+        if not attributable:
+            identity = algo_id or client_id
+            failures.append(f"条件单 {identity} 归属无法证明，已保留未撤")
+            continue
+        if algo_id:
+            selected.append({"instId": inst_id, "algoId": algo_id})
+        elif client_id:
+            selected.append({"instId": inst_id, "algoClOrdId": client_id})
+        else:
+            failures.append("条件单缺少 algoId/algoClOrdId，拒绝把未核验残留当作已清理")
+
+    canceled: List[str] = []
+    for order in selected:
+        identity = str(order.get("algoId") or order.get("algoClOrdId") or "")
+        try:
+            result = cancel_algo_orders([order], inst_id=inst_id, env=env)
+            if isinstance(result, list):
+                bad = [str(item.get("sCode")) for item in result
+                       if isinstance(item, dict) and str(item.get("sCode") or "0") not in {"", "0"}]
+                if bad:
+                    raise RuntimeError("交易所返回失败码=" + ",".join(bad))
+            canceled.append(identity)
+        except Exception as exc:
+            failures.append(f"{identity}: {exc}")
+    return not failures, canceled, failures
+
+
+def _release_entry_claims_after_close(environment: str, inst_id: str, pos_side: str) -> None:
+    try:
+        from scripts.trader.open_entry_guard import (
+            OPEN_ENTRY_CLAIMS_FILE, release_open_entries_for)
+        if OPEN_ENTRY_CLAIMS_FILE.exists():
+            sides = ("long", "short") if str(pos_side).lower() == "net" else (str(pos_side).lower(),)
+            for side in sides:
+                release_open_entries_for(environment=environment, inst_id=inst_id, side=side)
+    except Exception:
+        # Cleanup failure must not turn a confirmed close into false claim-release
+        # evidence; the matching accepted claim remains blocked until its safe
+        # lifecycle ends, and uncertain-submit claims are never cleared here.
+        pass
+
+
 def query_positions(
                               *,
                               okx_rest) -> Tuple[bool, List[Dict[str, Any]], str]:
@@ -176,6 +287,9 @@ def close_position_confirmed(inst_id: str, pos_side: str, before_size: float, ve
             res = execution_router.close_position(inst_id, venue=target_venue, environment=str(env.mode), pos_side=pos_side)
             if not res.get("ok"):
                 return False, f"{target_venue.upper()} close failed: {res.get('detail')}"
+            if res.get("cleanup_ok") is False:
+                return False, (f"{target_venue.upper()} position close accepted but "
+                               f"protective cleanup is incomplete: {res.get('detail')}")
             # 审计 B1：受理≠平掉——与 OKX 分支同一把尺做归零回读，核验通过前
             # 禁改本地状态（tracker 保留、下周期重试；假成功会让孤儿仓脱管）
             want_base = str(inst_id).split("-")[0].upper()
@@ -197,7 +311,14 @@ def close_position_confirmed(inst_id: str, pos_side: str, before_size: float, ve
                         continue
                     remaining = max(remaining, abs(float(row.get("size_signed") or 0)))
                 if remaining < max(1e-12, abs(float(before_size)) * 0.001):
-                    return True, f"{target_venue.upper()} position closed (verified flat)"
+                    _detail = str(res.get("detail") or "")
+                    if any(marker in _detail for marker in
+                           ("保护腿清单读取失败", "撤单失败", "保护腿收尾异常")):
+                        return False, (f"{target_venue.upper()} position is flat but "
+                                       f"protective cleanup is incomplete: {_detail}")
+                    _release_entry_claims_after_close(str(env.mode), inst_id, pos_side)
+                    return True, (f"{target_venue.upper()} position closed (verified flat); "
+                                f"{_detail or 'protective cleanup completed'}")
             if not saw_successful_query:
                 return False, f"{target_venue.upper()} close accepted but readback unavailable; state unchanged"
             return False, f"{target_venue.upper()} still reports open position after close (before={before_size}); state unchanged"
@@ -214,6 +335,15 @@ def close_position_confirmed(inst_id: str, pos_side: str, before_size: float, ve
                     okx_rest.cancel_order(inst_id, o_id)
     except Exception as e:
         print(f"[Close Pre-Clean] Warning cancelling pending orders for {inst_id}: {e}")
+
+    # Attached/standalone TP, SL, OCO and conditional orders are a separate
+    # OKX resource; `auto_cxl=True` is not treated as the only cleanup proof.
+    _algo_ok, _algo_canceled, _algo_failures = cancel_okx_algo_orders_for_close(
+        inst_id, pos_side, current_environment(),
+        pending_algo_orders=getattr(okx_rest, "pending_algo_orders", None),
+        cancel_algo_orders=getattr(okx_rest, "cancel_algo_orders", None))
+    if not _algo_ok:
+        return False, "条件单预清理失败，拒绝继续平仓: " + "; ".join(_algo_failures)
 
     try:
         okx_rest.close_position(inst_id, pos_side, td_mode="cross", auto_cxl=True)
@@ -238,7 +368,14 @@ def close_position_confirmed(inst_id: str, pos_side: str, before_size: float, ve
                 remaining = abs(float(position.get("pos", 0) or 0))
                 break
         if remaining < max(1e-12, abs(before_size) * 0.001):
-            return True, "exchange position closed"
+            _post_ok, _post_canceled, _post_failures = cancel_okx_algo_orders_for_close(
+                inst_id, pos_side, current_environment(),
+                pending_algo_orders=getattr(okx_rest, "pending_algo_orders", None),
+                cancel_algo_orders=getattr(okx_rest, "cancel_algo_orders", None))
+            if not _post_ok:
+                return False, "仓位已归零但条件单清理失败: " + "; ".join(_post_failures)
+            _release_entry_claims_after_close(str(current_environment().mode), inst_id, pos_side)
+            return True, "exchange position closed; conditional orders canceled"
     if not saw_successful_query:
         return False, "position verification failed: no successful exchange response"
     return False, f"exchange still reports an open position after close request (before={before_size})"

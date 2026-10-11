@@ -52,6 +52,24 @@ class _RestAPI:
         self.calls.append(("new_algo_order", kwargs))
         return _Response({"algoId": 100})
 
+    def current_all_algo_open_orders(self, **kwargs):
+        self.calls.append(("current_all_algo_open_orders", kwargs))
+        return _Response([
+            {"algoId": 100, "clientAlgoId": "t-astrasl-100", "algoType": "CONDITIONAL",
+             "orderType": "STOP_MARKET", "symbol": "BTCUSDT", "side": "SELL",
+             "positionSide": "LONG", "quantity": "0.1", "algoStatus": "NEW",
+             "triggerPrice": "90"},
+            {"clientAlgoId": "t-astra-client-only", "algoType": "CONDITIONAL",
+             "orderType": "TAKE_PROFIT_MARKET", "symbol": "BTCUSDT", "side": "SELL",
+             "positionSide": "LONG", "quantity": "0.1", "algoStatus": "NEW",
+             "triggerPrice": "110"},
+        ])
+
+    def cancel_algo_order(self, **kwargs):
+        self.calls.append(("cancel_algo_order", kwargs))
+        return _Response({"algoId": kwargs.get("algo_id"),
+                          "clientAlgoId": kwargs.get("client_algo_id")})
+
     def get_income_history(self, **kwargs):
         self.calls.append(("get_income_history", kwargs))
         return _Response([{"symbol": "BTCUSDT", "incomeType": "REALIZED_PNL", "income": "2"}])
@@ -135,6 +153,26 @@ class BinanceSDKAdapterTests(unittest.TestCase):
         self.assertEqual(legs["tp"], "100")
         self.assertEqual(legs["sl"], "")
         self.assertEqual(self.client.rest_api.calls[-1][0], "new_algo_order")
+
+    def test_conditional_cleanup_uses_binance_algo_api_and_client_fallback(self):
+        rows = self.adapter.list_protective_orders("BTC")
+        self.assertEqual(len(rows), 2)
+        list_call = self.client.rest_api.calls[-1]
+        self.assertEqual(list_call[0], "current_all_algo_open_orders")
+        self.assertEqual(list_call[1]["symbol"], "BTCUSDT")
+        self.assertEqual(rows[0]["id"], "100")
+        self.assertEqual(rows[0]["client_algo_id"], "t-astrasl-100")
+        self.assertEqual(rows[1]["id"], "t-astra-client-only")
+
+        self.adapter.cancel_algo_order(algo_id=100)
+        self.adapter.cancel_algo_order(client_algo_id="t-astra-client-only")
+        self.assertEqual(
+            [name for name, _ in self.client.rest_api.calls[-2:]],
+            ["cancel_algo_order", "cancel_algo_order"],
+        )
+        self.assertEqual(self.client.rest_api.calls[-2][1], {"algo_id": 100})
+        self.assertEqual(self.client.rest_api.calls[-1][1],
+                         {"client_algo_id": "t-astra-client-only"})
 
     def test_private_operations_fail_closed_without_credentials(self):
         self.adapter._keys = Mock(side_effect=ExchangeCapabilityError("未配置"))

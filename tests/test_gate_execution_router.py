@@ -103,6 +103,10 @@ class _StubAdapter(GateAdapter):
         """
         return "single"
 
+    def account_snapshot(self):
+        # Router sizing needs an account-cap fixture; never call Gate's signed API.
+        return {"available_usdt": 10000.0}
+
     def positions(self):
         # US-009 precheck 探针：默认无既有仓（己方干净），可注入外部仓/故障
         self.calls.append(("positions",))
@@ -157,6 +161,12 @@ class _StubAdapter(GateAdapter):
         self.calls.append(("cancel_entry", symbol, str(order_id)))
         return {"cancelled": True}
 
+    def cancel_price_order(self, order_id):
+        self.calls.append(("cancel_protection", str(order_id)))
+        self.price_orders = [row for row in self.price_orders
+                             if str(row.get("id") or "") != str(order_id)]
+        return {"status": "finished"}
+
     def fast_close_position(self, symbol, text=""):
         self.calls.append(("close", symbol))
         return {"id": 9002, "closed": True}
@@ -173,6 +183,33 @@ def _decision(**over):
 
 
 class TestRouter(unittest.TestCase):
+    def setUp(self):
+        # These adapter fakes exercise execution flow; host pool dry-run state
+        # must not turn them into configuration tests or suppress the path.
+        self._pool_patch = patch.object(
+            router, "_load_venue_pool_soft", lambda _venue: {"dry_run": False})
+        self._pool_patch.start()
+        self.addCleanup(self._pool_patch.stop)
+        import tempfile
+        from pathlib import Path
+        from scripts.trader import open_entry_guard
+        self._claim_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._claim_tmp.cleanup)
+        self._data_patch = patch.dict(
+            os.environ, {"ASTRA_DATA_DIR": self._claim_tmp.name})
+        self._data_patch.start()
+        self.addCleanup(self._data_patch.stop)
+        self._claim_patch = patch.object(
+            open_entry_guard, "OPEN_ENTRY_CLAIMS_FILE",
+            Path(self._claim_tmp.name) / "open_entry_claims.json")
+        self._claim_patch.start()
+        self.addCleanup(self._claim_patch.stop)
+        ledger_path = Path(self._claim_tmp.name) / "trading_ledger.json"
+        ledger_path.write_text("[]", encoding="utf-8")
+        self._ledger_patch = patch.object(router, "OWN_POSITION_LEDGER_FILE", str(ledger_path))
+        self._ledger_patch.start()
+        self.addCleanup(self._ledger_patch.stop)
+
     def test_execution_closed_by_default(self):
         """默认（env 未设）直接 fail-closed——不触任何 IO。"""
         with patch.dict(os.environ, {}, clear=True):
@@ -243,6 +280,103 @@ class TestRouter(unittest.TestCase):
         self.assertEqual(r["stage"], "protective")
         self.assertIn(("cancel_entry", "BTC", "9001"), ad.calls)
 
+    def test_attach_failure_uses_gate_price_order_cancel_and_retains_manual_leg(self):
+        class _ManualRollbackAdapter(_StubAdapter):
+            def __init__(self):
+                super().__init__()
+                self.list_calls = 0
+
+            def attach_protective_orders(self, symbol, pos_side, tp_px=None, sl_px=None,
+                                         expiration=604800, price_type=0):
+                legs = super().attach_protective_orders(
+                    symbol, pos_side, tp_px, sl_px, expiration, price_type)
+                for row in self.price_orders:
+                    row["text"] = "t-astra" + str(row["id"])
+                self.price_orders.append({"id": "manual-1", "text": "user-manual"})
+                return legs
+
+            def list_protective_orders(self, symbol):
+                self.calls.append(("verify", symbol))
+                self.list_calls += 1
+                if self.list_calls == 1:
+                    return []  # Force rollback after the attach acknowledgement.
+                return list(self.price_orders)
+
+        ad = _ManualRollbackAdapter()
+        with patch.dict(os.environ, {"ASTRA_GATE_EXECUTION": "1"}):
+            result = router.open_protected_position(
+                _decision(), adapter=ad, price_ref=79000.0)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["stage"], "protective")
+        protection_cancels = [call[1] for call in ad.calls
+                              if call[0] == "cancel_protection"]
+        self.assertCountEqual(protection_cancels, ["tp1", "sl1"])
+        ordinary_cancels = [call[2] for call in ad.calls if call[0] == "cancel_entry"]
+        self.assertEqual(ordinary_cancels, ["9001"])
+        self.assertEqual([row["id"] for row in ad.price_orders], ["manual-1"])
+        self.assertIn("归属未证明", result["detail"])
+        self.assertIn("入场单已撤销", result["detail"])
+
+    def test_binance_rollback_uses_algo_cancel_and_retains_manual_algo(self):
+        from astra_backend.exchanges import InstrumentSpec
+        from types import SimpleNamespace
+
+        class _BinanceRollbackAdapter(_StubAdapter):
+            def __init__(self):
+                super().__init__()
+                self.capabilities = SimpleNamespace(
+                    quantity_unit="base_asset", position_modes=("single",),
+                    entry_ready_position_modes=("single",))
+                self.list_calls = 0
+                self.algo_cancels = []
+                self.price_orders = [{
+                    "algoId": "manual-7003", "clientAlgoId": "user-created",
+                    "symbol": "BTCUSDT",
+                }]
+
+            def fetch_instrument_spec(self, symbol, refresh=False):
+                return InstrumentSpec(venue="binance", inst_id="BTCUSDT", base="BTC",
+                                      tick_size=0.1, step_size=0.001, ct_val=1.0,
+                                      min_size=0.001)
+
+            def fetch_orderbook(self, symbol, depth=5):
+                return {"bids": [], "asks": []}
+
+            def attach_protective_orders(self, symbol, pos_side, tp_px=None, sl_px=None,
+                                         expiration=604800, **kwargs):
+                self.price_orders.extend([
+                    {"algoId": "7001", "clientAlgoId": "astratp-7001", "symbol": "BTCUSDT"},
+                    {"algoId": "7002", "clientAlgoId": "astrasl-7002", "symbol": "BTCUSDT"},
+                ])
+                return {"tp": "7001", "sl": "7002"}
+
+            def list_protective_orders(self, symbol):
+                self.list_calls += 1
+                if self.list_calls == 1:
+                    return []  # Force rollback after attach acknowledgement.
+                return list(self.price_orders)
+
+            def cancel_algo_order(self, **kwargs):
+                self.algo_cancels.append(dict(kwargs))
+                value = str(kwargs.get("algo_id") or kwargs.get("client_algo_id") or "")
+                self.price_orders = [row for row in self.price_orders
+                                     if str(row.get("algoId")) != value
+                                     and str(row.get("clientAlgoId")) != value]
+                return {"code": "200", "msg": "success"}
+
+        ad = _BinanceRollbackAdapter()
+        with patch.dict(os.environ, {"ASTRA_BINANCE_EXECUTION": "1"}):
+            result = router.open_protected_position(
+                _decision(venue="binance"), adapter=ad, price_ref=79000.0,
+                environment="live")
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["stage"], "protective")
+        self.assertEqual(ad.algo_cancels, [{"algo_id": "7001"}, {"algo_id": "7002"}])
+        self.assertEqual([row["algoId"] for row in ad.price_orders], ["manual-7003"])
+        self.assertEqual([call[2] for call in ad.calls if call[0] == "cancel_entry"], ["9001"])
+        self.assertIn("归属未证明", result["detail"])
+
     def test_leverage_failure_stops_before_entry(self):
         ad = _StubAdapter(fail_leverage=True)
         with patch.dict(os.environ, {"ASTRA_GATE_EXECUTION": "1"}):
@@ -303,6 +437,31 @@ class TestRouter(unittest.TestCase):
 
 class TestExternalPositionPrecheck(unittest.TestCase):
     """US-009：开仓前同合约既有仓探针——外部/不符=连坐拒开，探针失败=fail-closed。"""
+
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+        from scripts.trader import open_entry_guard
+        self._runtime_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._runtime_tmp.cleanup)
+        self._data_patch = patch.dict(
+            os.environ, {"ASTRA_DATA_DIR": self._runtime_tmp.name})
+        self._data_patch.start()
+        self.addCleanup(self._data_patch.stop)
+        self._claim_patch = patch.object(
+            open_entry_guard, "OPEN_ENTRY_CLAIMS_FILE",
+            Path(self._runtime_tmp.name) / "open_entry_claims.json")
+        self._claim_patch.start()
+        self.addCleanup(self._claim_patch.stop)
+        ledger_path = Path(self._runtime_tmp.name) / "trading_ledger.json"
+        ledger_path.write_text("[]", encoding="utf-8")
+        self._ledger_patch = patch.object(router, "OWN_POSITION_LEDGER_FILE", str(ledger_path))
+        self._ledger_patch.start()
+        self.addCleanup(self._ledger_patch.stop)
+        self._pool_patch = patch.object(
+            router, "_load_venue_pool_soft", lambda _venue: {"dry_run": False})
+        self._pool_patch.start()
+        self.addCleanup(self._pool_patch.stop)
 
     def _env(self):
         return patch.dict(os.environ, {"ASTRA_GATE_EXECUTION": "1"})

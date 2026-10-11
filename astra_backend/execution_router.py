@@ -34,11 +34,6 @@ from .execution.venue_gate import venue_entry_gate as _venue_entry_gate
 from .exchanges import (ExchangeCapabilityError, canonical_base, execution_open,
                         get_adapter, is_sandbox_environment, require_execution)
 
-try:
-    from scripts.tag_markers import normalize_legacy_markers
-except ImportError:      # scripts/ 在 sys.path 上（双拼写铁律）
-    from tag_markers import normalize_legacy_markers
-
 try:  # 单一事实源：几何 + R:R 底线（与执行层遗留链路同一把尺）
     from scripts.order_risk import validate_quote_geometry_and_rr
 except ImportError:
@@ -61,8 +56,8 @@ except ImportError:  # pragma: no cover - scripts/ 在 sys.path 时走上面分�
 
 
 #: 平仓后是否撤销**已证明属于本系统**的该合约保护腿（治本：遗留腿的产生源头）。
-#: 只有"核验归零 + 归属可证明"两个条件同时满足才会撤；撤单失败不改判平仓结果，
-#: 只把残留如实写进 detail（平仓本身确实成功了，谎报失败会让上层重试平仓）。
+#: 只有"核验归零 + 归属可证明"两个条件同时满足才会撤；撤单失败/归属不明
+#: 会让路由显式失败并保留本地状态，避免上层把未完成清理误当成可重试的完整成功。
 CANCEL_STALE_PROTECTION_ON_CLOSE: bool = True
 #: 归零核验的轮询节奏（平仓是低频操作，多读几次换"确实归零"的确定性划算）
 CLOSE_FLAT_POLL_TRIES: int = 5
@@ -140,7 +135,51 @@ def collect_cross_venue_positions(venue: str, environment: Optional[str] = None,
 
 
 class RouteResult(Dict[str, Any]):
-    """dict 子类型：{ok, venue, stage, detail, order_id, tp_id, sl_id, size_signed...}"""
+    """dict 子类型：{ok, venue, stage, detail, submission_state, order_id...}.
+
+    ``submission_state`` is deliberately separate from ``ok``. A false result
+    can mean a confirmed refusal before the write, or an unknown outcome after
+    a timeout/ambiguous response. Callers must release an entry claim only for
+    ``rejected_before_send``.
+    """
+
+
+class ProtectionCleanupResult(str):
+    """人读 detail + 机器可判定的保护腿收尾结果。
+
+    旧调用方把 ``_cancel_proven_own_legs`` 当作字符串拼进 detail；保留
+    ``str`` 子类形状，新增 ``ok``/``attempted``/``failures`` 属性，让平仓
+    路径不再靠中文片段猜测条件单是否清理完成。
+
+    ``failures`` 只表示本方已获准撤除的腿没有完成撤单/撤后核验；
+    ``report_only`` 表示按所有权安全规则**故意保留**的腿（用户手单、
+    ledger-only、方向不匹配或无法判定）。后者必须披露，但不能被误报成
+    本方清理失败，也不能授权自动撤销。
+    """
+
+    ok: bool
+    attempted: bool
+    applicable: bool
+    verified: bool
+    failures: tuple[str, ...]
+    report_only: tuple[Dict[str, Any], ...]
+
+    def __new__(cls, detail: str, *, ok: bool, attempted: bool = True,
+                applicable: bool = True, verified: bool = False,
+                failures: tuple[str, ...] = (),
+                report_only: tuple[Dict[str, Any], ...] = ()):
+        value = str.__new__(cls, detail)
+        value.ok = bool(ok)
+        value.attempted = bool(attempted)
+        value.applicable = bool(applicable)
+        value.verified = bool(verified)
+        value.failures = tuple(failures)
+        # These are legs deliberately retained because ownership/direction
+        # could not authorize a DELETE.  They are evidence for operations,
+        # not cleanup failures and must not block releasing a fully-cleaned
+        # target position.
+        value.report_only = tuple(report_only)
+        return value
 
 
 #: 各所"检测得到、但载荷未核验"的持仓模式 → 给运维的人读危害说明。
@@ -618,16 +657,71 @@ def open_protected_position(decision: Dict[str, Any], *,
         except Exception as evidence_exc:
             print(f"[{venue} execution evidence] warn {asset} pre-entry book unavailable: {evidence_exc}")
 
+    # This is the last write boundary for direct router callers. The normal
+    # order-submit facade passes an existing claim; direct/manual callers get
+    # one here rather than bypassing durable de-duplication.
+    _entry_claim_id = str(decision.get("entry_claim_id") or "")
+    _entry_claim_inst = str(decision.get("inst_id") or decision.get("instId") or asset)
+    _entry_claim_side = "long" if action in ("BUY_LONG", "BUY", "LONG", "buy", "long") else "short"
+    try:
+        from scripts.trader.open_entry_guard import (
+            claim_open_entry, begin_open_entry_submission, commit_open_entry,
+            mark_open_entry_unknown, classify_entry_submission_exception,
+            release_open_entry, validate_open_entry_claim,
+        )
+        _entry_env = str(decision.get("environment") or environment or "live")
+        if _entry_claim_id:
+            if not validate_open_entry_claim(
+                    _entry_claim_id, environment=_entry_env,
+                    inst_id=_entry_claim_inst, side=_entry_claim_side):
+                return _fail("entry_claim", "调用方开仓 claim 无效或不属于该标的/方向",
+                             venue=venue, submission_state="rejected_before_send")
+        else:
+            _claim_ok, _claim_reason, _entry_claim_id = claim_open_entry(
+                environment=_entry_env, venue=venue,
+                inst_id=_entry_claim_inst, side=_entry_claim_side)
+            if not _claim_ok:
+                return _fail("entry_claim", _claim_reason or "开仓防重拒绝",
+                             venue=venue, submission_state="rejected_before_send")
+        if not begin_open_entry_submission(_entry_claim_id):
+            return _fail("entry_claim", "开仓防重 claim 已消费或无法持久化 dispatching，安全拒绝下单",
+                         venue=venue, submission_state="rejected_before_send")
+    except Exception as exc:
+        return _fail("entry_claim", f"开仓防重状态不可用，安全拒绝下单: {exc}",
+                     venue=venue, submission_state="rejected_before_send")
+
     # 入场单（按模式发市价单或限价单，系统默认市价单）
     order_mode = str(decision.get("order_mode") or os.getenv("ASTRA_ORDER_MODE", "market")).strip().lower()
     entry_px = None if order_mode == "market" else entry
     try:
         placed = ad.place_order(asset, side, abs(contracts), price=entry_px)
-    except ExchangeCapabilityError:
-        raise
     except Exception as exc:
-        return _fail("entry", f"入场委托提交失败: {exc}", venue=venue)
-    order_id = str(placed.get("id") or placed.get("order_id") or placed.get("text") or "")
+        _state = classify_entry_submission_exception(exc)
+        if _state == "rejected_before_send" and _entry_claim_id:
+            release_open_entry(_entry_claim_id, confirmed_not_sent=True)
+        elif _entry_claim_id:
+            mark_open_entry_unknown(_entry_claim_id, str(exc))
+        return _fail("entry", f"入场委托提交失败: {exc}", venue=venue,
+                     submission_state=_state, entry_claim_id=_entry_claim_id)
+
+    # ``text`` is a client tag, not a server order identity. Gate accepts
+    # id_string/id; Binance exposes orderId through the adapter's id/order_id.
+    # An empty identity is unknown, never a synthetic ``venue-ok`` success.
+    order_id = ""
+    if isinstance(placed, dict):
+        if venue == "gate":
+            order_id = str(placed.get("id_string") or placed.get("id") or "").strip()
+        else:
+            order_id = str(placed.get("id") or placed.get("order_id") or "").strip()
+    if not order_id:
+        mark_open_entry_unknown(_entry_claim_id, "exchange response without server order id")
+        return _fail("entry", "交易所回执缺少可核验服务端订单号，等待对账恢复",
+                     venue=venue, submission_state="unknown_after_send",
+                     entry_claim_id=_entry_claim_id)
+    if _entry_claim_id:
+        # Commit before protection attachment: an accepted entry must block a
+        # duplicate even if protection setup later fails.
+        commit_open_entry(_entry_claim_id, order_id)
 
     # 云端 TP/SL 双腿 + 回读验证；任何缺口撤入场单回滚
     legs: dict = {}
@@ -653,34 +747,124 @@ def open_protected_position(decision: Dict[str, Any], *,
         # 现双段清理：①已知 legs 逐腿 best-effort 撤；②枚举该资产残留触发单，只撤
         # 带 astra 前缀的本系统单（用户手动保护单绝不触碰）；枚举失败如实标注。
         rollback_notes = []
+        rollback_target_keys = set()
+        try:
+            from scripts.trader.protection_identity import (
+                extract_protection_identities, protection_identity_key,
+            )
+            from scripts.trader.venue_protection import (
+                _ownership_evidence, cancel_protective_leg,
+            )
+        except ImportError:
+            from trader.protection_identity import (
+                extract_protection_identities, protection_identity_key,
+            )
+            from trader.venue_protection import (
+                _ownership_evidence, cancel_protective_leg,
+            )
+
+        def _rollback_cancel_identity(identity):
+            key = protection_identity_key(identity)
+            if key is None:
+                return False
+            ok = cancel_protective_leg(
+                ad, identity["identity_value"], identity=identity, venue=venue)
+            if ok:
+                rollback_target_keys.add(key)
+            return ok
+
+        def _rollback_route_identity(value):
+            identity_kind = "id_string" if venue == "gate" else (
+                "algo_id" if venue == "binance" else "")
+            family = "price_order" if venue == "gate" else (
+                "algo_order" if venue == "binance" else "")
+            if not identity_kind or not family:
+                return False
+            return _rollback_cancel_identity({
+                "venue": venue, "resource_family": family,
+                "identity_kind": identity_kind, "identity_value": str(value),
+            })
+
         for _leg in ("tp", "sl"):
             _lid = str((legs or {}).get(_leg) or "")
             if not _lid or _lid in ("None", ""):
                 continue
             try:
-                ad.cancel_order(asset, _lid)
+                if not _rollback_route_identity(_lid):
+                    rollback_notes.append(
+                        f"{_leg.upper()}腿 {_lid} 未获条件单接口明确撤销确认")
             except Exception as leg_exc:
                 rollback_notes.append(f"{_leg.upper()}腿 {_lid} 撤销失败({leg_exc})")
+
         try:
-            residue = ad.list_protective_orders(asset) or []
+            residue = ad.list_protective_orders(asset)
+            if not isinstance(residue, (list, tuple)):
+                raise RuntimeError(f"条件单列表结构异常: {type(residue).__name__}")
+            unproven_count = 0
+            unrouteable_count = 0
+            seen_residue_keys = set()
             for row in residue:
                 if not isinstance(row, dict):
+                    unrouteable_count += 1
                     continue
-                _o = row.get("order") if isinstance(row.get("order"), dict) else row
-                _text = normalize_legacy_markers(
-                    (str(_o.get("text") or "") + str(row.get("text") or "")).lower())
-                if "astra" not in _text:
-                    continue  # 只清本系统触发单
-                _rid = str(row.get("id") or row.get("algo_id") or row.get("order_id") or _o.get("id") or "")
-                if not _rid or _rid in ("None",):
+                if _ownership_evidence(row) != "tag":
+                    unproven_count += 1
+                    continue  # 归属未证明的（包括人工单）只报告，不撤销
+                identities = extract_protection_identities(
+                    row, venue=venue, ownership_evidence="tag")
+                if venue == "gate":
+                    identity = (next((x for x in identities
+                                      if x["identity_kind"] == "id_string"), None)
+                                or next((x for x in identities
+                                         if x["identity_kind"] == "id"), None))
+                elif venue == "binance":
+                    identity = (next((x for x in identities
+                                      if x["identity_kind"] == "algo_id"), None)
+                                or next((x for x in identities
+                                         if x["identity_kind"] == "client_algo_id"), None))
+                else:
+                    identity = None
+                key = protection_identity_key(identity) if identity else None
+                if identity is None or key is None:
+                    unrouteable_count += 1
                     continue
+                if key in seen_residue_keys:
+                    continue
+                seen_residue_keys.add(key)
                 try:
-                    ad.cancel_order(asset, _rid)
-                    rollback_notes.append(f"孤儿触发单 {_rid} 已撤")
+                    if not _rollback_cancel_identity(identity):
+                        rollback_notes.append(
+                            f"带 ASTRA 标记的孤儿条件单 {identity['identity_value']} "
+                            "未获专用接口明确撤销确认")
                 except Exception as rexc:
-                    rollback_notes.append(f"孤儿触发单 {_rid} 撤销失败({rexc})")
+                    rollback_notes.append(
+                        f"带 ASTRA 标记的孤儿条件单 {identity['identity_value']} "
+                        f"撤销失败({rexc})")
+            if unproven_count:
+                rollback_notes.append(
+                    f"保留并报告 {unproven_count} 条归属未证明的保护单（不执行撤销）")
+            if unrouteable_count:
+                rollback_notes.append(
+                    f"保留并报告 {unrouteable_count} 条缺少可路由 typed identity 的保护记录")
+
+            # Explicit cancel acknowledgement is not enough: relist the exact
+            # typed identities. Any unreadable or still-live result is disclosed.
+            remaining = ad.list_protective_orders(asset)
+            if not isinstance(remaining, (list, tuple)):
+                raise RuntimeError(f"撤后条件单回读结构异常: {type(remaining).__name__}")
+            remaining_keys = {
+                protection_identity_key(identity)
+                for row in remaining if isinstance(row, dict)
+                for identity in extract_protection_identities(row, venue=venue)
+                if protection_identity_key(identity) is not None
+            }
+            still_present = rollback_target_keys & remaining_keys
+            if still_present:
+                rollback_notes.append(
+                    f"撤后回读仍见 {len(still_present)} 条本次目标 typed identity")
         except Exception as lexc:
-            rollback_notes.append(f"孤儿触发单未能枚举({lexc})——依赖交易所侧 OCO/到期/手动兜底")
+            rollback_notes.append(
+                f"孤儿触发单清理/撤后核验未完成({lexc})——未证明归属的单保持不动")
         try:
             ad.cancel_order(asset, order_id)
             rollback_notes.append("入场单已撤销")
@@ -689,7 +873,9 @@ def open_protected_position(decision: Dict[str, Any], *,
         detail = f"保护单覆盖失败: {exc}"
         if rollback_notes:
             detail += "；回滚记录: " + "；".join(rollback_notes)
-        return _fail("protective", detail, venue=venue, order_id=order_id)
+        return _fail("protective", detail, venue=venue, order_id=order_id,
+                     entry_claim_id=_entry_claim_id,
+                     submission_state="accepted_with_id")
 
     if execution_evidence is not None:
         execution_evidence["protection_status"] = "VERIFIED"
@@ -699,8 +885,9 @@ def open_protected_position(decision: Dict[str, Any], *,
         execution_evidence["entry_order_status"] = str(placed.get("status") or "UNKNOWN")
         execution_evidence["entry_order_filled_qty"] = float(placed.get("executedQty") or 0.0)
 
-    return RouteResult(ok=True, venue=venue, stage="done", asset=asset,
-                       action=action, order_id=order_id,
+    return RouteResult(ok=True, venue=venue, stage="done",
+                       submission_state="accepted_with_id",
+                       asset=asset, action=action, order_id=order_id,
                        tp_id=str(legs.get("tp")), sl_id=str(legs.get("sl")),
                        size_signed=signed,
                        contracts=contracts, notional_usdt=round(notional, 2),
@@ -711,17 +898,33 @@ def open_protected_position(decision: Dict[str, Any], *,
                        detail=f"{venue.upper()} 入场限价挂单 + TP/SL 双腿云端触发单已回读验证")
 
 
-def _verify_symbol_flat(ad: Any, base: str) -> tuple:
-    """轮询核验该合约**整体归零**（任何方向都没有仓）→ `(flat, 剩余量)`。
+def _position_row_side(row: Dict[str, Any]) -> str:
+    """Return a normalized long/short side from an adapter position row."""
+    side = str(row.get("side") or row.get("pos_side") or row.get("posSide") or "").strip().lower()
+    if side in {"long", "short"}:
+        return side
+    try:
+        amount = float(row.get("size_signed") if row.get("size_signed") is not None
+                       else row.get("pos") or 0)
+    except (TypeError, ValueError):
+        return ""
+    return "long" if amount > 0 else "short" if amount < 0 else ""
 
-    整体归零而非"本方向归零"：双向持仓下平掉空头时，多头的保护腿仍在保护多头，
-    按合约撤腿会误伤（实测 Gate 账户 `position_mode=dual`）。
-    读失败一律当作**未归零**（宁可不撤，也不误撤）。
+
+def _verify_position_side_flat(ad: Any, base: str,
+                               pos_side: Optional[str] = None) -> tuple:
+    """Poll until the requested direction is flat: ``(flat, remaining)``.
+
+    A Binance/Gate hedge account can have the opposite direction open while the
+    target close is already complete.  Whole-symbol flatness is therefore only
+    the right predicate when no target side is supplied; using it for every
+    close leaves the just-closed side's own protection legs behind forever.
     """
     want = str(base or "").upper()
-    remaining = 0.0        # ⚠️ 必须先初始化：全部读失败时若未赋值，
-    #                       下面 `return False, remaining` 会抛 UnboundLocalError
-    #                       （本刀实测被专测 `test_read_failure_counts_as_not_flat` 抓出）
+    requested = str(pos_side or "").strip().lower()
+    if requested not in {"long", "short"}:
+        requested = ""
+    remaining = 0.0
     for _ in range(max(1, int(CLOSE_FLAT_POLL_TRIES))):
         try:
             rows = ad.positions() or []
@@ -729,19 +932,34 @@ def _verify_symbol_flat(ad: Any, base: str) -> tuple:
             time.sleep(CLOSE_FLAT_POLL_SLEEP)
             continue
         remaining = 0.0
-        for r in rows:
-            if not isinstance(r, dict):
+        for row in rows:
+            if not isinstance(row, dict):
                 continue
-            if str(r.get("base") or "").upper() != want:
+            if str(row.get("base") or "").upper() != want:
+                continue
+            row_side = _position_row_side(row)
+            if requested and row_side and row_side != requested:
                 continue
             try:
-                remaining = max(remaining, abs(float(r.get("size_signed") or 0)))
+                amount = abs(float(row.get("size_signed") or row.get("pos") or 0))
             except (TypeError, ValueError):
-                remaining = max(remaining, 1.0)      # 读不出量 ⇒ 当作仍有仓（保守）
+                # A matching row whose amount cannot be parsed is still live.
+                amount = 1.0
+            # With a target direction, a non-zero row whose direction is
+            # unreadable cannot safely be treated as the opposite hedge leg.
+            # Fail closed rather than claiming target flatness from ambiguity.
+            if requested and not row_side and amount > 1e-9:
+                amount = max(amount, 1.0)
+            remaining = max(remaining, amount)
         if remaining <= 1e-9:
             return True, 0.0
         time.sleep(CLOSE_FLAT_POLL_SLEEP)
     return False, remaining
+
+
+def _verify_symbol_flat(ad: Any, base: str) -> tuple:
+    """轮询核验该合约**整体归零**（任何方向都没有仓）→ `(flat, 剩余量)`。"""
+    return _verify_position_side_flat(ad, base, None)
 
 
 def _read_symbol_position(ad: Any, base: str, pos_side: Optional[str] = None) -> Dict[str, Any]:
@@ -763,68 +981,308 @@ def _read_symbol_position(ad: Any, base: str, pos_side: Optional[str] = None) ->
             out["size_signed"] = r.get("size_signed")
             if r.get("side"):
                 out["side"] = str(r.get("side")).lower()
-            if str(out.get("side") or "").lower() == str(pos_side or "").lower() or not pos_side:
+            requested = str(pos_side or "").strip().lower()
+            if requested not in {"long", "short"} or str(out.get("side") or "").lower() == requested:
                 break
     except Exception:
         pass
     return out
 
 
-def _cancel_proven_own_legs(ad: Any, base: str,
-                            before_position: Optional[Dict[str, Any]] = None) -> str:
-    """撤掉该合约上**可证明属于本系统**的保护腿；返回给 detail 追加的人读说明。
+def _cancel_result_error(result: Any) -> str:
+    """Require an explicit successful cancellation acknowledgement."""
+    if not isinstance(result, dict) or not result:
+        return f"ambiguous_response={type(result).__name__}"
+    for key in ("error", "error_code"):
+        value = result.get(key)
+        if value not in (None, "", 0, "0"):
+            return f"{key}={value}"
+    # Binance uses code=0; OKX-style adapters may expose sCode=0.  A zero code
+    # is an explicit exchange success, unlike a missing code.
+    for key in ("code", "sCode"):
+        if key in result:
+            value = result.get(key)
+            # Binance USD-M `/fapi/v1/algoOrder` documents `code: "200"`
+            # for a successful cancel, while OKX uses `sCode: "0"` and
+            # some adapters expose numeric zero.  These are explicit success
+            # codes; an absent code remains ambiguous below.
+            if value in (0, "0") or (key == "code" and value in (200, "200")):
+                return ""
+            if value not in (None, ""):
+                return f"{key}={value}"
+    if result.get("ok") is True or result.get("success") is True:
+        return ""
+    status = str(result.get("status") or result.get("algoStatus") or "").strip().lower()
+    if status in {"canceled", "cancelled", "closed", "finished", "expired"}:
+        return ""
+    return "ambiguous_response=no_explicit_success"
 
-    只撤两类：① `matched`（保护的就是刚平掉的那笔）；② 孤儿但带本系统标签
-    （Gate `t-astrasl/t-astratp`）。其余（旧向/旧量腿、归属不可判定的腿）**一律不碰**，
-    只把数量如实报出，交由归属审计与人工决定。
-    """
+
+def _cancel_proven_own_legs(ad: Any, base: str,
+                            before_position: Optional[Dict[str, Any]] = None,
+                            *, venue: Optional[str] = None,
+                            only_identities: Optional[set[str]] = None
+                            ) -> ProtectionCleanupResult:
+    """Cancel only exchange-tagged target legs and verify disappearance by relisting."""
     from .execution import own_records as _own
     try:
-        from scripts.trader.venue_protection import leg_base, select_legs_to_cancel_after_close
+        from scripts.trader.venue_protection import (
+            _ownership_evidence, leg_base, select_legs_to_cancel_after_close,
+        )
     except ImportError:
-        from trader.venue_protection import leg_base, select_legs_to_cancel_after_close
+        from trader.venue_protection import (
+            _ownership_evidence, leg_base, select_legs_to_cancel_after_close,
+        )
+
+    venue = str(venue or getattr(getattr(ad, "capabilities", None), "venue", "") or
+                getattr(ad, "venue", "") or "").strip().lower()
+    list_fn = getattr(ad, "list_protective_orders", None)
+    if not callable(list_fn):
+        applicable = venue in {"binance", "gate"}
+        return ProtectionCleanupResult(
+            "；保护腿清理未执行（条件单资源适用但适配器未暴露列表能力）" if applicable
+            else "；保护腿清理未执行（适配器无可识别条件单资源）",
+            ok=not applicable, attempted=False, applicable=applicable,
+            verified=not applicable,
+            failures=(("缺少条件单列表能力",) if applicable else ()))
+
     try:
-        legs = ad.list_protective_orders(None) or []
-    except Exception:
-        legs = []
-    # 第一百八十九刀：这里原来只读**扁平** `l.get("symbol")` —— 而 Gate 的合约在
-    # `initial.contract`（嵌套，真机核对：`symbol` 字段为空）⇒ 所有 Gate 腿都被静默排除，
-    # 于是「平仓后撤掉可证明属于自己的腿」这条链**从未覆盖 Gate**（线上遗留腿与之一致）。
-    # 改用本仓既有的腿基名访问器（它会依次探 `initial.contract`/`contract`/`symbol`/`raw.*`）。
-    symbol_legs = [l for l in legs if leg_base(l) == _own.canonical_inst(base)]
-    # 用**平仓前**抓到的事实做归属（平完再读只剩空仓，判不出 matched）
-    own_position = dict(before_position or {"base": base})
-    ledger = None
+        rows = list_fn(base)
+        if not isinstance(rows, (list, tuple)):
+            raise RuntimeError(f"条件单列表结构异常: {type(rows).__name__}")
+        legs = list(rows)
+    except Exception as exc:
+        return ProtectionCleanupResult(
+            f"；保护腿清单读取失败（{type(exc).__name__}: {str(exc)[:100]}），需人工核对",
+            ok=False, applicable=True, verified=False,
+            failures=("保护腿清单读取失败",))
+
     try:
-        ledger = _own.read_ledger_rows(_own.load_ledger(OWN_POSITION_LEDGER_FILE or None))
-    except Exception:
-        ledger = None
-    sel = select_legs_to_cancel_after_close(own_position, symbol_legs, ledger)
-    done, failed = [], []
-    for item in sel["to_cancel"]:
-        oid = str(item.get("id") or "")
-        if not oid:
-            continue
+        expected_base = canonical_base(base)
+        symbol_legs = [row for row in legs if isinstance(row, dict) and
+                       canonical_base(leg_base(row)) == expected_base]
+        own_position = dict(before_position or {"base": base})
         try:
-            if hasattr(ad, "cancel_price_order"):
-                ad.cancel_price_order(oid)
-            elif hasattr(ad, "cancel_algo_order"):
-                ad.cancel_algo_order(algo_id=oid)
-            else:
-                failed.append(oid)
-                continue
-            done.append(oid)
+            ledger = _own.read_ledger_rows(_own.load_ledger(OWN_POSITION_LEDGER_FILE or None))
         except Exception:
-            failed.append(oid)
-    left = sel["counts"]["not_touched"]
-    note = f"；保护腿已撤 {len(done)} 张"
-    if failed:
-        note += f"、撤单失败 {len(failed)} 张（需人工核对）"
-    if left:
-        note += f"；另有 {left} 张**未撤**（旧向/旧量或归属不可判定，交归属审计）"
-    return note
+            ledger = None
+        sel = select_legs_to_cancel_after_close(own_position, symbol_legs, ledger,
+                                                 venue=venue)
+        if only_identities is not None:
+            try:
+                from scripts.trader.protection_identity import (
+                    extract_protection_identities,
+                    normalize_typed_identity,
+                    protection_identity_key,
+                )
+            except ImportError:
+                from trader.protection_identity import (
+                    extract_protection_identities,
+                    normalize_typed_identity,
+                    protection_identity_key,
+                )
 
+            requested = list(only_identities) if not isinstance(only_identities, str) \
+                else [only_identities]
+            allowed_keys = set()
+            legacy_tokens = set()
+            for value in requested:
+                typed = normalize_typed_identity(value)
+                if typed is not None:
+                    allowed_keys.add(protection_identity_key(typed))
+                elif isinstance(value, str) and value.strip():
+                    legacy_tokens.add(value.strip())
 
+            # Legacy records are opaque tokens. Upgrade one only when exactly
+            # one typed identity on exactly one live ASTRA-tagged row matches.
+            legacy_ambiguities = []
+            for token in legacy_tokens:
+                candidates = {}
+                for row in symbol_legs:
+                    if not isinstance(row, dict) or _ownership_evidence(row) != "tag":
+                        continue
+                    for identity in extract_protection_identities(row, venue=venue,
+                                                                  ownership_evidence="tag"):
+                        if identity["identity_value"] == token:
+                            key = protection_identity_key(identity)
+                            if key is not None:
+                                candidates.setdefault(key, []).append(row)
+                if len(candidates) == 1 and len(next(iter(candidates.values()))) == 1:
+                    allowed_keys.update(candidates)
+                else:
+                    legacy_ambiguities.append({"legacy_token": token,
+                                               "candidate_count": sum(len(v) for v in candidates.values()),
+                                               "why": "旧身份无法唯一升级，保留并报告"})
+
+            def _identity_keys(item):
+                if not isinstance(item, dict):
+                    return set()
+                out = set()
+                for identity in (item.get("protection_identities") or []):
+                    normalized = normalize_typed_identity(identity)
+                    key = protection_identity_key(normalized) if normalized else None
+                    if key is not None:
+                        out.add(key)
+                return out
+
+            sel["to_cancel"] = [item for item in sel.get("to_cancel", [])
+                                if _identity_keys(item) & allowed_keys]
+            sel["ids"] = [str(item.get("id") or "") for item in sel["to_cancel"]
+                           if str(item.get("id") or "")]
+            sel["legacy_identity_ambiguities"] = legacy_ambiguities
+            # Scale-out attaches replacement protection before this helper runs.
+            # Any old snapshot identity that no longer qualifies as a cleanup
+            # candidate is disclosed only if its exact typed key still matches.
+            for bucket, items in list((sel.get("not_touched") or {}).items()):
+                sel["not_touched"][bucket] = [
+                    item for item in (items or [])
+                    if _identity_keys(item) & allowed_keys]
+    except Exception as exc:
+        return ProtectionCleanupResult(
+            f"；保护腿归属判定失败（{type(exc).__name__}: {str(exc)[:100]}）",
+            ok=False, applicable=True, verified=False,
+            failures=("保护腿归属判定失败",))
+
+    try:
+        from scripts.trader.protection_identity import (
+            extract_protection_identities, normalize_typed_identity,
+            protection_identity_key,
+        )
+    except ImportError:
+        from trader.protection_identity import (
+            extract_protection_identities, normalize_typed_identity,
+            protection_identity_key,
+        )
+
+    cancel_price = getattr(ad, "cancel_price_order", None)
+    cancel_algo = getattr(ad, "cancel_algo_order", None)
+    def _selected_identity(item):
+        records = [normalize_typed_identity(x)
+                   for x in (item.get("protection_identities") or [])]
+        records = [x for x in records if x and x["venue"] == venue]
+        if venue == "gate":
+            return (next((x for x in records if x["identity_kind"] == "id_string"), None)
+                    or next((x for x in records if x["identity_kind"] == "id"), None))
+        if venue == "binance":
+            return (next((x for x in records if x["identity_kind"] == "algo_id"), None)
+                    or next((x for x in records if x["identity_kind"] == "client_algo_id"), None))
+        return None
+
+    if any(_selected_identity(item) is None for item in sel.get("to_cancel", [])
+           if isinstance(item, dict)):
+        return ProtectionCleanupResult(
+            "；保护腿清理未执行（缺少可路由的 typed identity，保守保留）",
+            ok=False, attempted=False, applicable=True, verified=False,
+            failures=("缺少可路由的 typed identity",))
+    if sel.get("to_cancel") and (
+            (venue == "gate" and not callable(cancel_price))
+            or (venue == "binance" and not callable(cancel_algo))
+            or venue not in {"gate", "binance"}):
+        return ProtectionCleanupResult("；保护腿清理未执行（缺少匹配资源族的逐腿撤单能力）",
+                                       ok=False, attempted=False, applicable=True,
+                                       verified=False, failures=("缺少匹配资源族的逐腿撤单能力",))
+
+    # A successful list is itself an attempted cleanup audit.  If there are no
+    # target legs, the result is verified complete without issuing DELETE.
+    attempted = True
+    requested = []
+    failures: List[str] = []
+    for item in sel.get("to_cancel", []):
+        if not isinstance(item, dict):
+            failures.append("撤单目标结构异常")
+            continue
+        identity_record = _selected_identity(item)
+        if identity_record is None:
+            failures.append("缺少 typed conditional-order identity")
+            continue
+        identity_value = identity_record["identity_value"]
+        try:
+            if identity_record["venue"] == "gate" and identity_record["resource_family"] == "price_order":
+                response = cancel_price(identity_value)
+            elif identity_record["venue"] == "binance" and identity_record["resource_family"] == "algo_order":
+                if identity_record["identity_kind"] == "algo_id":
+                    response = cancel_algo(algo_id=identity_value)
+                elif identity_record["identity_kind"] == "client_algo_id":
+                    response = cancel_algo(client_algo_id=identity_value)
+                else:
+                    raise RuntimeError("Binance algoOrder identity kind is unsupported")
+            else:
+                raise RuntimeError("typed identity resource family does not match the venue")
+            response_error = _cancel_result_error(response)
+            if response_error:
+                raise RuntimeError(response_error)
+            typed_key = protection_identity_key(identity_record)
+            requested.append((typed_key, identity_record, str(item.get("symbol") or base)))
+        except Exception as exc:
+            failures.append(f"{identity_value}: {exc}")
+
+    verified_ids = set()
+    relist_error = ""
+    if requested:
+        try:
+            after = list_fn(base)
+            if not isinstance(after, (list, tuple)):
+                raise RuntimeError(f"撤后列表结构异常: {type(after).__name__}")
+            for row in after:
+                if not isinstance(row, dict) or canonical_base(leg_base(row)) != canonical_base(base):
+                    continue
+                for identity in extract_protection_identities(row, venue=venue):
+                    key = protection_identity_key(identity)
+                    if key is not None:
+                        verified_ids.add(key)
+        except Exception as exc:
+            relist_error = f"撤后复查失败: {type(exc).__name__}: {str(exc)[:100]}"
+
+    still_open = [identity["identity_value"] for key, identity, _symbol in requested
+                  if relist_error or key in verified_ids]
+    if relist_error:
+        failures.append(relist_error)
+    if still_open:
+        failures.append(f"撤单后仍在列表或无法确认 {len(still_open)} 张")
+
+    not_touched = sel.get("not_touched") or {}
+    # These buckets are deliberately retained, not failed: no exchange-side
+    # ownership proof means we must not issue DELETE.  Keep the complete leg
+    # records machine-readable so callers can disclose/manual-review them
+    # without turning a safe refusal into a false cleanup failure.
+    report_only = tuple(
+        dict(leg, bucket=bucket)
+        for bucket in (
+            "matched_unattributed", "size_mismatch", "orphan_attributed_ledger",
+            "orphan_unattributed", "unparsed", "side_mismatch", "foreign",
+            "ambiguous_position", "duplicate_identities",
+        )
+        for leg in (not_touched.get(bucket) or [])
+        if isinstance(leg, dict)
+    ) + tuple(
+        dict(leg, bucket="legacy_identity_ambiguity")
+        for leg in (sel.get("legacy_identity_ambiguities") or [])
+        if isinstance(leg, dict)
+    )
+    unresolved_buckets = (
+        "matched_unattributed", "size_mismatch", "orphan_attributed_ledger",
+        "orphan_unattributed", "unparsed", "ambiguous_position", "duplicate_identities",
+    )
+    unresolved = sum(len(not_touched.get(key) or []) for key in unresolved_buckets)
+    side_mismatch = len(not_touched.get("side_mismatch") or [])
+    done_count = len(requested) - len(still_open)
+    note = f"；保护腿已核验撤除 {done_count} 张"
+    if unresolved:
+        note += f"；另有 {unresolved} 张归属/方向未确认，保留并需人工核对"
+    if side_mismatch:
+        # The opposite hedge direction is intentionally preserved.  It is not
+        # a cleanup failure for the requested side, but omitting it from the
+        # result makes a successful close look like a symbol-wide cancellation.
+        note += f"；另有 {side_mismatch} 张方向不匹配保护腿保留未撤"
+    if report_only and not unresolved and not side_mismatch:
+        note += f"；另有 {len(report_only)} 张未获撤销授权，保留并报告"
+    if still_open:
+        note += f"；撤后仍存在/未核实 {len(still_open)} 张"
+    if failures:
+        note += "；清理未完成: " + "；".join(failures)
+    return ProtectionCleanupResult(note, ok=not failures, attempted=attempted,
+                                   applicable=True, verified=not failures,
+                                   failures=tuple(failures), report_only=report_only)
 
 def reduce_only_position(symbol: str, quantity: float, *, venue: str = "gate",
                          pos_side: Optional[str] = None, adapter: Any = None,
@@ -1031,29 +1489,54 @@ def close_position(symbol: str, *, venue: str = "gate", adapter: Any = None,
             except Exception as evidence_exc:
                 print(f"[binance execution evidence] warn close persist skipped: {evidence_exc}")
 
-    # ── 平仓后收尾：核验归零 → 撤掉**可证明属于本系统**的该合约保护腿 ──────────
-    # 为什么放在这里：遗留腿的产生源头就是"平仓路径从不撤腿"（实测 `close_position`
-    # 只提交市价全平，`cancel_protective_orders` 仓库里仅 `scale_out` 用过）⇒
-    # 实测 Binance 13 张腿里只有 2 张对得上活动仓，其余是历史遗留（reduceOnly 有量条件单，
-    # 同币再开仓时会被旧触发价减仓；也会让覆盖判定**虚假满足**）。
-    #
-    # ⚠️ 三条铁律（顺序不能变）：
-    #   1. **先核验归零**：未确认归零绝不撤腿 —— 撤早了会把还在保护中的腿撤掉；
-    #   2. **该合约必须整体归零**（任何方向都没有仓）：双向持仓下平掉空头时多头的
-    #      保护腿仍在保护它，按合约撤会误伤；
-    #   3. **只撤可证明属于本系统的腿**（matched / Gate `t-astra` 标签）：
-    #      归属不可判定的腿可能是**用户手单**，撤错不可逆。
+    # ── 平仓后收尾：核验**目标方向**归零 → 撤掉可证明属于本系统的保护腿 ─────
+    # 对冲模式允许另一方向继续持仓；此时不能用整合约归零作为前置，否则刚
+    # 关闭方向的 TP/SL 会永久遗留。选择器仍按平仓前的方向/数量证据区分，
+    # 因而另一方向的保护腿只报告、不触碰。
     note = ""
-    try:
-        if CANCEL_STALE_PROTECTION_ON_CLOSE and v != "okx":
-            flat, remaining_any = _verify_symbol_flat(ad, asset)
-            if not flat:
-                note = ("；未核验归零（同合约仍有 %.6g），保护腿保持不动" % remaining_any
-                        if remaining_any
-                        else "；未核验归零（持仓读不到），保护腿保持不动")
+    cleanup_ok = True
+    cleanup_status = "disabled"
+    if CANCEL_STALE_PROTECTION_ON_CLOSE and v != "okx":
+        requested_side = str(pos_side or "").strip().lower()
+        if requested_side not in {"long", "short"}:
+            requested_side = str((_before_position or {}).get("side") or "").strip().lower()
+            if requested_side not in {"long", "short"}:
+                requested_side = ""
+        try:
+            if pos_side:
+                flat, remaining_target = _verify_position_side_flat(ad, asset, requested_side)
             else:
-                note = _cancel_proven_own_legs(ad, asset, _before_position)
-    except Exception as exc:      # 收尾失败绝不影响平仓结论
-        note = f"；保护腿收尾异常（{type(exc).__name__}: {str(exc)[:80]}），需人工核对"
+                # Legacy callers that omit pos_side only reach here after the
+                # adapter accepted an unambiguous single-position close; retain
+                # the stronger whole-symbol check for that legacy contract.
+                flat, remaining_target = _verify_symbol_flat(ad, asset)
+            if not flat:
+                note = ("；未核验归零（目标方向仍有 %.6g），保护腿保持不动" % remaining_target
+                        if remaining_target
+                        else "；未核验归零（目标方向持仓读不到），保护腿保持不动")
+                return _fail("close_verify", f"{v.upper()} 平仓已提交但未确认目标仓位归零: {note}",
+                             venue=v, asset=asset, raw=data, cleanup_ok=False)
+            cleanup = _cancel_proven_own_legs(ad, asset, _before_position, venue=v)
+            note = str(cleanup)
+            cleanup_ok = bool(getattr(cleanup, "ok", False)) and (
+                not bool(getattr(cleanup, "applicable", True)) or
+                bool(getattr(cleanup, "verified", False)))
+            cleanup_status = ("complete" if cleanup_ok else
+                              ("not_applicable" if not getattr(cleanup, "applicable", True)
+                               else "incomplete"))
+            if not cleanup_ok:
+                return _fail("close_cleanup",
+                             f"{v.upper()} 仓位已归零但条件单清理未完成: {note}",
+                             venue=v, asset=asset, raw=data, cleanup_ok=False,
+                             protection_cleanup=note)
+        except Exception as exc:
+            note = f"；保护腿收尾异常（{type(exc).__name__}: {str(exc)[:100]}），需人工核对"
+            return _fail("close_cleanup",
+                         f"{v.upper()} 仓位已归零但条件单清理未完成: {note}",
+                         venue=v, asset=asset, raw=data, cleanup_ok=False,
+                         protection_cleanup=note)
+
     return RouteResult(ok=True, venue=v, stage="done", asset=asset,
+                       cleanup_ok=cleanup_ok, cleanup_status=cleanup_status,
+                       protection_cleanup=note,
                        detail=f"{v.upper()} 市价全平已提交: {str(data)[:120]}{note}")

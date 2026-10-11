@@ -38,7 +38,7 @@ from scripts.trader.venue_protection import attribute_protective_orders  # noqa:
 
 def _leg(symbol, order_type, side, qty, trig, algo_id="a1"):
     """按**真实归一形状**造腿（`raw.orderType` 才是类型来源，`type` 恒 CONDITIONAL）。"""
-    return {"id": algo_id, "algo_id": algo_id, "symbol": symbol, "side": side,
+    return {"id": algo_id, "algo_id": algo_id, "venue": "binance", "symbol": symbol, "side": side,
             "trigger_price": trig, "type": "CONDITIONAL",
             "raw": {"symbol": symbol, "orderType": order_type, "side": side.upper(),
                     "quantity": str(qty), "triggerPrice": str(trig),
@@ -77,18 +77,21 @@ class RealFixtureTest(unittest.TestCase):
     def setUp(self):
         self.r = attribute_protective_orders(REAL_POSITIONS, REAL_LEGS, REAL_LEDGER)
 
-    def test_counts_match_the_live_measurement(self):
+    def test_counts_preserve_physical_matches_without_claiming_ownership(self):
+        """Binance 真回包没有 ASTRA clientAlgoId 时只能报物理匹配。"""
         self.assertEqual(self.r["legs_total"], 13)
         self.assertEqual(self.r["counts"], {
-            "matched": 2, "size_mismatch": 0, "side_mismatch": 2,
-            "orphan_attributed": 3, "orphan_unattributed": 6,
-            "unparsed": 0, "foreign": 0})
+            "matched": 0, "matched_unattributed": 2, "size_mismatch": 0,
+            "side_mismatch": 2, "orphan_attributed": 3,
+            "orphan_unattributed": 6, "unparsed": 0, "foreign": 0})
         self.assertEqual(self.r["orphan_total"], 9)
 
-    def test_live_position_is_matched_to_its_two_real_legs(self):
-        matched = {(l["symbol"], l["kind"], l["size"]) for l in self.r["matched"]}
+    def test_live_position_is_physically_matched_but_not_ownership_proven(self):
+        matched = {(l["symbol"], l["kind"], l["size"])
+                   for l in self.r["matched_unattributed"]}
         self.assertEqual(matched, {("UNI", "sl", 82.0), ("UNI", "tp", 82.0)},
-                         "活动仓 82 张的 SL/TP 必须被判为 matched")
+                         "活动仓的两张腿只能进 matched_unattributed，不能冒充 ownership proof")
+        self.assertEqual(self.r["matched"], [])
 
     def test_old_side_legs_are_flagged_not_matched(self):
         """旧腿（SELL 平多、51/55 张）**不能**算作当前空仓的保护。
@@ -110,24 +113,29 @@ class RealFixtureTest(unittest.TestCase):
 
     def test_unattributed_orphans_are_declared_undecidable(self):
         syms = {l["symbol"] for l in self.r["needs_human"]}
-        self.assertEqual(syms, {"ETH", "SOL"}, "无台账记录的腿只能进'需要人看'")
-        self.assertTrue(all(l["symbol"] not in {"ARB", "XRP"} for l in self.r["needs_human"]))
+        self.assertEqual(syms, {"ARB", "ETH", "SOL", "UNI", "XRP"},
+                         "台账-only、物理匹配但无 ownership proof、以及无台账腿都必须进人工复核")
+        self.assertTrue(all(l["symbol"] not in {"ARB", "XRP"}
+                            or l.get("evidence") == "ledger"
+                            for l in self.r["needs_human"]))
 
-    def test_cleanup_candidates_exclude_undecidable(self):
-        """可清理候选只含**可归因**项；归属不可判定的一律不进（撤错用户手单不可逆）。"""
+    def test_cleanup_candidates_are_tag_only(self):
+        """台账只能报告，不能进入可自动撤销候选。"""
         cand = {(l["symbol"], l["size"]) for l in self.r["cleanup_candidates"]}
-        self.assertEqual(cand, {("ARB", 2416.7), ("XRP", 799.9), ("ETH", 0.527),
-                               ("UNI", 51.0), ("UNI", 55.0)})
+        self.assertEqual(cand, set())
+        self.assertEqual({l["symbol"] for l in self.r["ledger_only"]},
+                         {"ARB", "XRP", "ETH"})
         undecidable = {(l["symbol"], l["size"]) for l in self.r["needs_human"]}
-        self.assertEqual(cand & undecidable, set(), "两类必须互斥")
+        self.assertTrue({("ARB", 2416.7), ("XRP", 799.9), ("ETH", 0.527)} <= undecidable)
+        self.assertTrue(cand.isdisjoint(undecidable), "两类必须互斥")
 
 
 class SemanticsTest(unittest.TestCase):
     def test_close_side_maps_to_position_side_for_attribution(self):
         """腿是**平仓方向**：腿 BUY ⇒ 原仓 short。方向搞反会把多仓记录错配给空腿。"""
         legs = [_leg("ETHUSDT", "STOP_MARKET", "buy", 1.0, 100.0)]
-        short_row = [{"inst": "ETH", "side": "空", "sz": 1.0, "status": "closed"}]
-        long_row = [{"inst": "ETH", "side": "多", "sz": 1.0, "status": "closed"}]
+        short_row = [{"inst": "ETH", "venue": "binance", "side": "空", "sz": 1.0, "status": "closed"}]
+        long_row = [{"inst": "ETH", "venue": "binance", "side": "多", "sz": 1.0, "status": "closed"}]
         self.assertEqual(len(attribute_protective_orders([], legs, short_row)["orphan_attributed"]), 1)
         self.assertEqual(len(attribute_protective_orders([], legs, long_row)["orphan_unattributed"]), 1)
 
@@ -156,14 +164,15 @@ class SemanticsTest(unittest.TestCase):
         legs = [_leg("SOLUSDT", "STOP_MARKET", "buy", 10.45, 100.0)]
         pos = [{"base": "SOL", "side": "short", "size_signed": -10.45000001}]
         r = attribute_protective_orders(pos, legs, [])
-        self.assertEqual(r["counts"]["matched"], 1)
+        self.assertEqual(r["counts"]["matched_unattributed"], 1,
+                         "物理匹配但没有交易所 ownership proof，只能进人工复核")
 
     def test_symbol_normalization_covers_venue_spellings(self):
         for sym in ("UNIUSDT", "UNI-USDT-SWAP", "UNI_USDT", "uni"):
             with self.subTest(sym=sym):
                 legs = [_leg(sym, "STOP_MARKET", "buy", 82.0, 9.0)]
                 r = attribute_protective_orders(REAL_POSITIONS, legs, [])
-                self.assertEqual(r["counts"]["matched"], 1)
+                self.assertEqual(r["counts"]["matched_unattributed"], 1)
 
     def test_empty_inputs_are_safe(self):
         for args in ((None, None, None), ([], [], [])):

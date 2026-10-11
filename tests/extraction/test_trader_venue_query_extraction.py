@@ -153,6 +153,10 @@ class NetPosSideCloseVerifyTest(unittest.TestCase):
         class _Rest:
             def pending_orders(self, inst_id):
                 return []
+            def pending_algo_orders(self, *args, **kwargs):
+                return []
+            def cancel_algo_orders(self, *args, **kwargs):
+                return []
             def close_position(self, inst_id, pos_side, td_mode=None, auto_cxl=None):
                 calls["closed"] += 1
         orig_sleep = vq.time.sleep

@@ -29,11 +29,13 @@ sys.path.insert(0, str(ROOT))
 from scripts.trader.venue_protection import select_legs_to_cancel_after_close  # noqa: E402
 
 
-def _leg(symbol, order_type, side, qty, trig, algo_id):
+def _leg(symbol, order_type, side, qty, trig, algo_id, *, owned=True):
+    marker = "t-astratp" if "TAKE_PROFIT" in str(order_type).upper() else "t-astrasl"
     return {"id": algo_id, "algo_id": algo_id, "symbol": symbol, "side": side,
-            "trigger_price": trig, "type": "CONDITIONAL",
+            "venue": "binance", "trigger_price": trig, "type": "CONDITIONAL",
             "raw": {"symbol": symbol, "orderType": order_type, "side": side.upper(),
-                    "quantity": str(qty), "triggerPrice": str(trig), "algoStatus": "NEW"}}
+                    "quantity": str(qty), "triggerPrice": str(trig), "algoStatus": "NEW",
+                    "clientAlgoId": f"{marker}-{algo_id}" if owned else ""}}
 
 
 def _gate_leg(contract, text, auto_size, trig, algo_id, direction="long"):
@@ -49,7 +51,8 @@ LEGS = [
     _leg("UNIUSDT", "STOP_MARKET", "buy", 82.0, 9.025, "uni-sl"),
     _leg("UNIUSDT", "TAKE_PROFIT_MARKET", "buy", 82.0, 8.365, "uni-tp"),
     _leg("UNIUSDT", "TAKE_PROFIT_MARKET", "sell", 51.0, 10.3, "uni-old-long"),
-    _leg("ETHUSDT", "STOP_MARKET", "buy", 0.537, 2628.0, "eth-undecidable"),
+    _leg("ETHUSDT", "STOP_MARKET", "buy", 0.537, 2628.0,
+         "eth-undecidable", owned=False),
 ]
 
 
@@ -79,8 +82,13 @@ class SelectorTest(unittest.TestCase):
         self.assertEqual(r["counts"]["not_touched"], 2)
 
     def test_no_position_facts_means_conservative_no_cancel(self):
-        """退化情形（抓不到平仓前事实）：Binance 无标签腿归因不出 ⇒ 不撤。"""
-        r = select_legs_to_cancel_after_close({"base": "UNI"}, LEGS, [])
+        """退化情形（抓不到平仓前事实）：无 ownership proof 的腿不撤。"""
+        untagged = [
+            _leg("UNIUSDT", "STOP_MARKET", "buy", 82.0, 9.025, "uni-sl", owned=False),
+            _leg("UNIUSDT", "TAKE_PROFIT_MARKET", "buy", 82.0, 8.365,
+                 "uni-tp", owned=False),
+        ]
+        r = select_legs_to_cancel_after_close({"base": "UNI"}, untagged, [])
         self.assertEqual(r["ids"], [], "判不出归属就不撤（宁留勿误撤）")
 
     def test_gate_full_close_leg_matches_without_size(self):
@@ -123,10 +131,36 @@ class RouterCloseTest(unittest.TestCase):
         def list_protective_orders(self, symbol=None):
             return self._legs
 
-        def cancel_algo_order(self, **kw):
+        def _remove_leg(self, identity):
+            identity = str(identity or "")
+            self._legs = [
+                row for row in self._legs
+                if not any(str(row.get(key) or "") == identity
+                           for key in ("id", "id_string", "algo_id", "client_algo_id"))
+            ]
+
+        def _cancel_price_order(self, order_id):
             if self._raise_cancel:
                 raise RuntimeError("cancel boom")
-            self.cancelled.append(kw.get("algo_id"))
+            self.cancelled.append(order_id)
+            self._remove_leg(order_id)
+            return {"status": "finished"}
+
+        def _cancel_algo_order(self, *, algo_id=None, client_algo_id=None):
+            if self._raise_cancel:
+                raise RuntimeError("cancel boom")
+            identity = algo_id or client_algo_id
+            self.cancelled.append(identity)
+            self._remove_leg(identity)
+            return {"code": "200", "msg": "success"}
+
+        def configure_venue(self, venue):
+            if str(venue).lower() == "gate":
+                self.cancel_price_order = self._cancel_price_order
+                self.cancel_algo_order = None
+            else:
+                self.cancel_price_order = None
+                self.cancel_algo_order = self._cancel_algo_order
 
     def setUp(self):
         from astra_backend import execution_router
@@ -137,21 +171,39 @@ class RouterCloseTest(unittest.TestCase):
         self.addCleanup(self._p1.stop); self.addCleanup(self._p2.stop)
 
     def _close(self, ad, **kw):
-        return self.er.close_position("UNI", venue=kw.pop("venue", "binance"), adapter=ad, **kw)
+        venue = kw.pop("venue", "binance")
+        ad.configure_venue(venue)
+        return self.er.close_position("UNI", venue=venue, adapter=ad, **kw)
 
     def test_flat_verified_cancels_exactly_the_proven_legs(self):
         ad = self._Ad()
         r = self._close(ad)
         self.assertTrue(r["ok"])
         self.assertEqual(ad.cancelled, ["uni-sl", "uni-tp"])
-        self.assertIn("保护腿已撤 2 张", r["detail"])
-        self.assertIn("未撤", r["detail"], "未撤的腿必须如实报出，不许静默丢弃")
+        self.assertIn("保护腿已核验撤除 2 张", r["detail"])
+        self.assertIn("方向不匹配", r["detail"],
+                      "未撤的对向保护腿必须如实报出，不许静默丢弃")
+
+    def test_hedge_close_cleans_target_side_and_preserves_opposite_side(self):
+        """Binance/Gate 对冲仓：平空只撤空腿，多腿继续保护不得被误撤。"""
+        short_leg = _leg("UNIUSDT", "STOP_MARKET", "buy", 82.0, 9.025, "short-sl")
+        long_leg = _leg("UNIUSDT", "STOP_MARKET", "sell", 10.0, 8.0, "long-sl")
+        ad = self._Ad(
+            before=[{"base": "UNI", "side": "short", "size_signed": -82.0},
+                    {"base": "UNI", "side": "long", "size_signed": 10.0}],
+            after=[{"base": "UNI", "side": "long", "size_signed": 10.0}],
+            legs=[short_leg, long_leg],
+        )
+        r = self._close(ad, pos_side="short")
+        self.assertTrue(r["ok"], r["detail"])
+        self.assertEqual(ad.cancelled, ["short-sl"])
+        self.assertIn("方向不匹配", r["detail"], "对向保护腿必须留在账户中并披露")
 
     def test_not_flat_cancels_nothing(self):
         """**最关键的不变量**：未核验归零 ⇒ 一张都不撤（否则正在保护的仓会裸）。"""
         ad = self._Ad(after=[{"base": "UNI", "side": "short", "size_signed": -82.0}])
         r = self._close(ad)
-        self.assertTrue(r["ok"], "平仓本身已受理 ⇒ 仍算成功")
+        self.assertFalse(r["ok"], "未确认目标仓位归零必须失败闭锁")
         self.assertEqual(ad.cancelled, [])
         self.assertIn("未核验归零", r["detail"])
         self.assertIn("保持不动", r["detail"])
@@ -159,15 +211,17 @@ class RouterCloseTest(unittest.TestCase):
     def test_read_failure_counts_as_not_flat(self):
         ad = self._Ad(positions_raises=True)
         r = self._close(ad)
+        self.assertFalse(r["ok"], "读不到持仓归零证据必须失败闭锁")
         self.assertEqual(ad.cancelled, [], "读不到持仓 ⇒ 按未归零处理（宁可不撤）")
         self.assertIn("未核验归零", r["detail"])
 
     def test_cancel_failure_does_not_flip_the_close_result(self):
         ad = self._Ad(raise_cancel=True)
         r = self._close(ad)
-        self.assertTrue(r["ok"], "平仓确实成功了；谎报失败会让上层重试平仓")
-        self.assertIn("撤单失败", r["detail"])
-        self.assertIn("需人工核对", r["detail"])
+        self.assertFalse(r["ok"], "条件单撤销失败必须显式失败闭锁")
+        self.assertIn("清理未完成", r["detail"])
+        self.assertIn("cancel boom", r["detail"])
+        self.assertIn("清理未完成", r["detail"])
 
     def test_flag_off_disables_the_cleanup(self):
         with patch.object(self.er, "CANCEL_STALE_PROTECTION_ON_CLOSE", False):
@@ -279,22 +333,33 @@ class CancelFailureBranchesTest(unittest.TestCase):
             self.cancelled.append(kw.get("algo_id"))
 
     def _close(self, ad):
+        configure = getattr(ad, "configure_venue", None)
+        if callable(configure):
+            configure("binance")
         return self.er.close_position("UNI", venue="binance", adapter=ad)
 
     def test_read_legs_failure_cancels_nothing(self):
         ad = self._ListRaises()
         r = self._close(ad)
-        self.assertTrue(r["ok"], "平仓本身已受理 ⇒ 仍算成功")
+        self.assertFalse(r["ok"], "读不到腿时条件单清理不能报成功")
         self.assertEqual(ad.cancelled, [], "读不到腿 ⇒ 什么都不撤（不猜、不按合约全撤）")
 
     def test_adapter_without_cancel_capability_records_failure(self):
         ad = self._NoCancel(LEGS)
         r = self._close(ad)
         self.assertEqual(ad.cancelled, [])
-        self.assertIn("撤单失败", r["detail"], "无撤单能力必须如实报失败，不许假装撤过")
+        self.assertIn("缺少逐腿撤单能力", r["detail"],
+                      "无撤单能力必须如实报失败，不许假装撤过")
+        self.assertFalse(r["cleanup_ok"])
 
     def test_leg_without_id_is_not_cancelled(self):
-        legs = [dict(x, algo_id="", id="") for x in LEGS]
+        legs = []
+        for x in LEGS:
+            row = dict(x, algo_id="", id="")
+            raw = dict(row.get("raw") or {})
+            raw["clientAlgoId"] = ""
+            row["raw"] = raw
+            legs.append(row)
         ad = self._NoCancel(legs)
         ad.cancel_algo_order = lambda **kw: ad.cancelled.append(kw.get("algo_id"))
         r = self._close(ad)

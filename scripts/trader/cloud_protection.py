@@ -25,6 +25,7 @@ patch 面（batch5_d_tails / batch6 / three_tier_ratchet_and_cloud_sync）
 from __future__ import annotations
 
 import time
+import uuid
 from typing import Any, Dict, List, Tuple
 
 try:
@@ -42,12 +43,13 @@ def amend_venue_stop_loss(ad, symbol: str, pos_side: str, new_sl: float,
     缝隙），残余旧单一律撤掉；否则安全序列：先挂新 SL（收紧即刻生效、更新无裸仓
     窗口）→ 再撤全部旧 SL。旧单撤失败只 warn——新单已生效，旧 reduce_only 双单
     竞发时后触发者无仓自动无效，绝不回滚收紧（宁可双、不可裸）。"""
-    old_ids: List[str] = []
-    list_error = ""
+    old_legs: List[Dict[str, Any]] = []
     try:
-        from scripts.trader.venue_protection import _row_text as _leg_row_text
-    except ImportError:                      # scripts/ 在 sys.path 上（双拼写铁律）
-        from venue_protection import _row_text as _leg_row_text
+        from scripts.trader.venue_protection import (
+            _ownership_evidence, _protection_kind,
+        )
+    except ImportError:
+        from venue_protection import _ownership_evidence, _protection_kind
     try:
         for row in (ad.list_protective_orders(symbol) or []):
             if not isinstance(row, dict):
@@ -65,30 +67,94 @@ def amend_venue_stop_loss(ad, symbol: str, pos_side: str, new_sl: float,
             # 统一走 `venue_protection._row_text` —— 那是**全部**腿归属判定
             # （`_leg_kind` / 棘轮 / 孤儿清理）唯一的文本来源，它自己的 docstring 写明
             # "改一处即可让改名前后落在交易所上的腿都被认出来"。这里再拼一份就是漏字段的温床。
-            text = _leg_row_text(row)        # 已归一旧标记且已小写
-            rid = str(row.get("id") or row.get("algo_id") or row.get("order_id") or "")
-            if rid and ("astrasl" in text or "stop" in text):
-                old_ids.append(rid)
+            # Physical SL type and ASTRA ownership are independent.  A generic
+            # Binance STOP_MARKET may be a user order and is never amendable by
+            # this routine without an exchange-side ASTRA marker.
+            if _protection_kind(row) != "sl" or _ownership_evidence(row) != "tag":
+                continue
+            rid = str(row.get("id") or row.get("algo_id") or row.get("algoId")
+                      or row.get("order_id") or row.get("ordId") or
+                      row.get("client_algo_id") or row.get("clientAlgoId") or "").strip()
+            if rid:
+                old_legs.append(dict(row, _cleanup_id=rid))
     except Exception as exc:
-        list_error = str(exc)[:160]
+        # Enumeration is part of the safety proof.  Do not attach a new stop
+        # while old-leg identity is unknown; the caller must retry/report.
+        return False, f"旧止损腿枚举失败，未执行改单/挂新: {str(exc)[:160]}"
 
-    def _cancel(oid: str):
-        if hasattr(ad, "cancel_price_order"):
-            ad.cancel_price_order(oid)
-        elif hasattr(ad, "cancel_algo_order"):
-            ad.cancel_algo_order(algo_id=oid)
+    def _cancel(leg: Dict[str, Any]):
+        """Cancel one owned conditional leg and require an explicit ack."""
+        try:
+            from scripts.trader.venue_protection import _cancel_response_is_explicit_success
+        except ImportError:
+            from venue_protection import _cancel_response_is_explicit_success
+        oid = str(leg.get("_cleanup_id") or "").strip()
+        cancel_price = getattr(ad, "cancel_price_order", None)
+        cancel_algo = getattr(ad, "cancel_algo_order", None)
+        if callable(cancel_price):
+            response = cancel_price(oid)
+        elif callable(cancel_algo):
+            algo_id = str(leg.get("algo_id") or leg.get("algoId") or "").strip()
+            client_id = str(leg.get("client_algo_id") or leg.get("clientAlgoId") or "").strip()
+            if algo_id:
+                response = cancel_algo(algo_id=algo_id)
+            elif client_id:
+                response = cancel_algo(client_algo_id=client_id)
+            else:
+                raise RuntimeError("Binance 条件单缺少明确 algo_id/client_algo_id")
         else:
-            ad.cancel_order(symbol, oid)
+            raise RuntimeError("适配器没有条件单逐腿撤销能力")
+        if not _cancel_response_is_explicit_success(response):
+            raise RuntimeError("撤单响应未明确成功")
+        return response
 
-    if old_ids and hasattr(ad, "amend_stop_loss"):
+    def _row_identities(row: Dict[str, Any]):
+        raw = row.get("raw") if isinstance(row.get("raw"), dict) else {}
+        values = []
+        for key in ("id", "id_string", "algo_id", "algoId", "client_algo_id",
+                    "clientAlgoId", "order_id", "ordId"):
+            value = row.get(key) or raw.get(key)
+            if value not in (None, ""):
+                values.append(str(value).strip())
+        return set(values)
+
+    def _verify_removed(expected_ids, retained_ids=()):
+        """Relist and prove every canceled old identity disappeared."""
+        rows = ad.list_protective_orders(symbol)
+        if not isinstance(rows, (list, tuple)):
+            raise RuntimeError(f"撤后列表结构异常: {type(rows).__name__}")
+        observed = set()
+        for row in rows:
+            if isinstance(row, dict):
+                observed.update(_row_identities(row))
+        expected = {str(value).strip() for value in expected_ids if str(value).strip()}
+        retained = {str(value).strip() for value in retained_ids if str(value).strip()}
+        still_open = (expected - retained) & observed
+        if still_open:
+            raise RuntimeError("撤后仍在列表或无法确认: " + ",".join(sorted(still_open)))
+
+    old_ids = [str(row.get("_cleanup_id") or "") for row in old_legs]
+    if old_legs and callable(getattr(ad, "amend_stop_loss", None)):
         try:
             eff = ad.amend_stop_loss(symbol, pos_side, old_ids[0], float(new_sl))
-            for _oid in old_ids[1:]:
-                if str(_oid) != str(eff):
+            residual_failures = []
+            for leg in old_legs[1:]:
+                oid = str(leg.get("_cleanup_id") or "")
+                if oid != str(eff):
                     try:
-                        _cancel(_oid)
+                        _cancel(leg)
                     except Exception as exc:
-                        print(f"[SL-Ratchet] warn {symbol} 清理残余旧SL失败 {_oid}: {exc}")
+                        residual_failures.append(oid)
+                        print(f"[SL-Ratchet] warn {symbol} 清理残余旧SL失败 {oid}: {exc}")
+            try:
+                # A successful amend intentionally leaves its effective identity
+                # alive; every other old identity must disappear from the relist.
+                _verify_removed(old_ids, retained_ids=(str(eff),))
+            except Exception as exc:
+                residual_failures.append(str(exc))
+            if residual_failures:
+                return False, (f"原生改单生效（{old_ids[0]}→{eff}），但残余旧单撤销失败 "
+                               f"{len(residual_failures)}/{len(old_ids)-1}，新止损保留")
             return True, f"原生改单生效（{old_ids[0]}→{eff}），旧单 {len(old_ids)} 笔已处理"
         except Exception as exc:
             print(f"[SL-Ratchet] {symbol} amend 不可用（{str(exc)[:120]}），回退先挂新再撤旧")
@@ -96,18 +162,27 @@ def amend_venue_stop_loss(ad, symbol: str, pos_side: str, new_sl: float,
     placed = ad.attach_protective_orders(symbol, pos_side, sl_px=float(new_sl), contracts=contracts)
     new_id = str((placed or {}).get("sl") or "")
     cancelled = 0
-    for _oid in old_ids:
-        if _oid == new_id:
+    for leg in old_legs:
+        oid = str(leg.get("_cleanup_id") or "")
+        if oid == new_id:
             continue
         try:
-            _cancel(_oid)
+            _cancel(leg)
             cancelled += 1
         except Exception as exc:
-            print(f"[SL-Ratchet] warn {symbol} 撤旧SL失败 {_oid}: {exc}")
-    note = f"先挂新再撤旧（新单 {new_id or '?'}，撤旧 {cancelled}/{len(old_ids)}）"
-    if list_error:
-        note += f" [旧单未能枚举: {list_error}]"
-    return True, note
+            print(f"[SL-Ratchet] warn {symbol} 撤旧SL失败 {oid}: {exc}")
+    verification_error = ""
+    try:
+        _verify_removed(old_ids, retained_ids=(new_id,))
+    except Exception as exc:
+        verification_error = str(exc)
+    expected_cancel_count = sum(1 for oid in old_ids if oid != new_id)
+    note = f"先挂新再撤旧（新单 {new_id or '?'}，撤旧 {cancelled}/{expected_cancel_count}）"
+    if cancelled < expected_cancel_count:
+        note += "；部分旧止损未撤，新止损保留，需人工核对"
+    if verification_error:
+        note += f"；撤后复查未通过: {verification_error}"
+    return cancelled == expected_cancel_count and not verification_error, note
 
 
 
@@ -117,7 +192,15 @@ def _live_oco_coverage(orders: List[Dict[str, Any]], pos_side: str,
     """Return contract size covered by live, reduce-only OCO TP/SL orders."""
     coverage = 0.0
     close_side = "sell" if pos_side == "long" else "buy"
+    try:
+        from scripts.trader.venue_protection import _ownership_evidence
+    except ImportError:  # pragma: no cover - legacy scripts/ import layout
+        from venue_protection import _ownership_evidence
     for order in orders:
+        if not isinstance(order, dict) or _ownership_evidence(order) != "tag":
+            # Physical OCO shape is not ownership proof. User/manual/external
+            # OCOs must not be counted toward ASTRA's protection guarantee.
+            continue
         if str(order.get("state", "live")).lower() not in {"live", "effective"}:
             continue
         if str(order.get("posSide", "net")).lower() not in {pos_side, "net"}:
@@ -154,6 +237,7 @@ def ensure_cloud_position_protection(inst_id: str, pos_side: str, size: float, t
             inst_id, close_side, missing, pos_side=pos_side, td_mode="cross",
             tp_trigger_px=tp_px, tp_ord_px="-1", sl_trigger_px=sl_px, sl_ord_px="-1",
             reduce_only=True, cxl_on_close_pos=True,
+            algo_client_id=f"astraprotect{uuid.uuid4().hex[:12]}",
         )
     except Exception as exc:
         return False, f"cloud OCO repair failed: {exc}"

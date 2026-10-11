@@ -4,11 +4,23 @@ the ai_factor_trader module binding; zero real CLI, zero network, zero exchange 
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+try:  # Windows test hosts do not provide the POSIX-only fcntl module.
+    import fcntl  # noqa: F401
+except ImportError:  # pragma: no cover - exercised only on Windows
+    fcntl_stub = types.ModuleType("fcntl")
+    fcntl_stub.LOCK_EX = 1
+    fcntl_stub.LOCK_NB = 2
+    fcntl_stub.LOCK_UN = 4
+    fcntl_stub.flock = lambda *_args, **_kwargs: None
+    sys.modules["fcntl"] = fcntl_stub
 
 # Ensure scripts directory is in sys.path so okx_runtime can be imported
 scripts_dir = str(Path(__file__).resolve().parent.parent.parent / "scripts")
@@ -24,6 +36,17 @@ class SubmitProtectedLimitOrderTests(unittest.TestCase):
         # 本文件只测风控逻辑，统一封死两条新缝（律①/③）：
         import tempfile
         from astra_backend.exchanges import listing as _listing
+        from scripts.trader import open_entry_guard
+        self._claim_tmp = tempfile.TemporaryDirectory(prefix="astra-risk-claim-")
+        self.addCleanup(self._claim_tmp.cleanup)
+        self.claim_file = Path(self._claim_tmp.name) / "claims.json"
+        self.claim_file.write_text("[]", encoding="utf-8")
+        claim_patch = patch.object(open_entry_guard, "OPEN_ENTRY_CLAIMS_FILE", self.claim_file)
+        claim_patch.start()
+        self.addCleanup(claim_patch.stop)
+        data_patch = patch.dict(os.environ, {"ASTRA_DATA_DIR": self._claim_tmp.name})
+        data_patch.start()
+        self.addCleanup(data_patch.stop)
         patcher = patch.object(
             _listing, "ensure_contract_listed",
             lambda venue, environment, contract: _listing.ListingCheck(
@@ -37,6 +60,15 @@ class SubmitProtectedLimitOrderTests(unittest.TestCase):
         _gate = direct_venue_gate_adapter()
         _gate.__enter__()
         self.addCleanup(lambda: _gate.__exit__(None, None, None))
+        exec_patch = patch("astra_backend.exchanges.registry.execution_open", return_value=True)
+        exec_patch.start()
+        self.addCleanup(exec_patch.stop)
+        from astra_backend import execution_router
+        cross_patch = patch.object(
+            execution_router, "collect_cross_venue_positions",
+            return_value=([], [], []))
+        cross_patch.start()
+        self.addCleanup(cross_patch.stop)
         tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
         tmp.close()
         ip = patch.object(aft, "OPEN_INTENT_FILE", tmp.name)
@@ -97,6 +129,9 @@ class SubmitProtectedLimitOrderTests(unittest.TestCase):
         self.assertEqual(kwargs.get("ord_type"), "limit")
         self.assertEqual(mock_rest.place_order.call_args.args[:2], ("BTC-USDT-SWAP", "buy"))
 
+        # Each remaining branch is an independent submit attempt; clear only this
+        # test's isolated durable claim file between synthetic exchange outcomes.
+        self.claim_file.write_text("[]", encoding="utf-8")
         # 5. Accepted response without an ordId fails closed (never blind trust)
         mock_rest.place_order.return_value = []
         ok, reason = aft.submit_protected_limit_order("BTC-USDT-SWAP", "buy", "long", 1, 100.0, 125.0, 90.0)
@@ -104,10 +139,14 @@ class SubmitProtectedLimitOrderTests(unittest.TestCase):
         self.assertIn("verifiable order id", reason)
 
         # 6. REST transport/business failure surfaces as the rejection reason
+        self.claim_file.write_text("[]", encoding="utf-8")
         mock_rest.place_order.side_effect = RuntimeError("OKX 51001: down")
         ok, reason = aft.submit_protected_limit_order("BTC-USDT-SWAP", "buy", "long", 1, 100.0, 125.0, 90.0)
         self.assertFalse(ok)
         self.assertIn("51001", reason)
+        claim_rows = json.loads(self.claim_file.read_text(encoding="utf-8"))
+        self.assertEqual(claim_rows[0]["status"], "unknown_after_send")
+        self.assertNotIn("expires_at_ms", claim_rows[0])
 
     @patch("scripts.ai_factor_trader.okx_rest")
     @patch("scripts.ai_factor_trader.current_environment")

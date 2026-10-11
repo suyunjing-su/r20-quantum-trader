@@ -272,6 +272,8 @@ def execute_entry_scan(*,
                     margin_usdt=_order_margin,
                     max_margin_usdt=equity_margin_cap(usdt_available),
                     inst_lever_cap=_inst_lever_cap, ai_conf=ai_conf, ai_info=ai_info)
+                # AI 入场扫描显式开启提交边界的持久化同标的防重。
+                _venue_ctx["entry_dedupe_v1"] = True
                 accepted, order_ref = submit_protected_limit_order(
                     inst_id, _side, _pos_side, actual_sz, limit_px, tp_px, sl_px,
                     venue_ctx=_venue_ctx)
@@ -403,6 +405,8 @@ def execute_entry_scan(*,
                     margin_usdt=_order_margin,
                     max_margin_usdt=equity_margin_cap(usdt_available),
                     inst_lever_cap=_inst_lever_cap, ai_conf=ai_conf, ai_info=ai_info)
+                # AI 入场扫描显式开启提交边界的持久化同标的防重。
+                _venue_ctx["entry_dedupe_v1"] = True
                 accepted, order_ref = submit_protected_limit_order(
                     inst_id, _side, _pos_side, actual_sz, limit_px, tp_px, sl_px,
                     venue_ctx=_venue_ctx)

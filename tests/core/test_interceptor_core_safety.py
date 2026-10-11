@@ -4,7 +4,6 @@ Strictly local, temporary mocked directory, zero network, zero real exchange cal
 from __future__ import annotations
 
 import copy
-import math
 import sys
 import unittest
 from pathlib import Path
@@ -105,7 +104,6 @@ class CoreRiskAndInterceptorTests(unittest.TestCase):
         self.assertEqual(reason, "")
         self.assertAlmostEqual(rr, 2.5)
 
-    def test_pipeline_fail_closed_when_plugin_missing_file_or_entry(self):
         # Configure an enabled plugin that does not exist on disk
         im.save_config({
             "pipeline_order": ["missing_filter.py", "bad_syntax.py"],
