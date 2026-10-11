@@ -9,7 +9,7 @@
   不拿凭证错误拦全链（审计#4 教训：那等于交易停摆）；
 - **同向重复单收敛**：按创建时间只保最新一条为候选存活单，其余降级为重复单
   （修复外所"每轮重挂造成成对重复"）；
-- **新鲜意图只负责归属**；超过一个 15 分钟 Trader 周期的入场挂单仍必须回收，避免旧价格长期占用在途名额。
+- **新鲜意图归属 → 保留**；超时/方向不符/无归属 → 撤销，原因必须写清。
 """
 
 import time
@@ -109,8 +109,8 @@ class OkxStaleLifecycleTest(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(okx.cancelled, [("BTC-USDT-SWAP", "o1")])
 
-    def test_fresh_or_non_live_orders_are_left_alone_but_old_kept_is_cancelled(self):
-        """宽限期内 / 非 live 状态不动手；接管不能豁免超龄回收。"""
+    def test_fresh_or_non_live_or_kept_orders_are_left_alone(self):
+        """宽限期内 / 非 live 状态 / 已判定归属（接管）⇒ 一律不动手。"""
         pending = [
             {"instId": "A-USDT-SWAP", "ordId": "fresh", "state": "live", "cTime": NOW_MS - 1000},
             {"instId": "B-USDT-SWAP", "ordId": "filled", "state": "filled", "cTime": 1},
@@ -120,8 +120,7 @@ class OkxStaleLifecycleTest(unittest.TestCase):
         okx = _Okx(pending=pending)
         ok, _ = _clean(okx=okx, now_ms=NOW_MS, keep={"kept"})
         self.assertTrue(ok)
-        self.assertEqual(okx.cancelled, [("C-USDT-SWAP", "kept")],
-                         "接管只代表归属，超龄 live 入场单仍必须撤")
+        self.assertEqual(okx.cancelled, [], "只该撤「陈旧 + live + 无归属」的那种")
 
     def test_order_survives_the_old_four_minute_window_until_cycle_refresh(self):
         """限价入场至少保留一个 15 分钟周期，不能在 4 分钟时提前杀掉。"""
@@ -205,14 +204,13 @@ class CrossVenueTest(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(ad.cancelled, [("BTC", "x1")])
 
-    def test_fresh_intent_does_not_keep_stale_order(self):
+    def test_fresh_intent_keeps_stale_order(self):
         rows = [{"order_id": "x1", "side": "buy", "base": "BTC",
                  "raw": {"symbol": "BTCUSDT", "time": 1}}]
         intents = [{"instId": "BTC-USDT-SWAP", "side": "buy", "ts": NOW_MS - 1000}]
         ok, _, ad = self._run(rows=rows, intents=intents)
         self.assertTrue(ok)
-        self.assertEqual(ad.cancelled, [("BTC", "x1")],
-                         "新鲜意图不能让超龄挂单绕过生命周期回收")
+        self.assertEqual(ad.cancelled, [], "新鲜意图归属 ⇒ 限价挂单跨周期保留")
 
     def test_reduce_only_orders_are_out_of_scope(self):
         rows = [{"order_id": "p1", "side": "sell", "base": "BTC", "reduce_only": True,
@@ -240,7 +238,7 @@ class CrossVenueTest(unittest.TestCase):
         self.assertIn(("BTC", "old"), ad.cancelled, "重复单要被收敛撤销")
         self.assertIn(("BTC", "new"), ad.cancelled, "最新那条无意图归属 ⇒ 也撤")
 
-    def test_keep_set_does_not_spare_stale_external_orders(self):
+    def test_keep_set_spares_externally_verified_orders(self):
         rows = [{"order_id": "x1", "side": "buy", "base": "BTC", "raw": {"symbol": "BTCUSDT", "time": 1}}]
         ad = _Adapter(rows=rows)
         reg = _registry(open_venues=("binance",), adapters={"binance": ad})
@@ -249,8 +247,7 @@ class CrossVenueTest(unittest.TestCase):
             _BROKEN_VENUES=set(), current_environment=lambda: SimpleNamespace(mode="live"),
             load_instruments=lambda: [], okx_rest=_Okx(), venue_registry=reg)
         self.assertTrue(ok)
-        self.assertEqual(ad.cancelled, [("BTC", "x1")],
-                         "keep 只代表归属，不能让外所超龄挂单绕过回收")
+        self.assertEqual(ad.cancelled, [], "显式接管的外所订单也应跨周期保留")
 
     def test_unreadable_pool_degrades_to_no_gate_scan(self):
         """Gate 需要按标的扫；池读不出来 ⇒ 只是扫不到（fail-soft），不是拦轮。"""

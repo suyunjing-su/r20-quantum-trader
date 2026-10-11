@@ -110,7 +110,8 @@ class SubmitProtectedLimitOrderTests(unittest.TestCase):
         # 3. Non-finite value (NaN / Inf)
         ok, reason = aft.submit_protected_limit_order("BTC-USDT-SWAP", "buy", "long", 1, float("nan"), 130.0, 90.0)
         self.assertFalse(ok)
-        self.assertIn("有限数值", reason)
+        self.assertIn("最终订单三价拒绝", reason)
+        self.assertIn("三价不可用", reason)
 
         # Core rejections must never touch the exchange channel.
         mock_rest.place_order.assert_not_called()

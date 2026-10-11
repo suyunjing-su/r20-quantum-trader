@@ -125,13 +125,6 @@ export const zhAdminSecurity = {
   toastPoolSaved: '{venue} 永续合约池已保存',
 
   poolDesc: 'USDT 永续合约标的池管理；每个合约在此直接选择可参与撮合的交易所，多个交易所由撮合路由策略决定最终执行所。',
-  entryFreshnessTitle: 'AI 入场时间新鲜度',
-  entryFreshnessDesc: '控制 AI 决策与其行情快照在最终开仓边界允许存活的最长时间。',
-  entryFreshnessLabel: '最大允许年龄（秒）',
-  entryFreshnessSave: '保存新鲜度',
-  entryFreshnessSaved: 'AI 入场时间新鲜度已保存；决策与行情快照阈值已同步。',
-  entryFreshnessInvalid: '新鲜度必须是 30 到 3600 秒之间的数值',
-  entryFreshnessFooter: '仅超级管理员可修改；该值同时作用于 AI 决策和行情快照，默认 300 秒。提高后会放宽陈旧信号的开仓窗口，请谨慎调整。',
   councilGroupSizeTitle: '委员会分组设置',
   councilGroupSizeDesc: '设置交易员提案每组包含的主责标的数量；默认 7，可按账户与标的规模人工调整。',
   councilGroupSizeLabel: '每组主责标的数',

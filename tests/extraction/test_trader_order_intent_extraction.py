@@ -100,7 +100,21 @@ class PricesParityTest(unittest.TestCase):
             self.assertEqual(got, exp, f"is_long={is_long} 与搬走前分叉")
             self.assertEqual(got, (101.5, 110.0, 95.0))
 
-    def test_venue_side_of_book_differs_by_direction(self):
+    def test_market_mode_ignores_limit_style_ai_entry_and_uses_executable_quote(self):
+        """市价模式不能把 AI 的回踩限价带入价格新鲜度闸门。"""
+        import os
+        from unittest.mock import patch
+
+        decision = {"entry_price": 95.0, "take_profit_price": 110.0, "stop_loss_price": 90.0}
+        f = {"bidPx": 99.8, "askPx": 100.2, "price": 100.0}
+        with patch.dict(os.environ, {"ASTRA_ORDER_MODE": "market"}):
+            long_px, _, _ = order_intent.resolve_entry_prices(
+                is_long=True, ai_decision=decision, f=f, prec=2, tp_dist=5.0, sl_dist=3.0)
+            short_px, _, _ = order_intent.resolve_entry_prices(
+                is_long=False, ai_decision=decision, f=f, prec=2, tp_dist=5.0, sl_dist=3.0)
+        self.assertEqual(long_px, 100.2, "市价多单应使用卖一作为即时成交参考价")
+        self.assertEqual(short_px, 99.8, "市价空单应使用买一作为即时成交参考价")
+
         """盘口价：做多取 bidPx，做空取 askPx —— 漏改会让空单盯着买一价下单。"""
         f = {"bidPx": 100.0, "askPx": 100.5, "price": 99.0}
         lp_long, _, _ = order_intent.resolve_entry_prices(
@@ -109,6 +123,38 @@ class PricesParityTest(unittest.TestCase):
             is_long=False, ai_decision={}, f=f, prec=2, tp_dist=5.0, sl_dist=3.0)
         self.assertEqual(lp_long, 100.0, "做多应用 bidPx")
         self.assertEqual(lp_short, 100.5, "做空应用 askPx")
+
+    def test_captured_mode_beats_environment_at_resolution(self):
+        import os
+        from unittest.mock import patch
+
+        decision = {"entry_price": 95.0, "take_profit_price": 110.0, "stop_loss_price": 90.0}
+        f = {"bidPx": 99.8, "askPx": 100.2, "price": 100.0}
+        # The AI decision was generated in market mode; a later dashboard change
+        # must not make the resolver reinterpret it as a limit order.
+        with patch.dict(os.environ, {"ASTRA_ORDER_MODE": "limit"}):
+            got = order_intent.resolve_entry_prices(
+                is_long=True, ai_decision=decision, f=f, prec=2,
+                tp_dist=5.0, sl_dist=3.0, order_mode="market")
+        self.assertEqual(got[0], 100.2)
+
+    def test_market_mode_rejects_unusable_quote_instead_of_reusing_ai_entry(self):
+        import os
+        from unittest.mock import patch
+
+        decision = {"entry_price": 95.0, "take_profit_price": 110.0, "stop_loss_price": 90.0}
+        with patch.dict(os.environ, {"ASTRA_ORDER_MODE": "market"}):
+            # A malformed top-of-book value may fall back only to the last price.
+            got = order_intent.resolve_entry_prices(
+                is_long=True, ai_decision=decision,
+                f={"askPx": "bad", "price": 100.0}, prec=2,
+                tp_dist=5.0, sl_dist=3.0)
+            self.assertEqual(got[0], 100.0)
+            with self.assertRaises(ValueError):
+                order_intent.resolve_entry_prices(
+                    is_long=True, ai_decision=decision,
+                    f={"askPx": "bad", "price": None}, prec=2,
+                    tp_dist=5.0, sl_dist=3.0)
 
     def test_distances_are_mirrored_by_direction(self):
         f = {"bidPx": 100.0, "askPx": 100.0, "price": 100.0}

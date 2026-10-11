@@ -31,16 +31,21 @@
 """
 from __future__ import annotations
 
+import os
 import time
 
 
-def resolve_entry_prices(*, is_long, ai_decision, f, prec, tp_dist, sl_dist):
+def resolve_entry_prices(*, is_long, ai_decision, f, prec, tp_dist, sl_dist,
+                          order_mode=None):
     """按 AI 决策给定或盘口兜底，算出 `(limit_px, tp_px, sl_px)`。
 
-    与搬走前的内联实现逐字一致：
+    限价模式使用 AI 的回踩 entry_price；市价模式将 entry_price 归一为当前可成交
+    的 ask/bid 参考价，避免把限价策略的远端报价带入市价开仓的价格新鲜度校验。
 
-    - `limit_px`：AI 的 `entry_price`（>0 时）否则 `bidPx`（多）/ `askPx`（空），
-      再退回 `f["price"]`；
+    与搬走前的内联实现保持以下字段语义：
+    - `limit_px`：限价模式使用 AI 的 `entry_price`（>0 时），否则用
+      `bidPx`（多）/ `askPx`（空），再退回 `f["price"]`；市价模式先改为
+      当前可成交的 ask/bid 参考价；
     - `tp_px`：AI 的 `take_profit_price`（>0 时）否则 `limit_px + tp_dist`（多）/
       `limit_px - tp_dist`（空）；
     - `sl_px`：AI 的 `stop_loss_price`（>0 时）否则 `limit_px - sl_dist`（多）/
@@ -49,6 +54,31 @@ def resolve_entry_prices(*, is_long, ai_decision, f, prec, tp_dist, sl_dist):
     注意原实现里 `tp_px` / `sl_px` 在赋值前并不存在，兜底基准是 `limit_px` 本身；
     这里保持同样的求值顺序（先算 `limit_px`，再算另两价）。
     """
+    # 市价模式不消费 AI 的远端回踩价：该价只适用于限价挂单，若原样带入会在
+    # 下单前价格新鲜度闸门处被当成过期/错误一侧的价格拒绝。这里仍保留 AI 的
+    # TP/SL 规划，但把 entry_price 归一为当前可成交盘口参考价；提交时执行层
+    # 还会用实时 ticker 再次锚定保护腿。
+    # The mode captured with the AI decision is authoritative for this entry.
+    # Older cache records have no field and retain the environment fallback.
+    order_mode = str(order_mode or os.getenv("ASTRA_ORDER_MODE", "limit")).strip().lower()
+    if order_mode not in {"limit", "market"}:
+        order_mode = "limit"
+    if order_mode == "market":
+        _market_entry = f.get("askPx") if is_long else f.get("bidPx")
+        try:
+            _market_entry = float(_market_entry)
+        except (TypeError, ValueError):
+            _market_entry = 0.0
+        if _market_entry <= 0:
+            try:
+                _market_entry = float(f.get("price"))
+            except (TypeError, ValueError):
+                _market_entry = 0.0
+        if _market_entry <= 0:
+            raise ValueError("市价模式缺少可核验的实时成交参考价")
+        ai_decision = dict(ai_decision or {})
+        ai_decision["entry_price"] = _market_entry
+
     limit_px = round(
         ai_decision.get("entry_price")
         if (ai_decision and ai_decision.get("entry_price", 0) > 0)

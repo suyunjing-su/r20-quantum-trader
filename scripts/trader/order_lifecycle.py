@@ -44,7 +44,7 @@ def clean_stale_open_orders(keep_ord_ids: Optional[set] = None,
                               load_instruments,
                               okx_rest,
                               venue_registry) -> Tuple[bool, str]:
-    """Cancel stale entry orders; any inability to verify/cancel blocks the trading cycle.
+    """Cancel stale unowned entry orders; attributed limit orders may remain GTC.
 
     审计④8(2026-09-13)·外所 GTC 回收：路由能把信号派到 gate/binance（三所平权+
     gate 费率占优即会被选中），但本回收过去只扫 OKX——外所入场限价 GTC 挂单
@@ -65,12 +65,10 @@ def clean_stale_open_orders(keep_ord_ids: Optional[set] = None,
         state = str(order.get("state", "live")).lower()
         created_at = int(order.get("cTime", now_ts) or now_ts)
         order_age = now_ts - created_at
-        # 对账接管只表示“这是本系统的单”，不表示它可以无限期存活。
-        # 旧逻辑对 keep_ord_ids 直接 continue，导致有新鲜 intent 的一小时前
-        # 挂单绕过生命周期回收，并在后续周期继续占用 pending_inst_ids。
-        # 只有仍在生命周期窗口内的接管单可以跳过清理；过期单必须先撤，再由
-        # 当前周期的新鲜决策决定是否重新下单。
-        if order_id and order_id in keep_ord_ids and order_age <= STALE_MS:
+        # 对账接管表示这是本系统仍在等待成交的单；限价单可以跨越多个 Trader 周期
+        # 等待盘口成交，不能因为下一周期到来就被生命周期清理。失效意图、方向不符
+        # 或无归属单已由上游 reconcile_pending_orders 处理。
+        if order_id and order_id in keep_ord_ids:
             continue
         if state not in {"live", "partially_filled"} or not order_id or order_age <= STALE_MS:
             continue
@@ -84,8 +82,8 @@ def clean_stale_open_orders(keep_ord_ids: Optional[set] = None,
         _env_mode = str(current_environment().mode or "demo")
     except Exception:
         _env_mode = ""
-    # 仍读取活意图作为撤单安全前置条件：意图文件不可读时不能猜测归属。
-    # 但意图只负责归属与 fail-closed，不能让超过 STALE_MS（一个 15 分钟 Trader 周期）的挂单无限存活。
+    # 读取活意图作为外所订单归属依据与撤单安全前置条件：有效意图覆盖的限价单
+    # 可以跨周期等待成交；意图文件不可读时不能猜测归属。
     # ⚠️ 第一百三十四刀：**读不到意图 ⇒ 不撤任何单 + fail-closed**。
     # 旧写法 `except Exception: _live_intents = []` 把"文件坏了"当成"没有意图"
     # ⇒ 每笔挂单都失去归属 ⇒ 按孤儿/陈旧**撤销**（撤旧挂新循环的另一种成因），
@@ -137,7 +135,8 @@ def clean_stale_open_orders(keep_ord_ids: Optional[set] = None,
             # 其余不可核验（网络/未知）：与 OKX 同尺 fail-closed 拦本轮
             return False, f"{_v} 挂单回收不可用: {type(exc).__name__}: {_msg[:120]}"
         # 归一 (base, dir) → 按创建时间**只保最新**一条为候选存活单，其余降级为重复单；
-        # 候选单仍受 STALE_MS 生命周期回收，意图只用于归属/安全前置，不再豁免超龄单。
+        # 有效意图或显式接管的候选单可跨周期等待限价成交，其余候选仍按 STALE_MS
+        # 回收，避免孤儿单逐日堆积占用保证金。
         # （修复：外所单此前既无人回收也无接管语义，每轮重挂造成 BTC/SUI 成对重复。）
         best: Dict[tuple, tuple] = {}
         dupes: List[tuple] = []
@@ -169,9 +168,9 @@ def clean_stale_open_orders(keep_ord_ids: Optional[set] = None,
             else:
                 inst_disp = str(o.get("contract") or _raw.get("contract") or "")
                 created_ms = int(float(o.get("create_time") or _raw.get("create_time") or (now_ts / 1000)) * 1000)
-            # 与 OKX 一致：keep 只豁免生命周期窗口内的已归属单。
-            # 超龄 keep 单仍进入 best/dupes，随后按 STALE_MS 回收。
-            if order_id in keep_ord_ids and now_ts - created_ms <= STALE_MS:
+            # reconcile_pending_orders 目前以 OKX 返回的 ordId 建立接管集；保留显式
+            # keep 兼容注入/审计调用，并让有效意图覆盖 Gate/Binance 的订单。
+            if order_id in keep_ord_ids:
                 continue
             _b = str(o.get("base") or "").upper() or inst_disp.replace("_USDT", "").replace("USDT", "").split("-")[0].upper()
             if not _b or _side not in ("buy", "sell"):
@@ -194,10 +193,9 @@ def clean_stale_open_orders(keep_ord_ids: Optional[set] = None,
             except Exception as exc:
                 return False, f"failed to cancel duplicate order {_v} {inst_disp}/{order_id}: {exc}"
         for (venue_base, dir_word), (created_ms, order_id, inst_disp) in best.items():
-            # intent 只用于归属判断，不能让过期挂单绕过生命周期回收。
-            # 否则一条仍在 TTL 内的 6 小时 intent 会让外所挂单存活数小时，
-            # 下一轮仍会被 pending_inst_ids 当作有效在途单而不更新价格。
-            if now_ts - created_ms <= STALE_MS:
+            # 有效开仓意图表示该方向的限价单仍是当前策略的在途订单，允许跨周期
+            # 等待成交；没有意图的候选才按 STALE_MS 回收为孤儿/失效单。
+            if now_ts - created_ms <= STALE_MS or _intent_covers(venue_base, dir_word):
                 continue
             try:
                 _ad.cancel_order(venue_base, order_id)
