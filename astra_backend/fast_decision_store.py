@@ -15,6 +15,7 @@ CONFIG_FILE = DATA_DIR / "fast_decision_config.json"
 ACTIONS_FILE = DATA_DIR / "fast_decision_actions.json"
 ENTRY_BLOCK_FILE = DATA_DIR / "fast_decision_entry_block.json"
 LATENCY_FILE = DATA_DIR / "fast_decision_latency.json"
+LAST_FILE = DATA_DIR / "fast_decision_last.json"
 MAX_LATENCY_SAMPLES = 500
 DEFAULT_CONFIG: dict[str, Any] = {
     "enabled": False,
@@ -57,6 +58,28 @@ def save_config(values: Mapping[str, Any]) -> dict[str, Any]:
     with file_lock(CONFIG_FILE):
         _atomic_write_json(CONFIG_FILE, cfg)
     return load_config()
+
+
+def last_result_status() -> dict[str, Any]:
+    """Return safe, compact observability for the latest worker invocation."""
+    raw = _read(LAST_FILE, {})
+    if not isinstance(raw, Mapping):
+        return {"available": False}
+    result: dict[str, Any] = {"available": True}
+    for key in (
+        "ok", "action", "worker_status", "error", "status_code", "endpoint",
+        "finished_at", "decision", "timestamps", "latency",
+    ):
+        if key in raw:
+            result[key] = raw[key]
+    decision = result.get("decision")
+    if isinstance(decision, Mapping):
+        result["decision"] = {
+            key: decision[key]
+            for key in ("action", "reason", "received_at", "model", "reduce_fraction")
+            if key in decision
+        }
+    return result
 
 
 def config_status(config: Mapping[str, Any], *, runtime_error: str = "") -> dict[str, Any]:

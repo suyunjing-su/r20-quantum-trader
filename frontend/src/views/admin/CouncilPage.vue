@@ -224,6 +224,25 @@ async function loadData() {
   }
 }
 
+function fastDecisionNote(): string {
+  const status = fastDecisionStatus.value || {};
+  if (status.runtime_error) return status.runtime_error;
+  if (status.enabled && status.gateway && status.gateway.running === false) {
+    return t('admin.council.fastDecisionGatewayDown');
+  }
+  const last = status.last_result || {};
+  if (last.worker_status === 'skipped') return t('admin.council.fastDecisionLastSkipped');
+  if (last.worker_status === 'failed') {
+    return t('admin.council.fastDecisionLastFailed', undefined, {
+      msg: last.error || 'unknown error',
+    });
+  }
+  if (last.worker_status === 'success') return t('admin.council.fastDecisionLastSuccess');
+  return status.enabled
+    ? t('admin.council.fastDecisionOn')
+    : t('admin.council.fastDecisionOff');
+}
+
 async function saveFastDecisionConfig() {
   if (!auth.isSuperadmin) return;
   fastDecisionSaving.value = true;
@@ -715,7 +734,7 @@ onMounted(loadData);
         </div>
         <div class="cn-rules-foot fast-decision-foot">
           <span class="fast-decision-note">
-            {{ fastDecisionStatus.runtime_error || (fastDecisionStatus.enabled ? t('admin.council.fastDecisionOn') : t('admin.council.fastDecisionOff')) }}
+            {{ fastDecisionNote() }}
           </span>
           <button type="button" class="btn btn-primary btn-sm" :disabled="fastDecisionSaving || !auth.isSuperadmin" @click="saveFastDecisionConfig">
             {{ fastDecisionSaving ? t('admin.council.saving') : t('admin.council.fastDecisionSave') }}

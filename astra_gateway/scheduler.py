@@ -163,6 +163,12 @@ class GatewayScheduler:
             env = None
             if spec.name == "fast_decision":
                 env = os.environ.copy()
+                # The worker is launched by file path.  Keep the repository
+                # import roots explicit instead of depending on the gateway's
+                # parent process environment (notably on Windows services).
+                env["PYTHONPATH"] = os.pathsep.join(
+                    part for part in (str(ROOT), str(SCRIPTS), env.get("PYTHONPATH", "")) if part
+                )
                 env["ASTRA_FAST_DECISION_SUBMITTED_AT"] = str(float(submitted_at or worker_started_at))
                 env["ASTRA_FAST_DECISION_WORKER_STARTED_AT"] = str(worker_started_at)
                 if event_driven:
@@ -176,8 +182,23 @@ class GatewayScheduler:
                 timeout=spec.timeout_seconds,
                 **({"env": env} if env is not None else {}),
             )
-            detail = (result.stderr if result.returncode else result.stdout)[-2000:]
-            self.store.finish_job(run_id, result.returncode, detail)
+            detail = ((result.stderr or result.stdout) if result.returncode else result.stdout)[-2000:]
+            status = None
+            if spec.name == "fast_decision" and result.returncode == 0:
+                # A disabled guardian is an intentional no-op, not a successful
+                # model call.  The worker emits a machine-readable status so the
+                # scheduler does not turn "no API request" into a green run.
+                try:
+                    payload = json.loads(result.stdout.strip().splitlines()[-1])
+                except (IndexError, TypeError, ValueError, json.JSONDecodeError):
+                    payload = {}
+                worker_status = payload.get("worker_status")
+                status = {
+                    "success": "success",
+                    "skipped": "skipped",
+                    "failed": "failed",
+                }.get(worker_status, "failed")
+            self.store.finish_job(run_id, result.returncode, detail, status=status)
         except subprocess.TimeoutExpired as exc:
             self.store.finish_job(run_id, 124, f"timeout after {spec.timeout_seconds}s: {exc}")
         except Exception as exc:

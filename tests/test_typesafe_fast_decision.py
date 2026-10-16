@@ -44,6 +44,33 @@ def test_validated_system_one_runtime_exposes_callable_model_name():
     assert runtime["id"] == "jev-1.13.0"
 
 
+def test_fast_decision_script_runs_when_launched_by_file_path():
+    """The gateway invokes scripts/fast_decision.py directly, not as a module."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join(
+        part for part in (str(root), str(root / "scripts"), env.get("PYTHONPATH", "")) if part
+    )
+    completed = subprocess.run(
+        [sys.executable, str(root / "scripts" / "fast_decision.py")],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert completed.returncode == 0
+    assert '"worker_status": "skipped"' in completed.stdout
+    assert "fast_decision_disabled" in completed.stdout
+    assert not completed.stderr
+
+
 def test_system_one_response_preserves_typed_answers():
     result = parse_system_one_response({
         "model": "jev-1.13.0",

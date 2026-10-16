@@ -350,6 +350,30 @@ class ExecuteTests(unittest.TestCase):
         self.scheduler._execute(self.spec)
         self.assertEqual(len(self._only_run()["detail"]), 2000)
 
+    def test_fast_decision_disabled_run_is_recorded_as_skipped(self):
+        spec = JobSpec("fast_decision", "fast_decision.py", 5, 45)
+        self.run.return_value.stdout = '{"worker_status":"skipped","error":"fast_decision_disabled"}'
+        self.scheduler._execute(spec)
+        row = self._only_run()
+        self.assertEqual(row["status"], "skipped")
+        self.assertEqual(row["return_code"], 0)
+
+    def test_fast_decision_worker_failure_is_not_recorded_as_success(self):
+        spec = JobSpec("fast_decision", "fast_decision.py", 5, 45)
+        self.run.return_value.returncode = 1
+        self.run.return_value.stdout = '{"worker_status":"failed","error":"runtime_invalid"}'
+        self.run.return_value.stderr = ""
+        self.scheduler._execute(spec)
+        row = self._only_run()
+        self.assertEqual(row["status"], "failed")
+        self.assertIn("runtime_invalid", row["detail"])
+
+    def test_fast_decision_malformed_success_output_is_not_recorded_as_success(self):
+        spec = JobSpec("fast_decision", "fast_decision.py", 5, 45)
+        self.run.return_value.stdout = "not-json"
+        self.scheduler._execute(spec)
+        self.assertEqual(self._only_run()["status"], "failed")
+
     def test_a_timeout_is_recorded_as_exit_code_124(self):
         self.run.side_effect = SCH.subprocess.TimeoutExpired("cmd", 42)
         self.scheduler._execute(self.spec)

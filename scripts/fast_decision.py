@@ -7,15 +7,23 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Any
+
+# The gateway starts this file by path (``python scripts/fast_decision.py``),
+# which puts ``scripts/`` rather than the repository root at sys.path[0].
+# Bootstrap the root before importing the backend so standalone and gateway
+# invocations use the same import path.
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from astra_backend.fast_decision_service import evaluate, execute_protective_decision
 from astra_backend.fast_decision_store import load_config, record_latency_sample
 from astra_backend.llm_manager import validate_model_runtime
 
-ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data"
 LAST_FILE = DATA / "fast_decision_last.json"
 
@@ -81,24 +89,52 @@ def run_once() -> dict[str, Any]:
     scheduler_queue_ms = max(0.0, (trigger_at - submitted_at) * 1000)
     cfg = load_config()
     if not cfg.get("enabled"):
-        result = {"ok": False, "action": "HOLD", "failure_safe": True, "error": "fast_decision_disabled"}
+        result = {
+            "ok": False,
+            "action": "HOLD",
+            "failure_safe": True,
+            "worker_status": "skipped",
+            "error": "fast_decision_disabled",
+        }
         _write(result)
         return result
     try:
         runtime = validate_model_runtime(str(cfg.get("model_id") or ""), required_capability="structured_decision")
     except Exception as exc:
-        result = {"ok": False, "action": "HOLD", "failure_safe": True, "error": f"runtime_invalid: {exc}"}
+        result = {
+            "ok": False,
+            "action": "HOLD",
+            "failure_safe": True,
+            "worker_status": "failed",
+            "error": f"runtime_invalid: {exc}",
+        }
         _write(result)
         return result
     runtime.update({"timeout_seconds": cfg.get("timeout_seconds"), "decision_ttl_seconds": cfg.get("decision_ttl_seconds")})
     event_driven = os.environ.get("ASTRA_FAST_DECISION_EVENT_DRIVEN") == "1"
     event = _read_json(Path(os.environ.get("ASTRA_FAST_DECISION_EVENT_FILE", "")), {}) if event_driven else {}
     snapshot = _snapshot(event if isinstance(event, dict) else None)
+    # TIGHTEN_PROTECTION is validated before the decision is returned.  Supply
+    # one valid current protection price as validation context; the execution
+    # loop still derives and checks the price independently for every position.
+    positions = snapshot.get("positions") or []
+    if isinstance(positions, list):
+        for position in positions:
+            if not isinstance(position, dict):
+                continue
+            price = position.get("suggested_sl_price") or position.get("trailingStopPx")
+            try:
+                if float(price) > 0:
+                    snapshot["tighten_stop_price"] = price
+                    break
+            except (TypeError, ValueError):
+                continue
     snapshot_built_at = time.time()
     market = snapshot.get("market")
     if isinstance(market, dict) and snapshot.get("market_event_timestamp") is None:
         snapshot["factor_snapshot_at"] = market.get("updated_at_epoch") or snapshot.get("factor_snapshot_at")
     result = evaluate(snapshot, runtime)
+    result["worker_status"] = "success" if result.get("ok") else "failed"
     result.setdefault("latency", {})["scheduler_queue_ms"] = round(scheduler_queue_ms, 3)
     result["latency"]["trigger_to_result_ms"] = round(max(0.0, (time.time() - trigger_at) * 1000), 3)
     result.setdefault("timestamps", {})["snapshot_built_timestamp"] = snapshot_built_at
@@ -204,6 +240,15 @@ def run_once() -> dict[str, Any]:
                 trader.unfreeze_okx_environment()
         except Exception as exc:
             result["execution"] = {"ok": False, "failure_safe": True, "error": str(exc)}
+    execution = result.get("execution")
+    if isinstance(execution, dict):
+        execution_ok = execution.get("ok")
+    elif isinstance(execution, list):
+        execution_ok = all(isinstance(row, dict) and row.get("ok") for row in execution) if execution else True
+    else:
+        execution_ok = True
+    if result.get("ok") and not execution_ok:
+        result["worker_status"] = "failed"
     result["finished_at"] = time.time()
     execution = result.get("execution")
     execution_started_at, order_submitted_at = _execution_timestamps(execution)
@@ -247,4 +292,10 @@ def run_once() -> dict[str, Any]:
 
 
 if __name__ == "__main__":
-    print(json.dumps(run_once(), ensure_ascii=False))
+    worker_result = run_once()
+    print(json.dumps(worker_result, ensure_ascii=False))
+    # Disabled is an intentional safe no-op and remains exit-zero so the
+    # scheduler does not retry it. Runtime/API failures must be visible as a
+    # failed job instead of looking like a successful invocation.
+    if worker_result.get("worker_status") == "failed":
+        raise SystemExit(1)

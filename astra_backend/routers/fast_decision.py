@@ -8,7 +8,10 @@ from astra_backend.audit import record as audit_record
 from astra_backend.dependencies import require_admin_header, require_superadmin
 from astra_backend.schemas import FastDecisionConfigUpdateRequest
 from astra_backend.fast_decision_service import evaluate, entry_block
-from astra_backend.fast_decision_store import config_status, load_config, save_config
+from astra_backend.fast_decision_store import config_status, last_result_status, load_config, save_config
+from astra_gateway.pidfile import heartbeat_age, heartbeat_fresh
+from astra_gateway.publisher import DB_PATH as GATEWAY_DB_PATH
+from astra_gateway.store import GatewayStore
 from astra_backend.llm.system_one import SYSTEM_ONE_CAPABILITY, is_system_one_format
 from astra_backend.llm_manager import load_llm_config, validate_model_runtime
 
@@ -44,7 +47,19 @@ def _runtime_status(cfg: dict[str, Any]) -> dict[str, Any]:
             _validate_enabled_config(cfg)
         except HTTPException as exc:
             error = str(exc.detail)
-    return {**config_status(cfg, runtime_error=error), "entry_block": entry_block()}
+    age = heartbeat_age()
+    store = GatewayStore(GATEWAY_DB_PATH)
+    recent = [row for row in store.job_runs(30) if row.get("job_name") == "fast_decision"]
+    return {
+        **config_status(cfg, runtime_error=error),
+        "entry_block": entry_block(),
+        "gateway": {
+            "running": heartbeat_fresh() if age is not None else False,
+            "heartbeat_age_seconds": age,
+            "last_job": recent[0] if recent else None,
+        },
+        "last_result": last_result_status(),
+    }
 
 
 @router.get("/api/v1/admin/fast-decision/config")

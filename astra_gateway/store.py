@@ -191,13 +191,15 @@ class GatewayStore:
                 " WHERE status='running'", (now,))
             return cursor.rowcount
 
-    def finish_job(self, run_id: int, return_code: int, detail: str) -> None:
+    def finish_job(self, run_id: int, return_code: int, detail: str, *, status: str | None = None) -> None:
         now = datetime.now(BJ_TZ).strftime("%Y-%m-%d %H:%M:%S")
-        status = "success" if return_code == 0 else "failed"
+        if status not in {None, "success", "failed", "skipped"}:
+            raise ValueError(f"unsupported job status: {status}")
+        final_status = status or ("success" if return_code == 0 else "failed")
         with self.connect() as connection:
             connection.execute(
                 "UPDATE job_runs SET status=?, finished_at=?, return_code=?, detail=? WHERE id=?",
-                (status, now, return_code, detail[-2000:], run_id),
+                (final_status, now, return_code, detail[-2000:], run_id),
             )
 
     def prune_job_runs(self, keep_days: int | None = None,
