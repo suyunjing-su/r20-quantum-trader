@@ -106,18 +106,6 @@ def fetch_remote_models(reload_config: Callable[[], Dict[str, Any]], get_active_
 
     selected_provider = next((p for p in config.get("providers", []) if provider_id and p.get("id") == provider_id), None)
     selected_format = str((selected_provider or {}).get("api_format") or "").strip()
-    if is_system_one_format(selected_format):
-        # TypeSafe's public API documentation does not define a stable /models
-        # endpoint or response envelope.  Do not probe or invent a discovery
-        # contract: manual registration is the supported fallback until TypeSafe
-        # publishes one.  Connection testing and native System One execution do
-        # not depend on model discovery.
-        return {
-            "ok": False,
-            "error": "TypeSafe System One 未公开稳定的模型发现接口契约",
-            "recommendation": "请手动登记模型 ID（例如官方文档列出的别名或未来模型），再执行连接测试。",
-            "discovery": "unsupported_by_documented_contract",
-        }
 
     endpoints = []
     bearer_hdr = {"Authorization": f"Bearer {api_key}"} if api_key else {}
@@ -159,18 +147,25 @@ def fetch_remote_models(reload_config: Callable[[], Dict[str, Any]], get_active_
                         ctx = None
                         desc = ""
                     elif isinstance(item, dict):
-                        m_id = str(item.get("id", "")).strip()
+                        # TypeSafe's /models contract uses `name` for the model
+                        # identifier; OpenAI-compatible endpoints conventionally
+                        # use `id`.  Accept the TypeSafe form without changing
+                        # the generic discovery contract for other providers.
+                        if is_system_one_format(selected_format):
+                            m_id = str(item.get("name") or item.get("id") or "").strip()
+                        else:
+                            m_id = str(item.get("id") or "").strip()
                         if not m_id:
                             continue
-                        m_name = str(item.get("name") or item.get("display_name") or m_id).strip()
+                        m_name = str(item.get("display_name") or item.get("name") or item.get("id") or m_id).strip()
                         ctx = item.get("context_length") or item.get("max_tokens")
                         desc = str(item.get("description") or "").strip()
                     else:
                         continue
 
-                    detected_format = _detect_api_format(cleaned_url, m_id)
+                    detected_format = SYSTEM_ONE_API_FORMAT if is_system_one_format(selected_format) else _detect_api_format(cleaned_url, m_id)
                     detected_rtype = _detect_reasoning_type(m_id)
-                    detected_caps = _detect_capabilities(m_id)
+                    detected_caps = _detect_capabilities(m_id, detected_format)
                     default_effort = "high" if detected_rtype != "none" else "auto"
 
                     parsed_models.append({

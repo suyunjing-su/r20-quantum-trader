@@ -1,5 +1,17 @@
 from astra_backend.fast_decision_policy import build_state, normalize_action, parse_decision, validate_decision
-from astra_backend.llm.system_one import build_system_one_request, parse_system_one_response
+from astra_backend.llm.system_one import (
+    build_system_one_request,
+    normalize_system_one_model,
+    parse_system_one_response,
+)
+
+
+def test_system_one_model_ids_are_forward_compatible_and_not_rewritten():
+    assert normalize_system_one_model("jev-1.13.0") == "jev-1.13.0"
+    assert normalize_system_one_model("jev-latest") == "jev-latest"
+    assert normalize_system_one_model("jev-1.13") == "jev-1.13"
+    assert normalize_system_one_model("jev-1.14.0") == "jev-1.14.0"
+    assert normalize_system_one_model("jev-future-release") == "jev-future-release"
 
 
 def test_system_one_request_is_not_chat_payload():
@@ -14,6 +26,93 @@ def test_system_one_request_is_not_chat_payload():
     assert headers["Authorization"].startswith("Bearer ")
     assert set(payload) == {"model", "state", "questions"}
     assert "messages" not in payload
+
+
+def test_typesafe_model_discovery_accepts_name_ids(monkeypatch):
+    import json
+    import astra_backend.llm.call as call
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps({"data": [{"name": "jev-1.14.0", "display_name": "Jev 1.14"}]}).encode()
+
+    monkeypatch.setattr(call.urllib.request, "urlopen", lambda *_args, **_kwargs: Response())
+    result = call.fetch_remote_models(
+        lambda: {"providers": [{
+            "id": "typesafe",
+            "api_format": "typesafe_system_one",
+            "base_url": "https://api.typesafe.ai/v1",
+            "api_key": "test-only-not-a-credential",
+        }]},
+        lambda: {},
+        provider_id="typesafe",
+    )
+    assert result["ok"] is True
+    assert result["models"][0]["id"] == "jev-1.14.0"
+    assert result["models"][0]["api_format"] == "typesafe_system_one"
+
+
+def test_typesafe_registry_error_keeps_requested_model(monkeypatch):
+    import io
+    import urllib.error
+    import astra_backend.llm.system_one as system_one
+
+    def reject(request, timeout):
+        raise urllib.error.HTTPError(
+            request.full_url,
+            400,
+            "Bad Request",
+            {},
+            io.BytesIO(b'{"detail":"Unsupported TypeSafe model; use a declared Jev model"}'),
+        )
+
+    monkeypatch.setattr(system_one.urllib.request, "urlopen", reject)
+    result = system_one.execute_system_one_request(
+        model="jev-1.14.0",
+        state={},
+        questions={"action": {"type": "choice", "criteria": {"HOLD": None}}},
+        base_url="https://api.typesafe.ai/v1",
+        api_key="test-only-not-a-credential",
+        attempts=1,
+    )
+    assert result["ok"] is False
+    assert result["requested_model"] == "jev-1.14.0"
+    assert result["model"] == "jev-1.14.0"
+    assert result["model_fallback"] is False
+    assert result["model_registry_error"] is True
+
+
+def test_typesafe_runtime_accepts_new_persisted_model_without_discovery_entry():
+    from astra_backend.llm.store import validate_model_runtime
+
+    runtime = validate_model_runtime(
+        {
+            "providers": [{
+                "id": "typesafe",
+                "enabled": True,
+                "api_format": "typesafe_system_one",
+                "base_url": "https://api.typesafe.ai/v1",
+                "api_key": "test-only-not-a-credential",
+                "models": [],
+            }],
+            "models": [{
+                "id": "jev-1.14",
+                "provider_id": "typesafe",
+                "api_format": "typesafe_system_one",
+                "api_path": "/systemone",
+                "capabilities": ["structured_decision"],
+            }],
+        },
+        "jev-1.14",
+        required_capability="structured_decision",
+    )
+    assert runtime["model"] == "jev-1.14"
 
 
 def test_validated_system_one_runtime_exposes_callable_model_name():

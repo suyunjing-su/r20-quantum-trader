@@ -20,6 +20,18 @@ SYSTEM_ONE_CAPABILITY = "structured_decision"
 SYSTEM_ONE_DEFAULT_PATH = "/systemone"
 SYSTEM_ONE_DEFAULT_BASE_URL = "https://api.typesafe.ai/v1"
 
+# The provider owns the Jev release and alias catalogue.  Keep this client
+# deliberately version-agnostic: new model IDs must not require an application
+# release or a guessed alias mapping.
+def normalize_system_one_model(model: str) -> str:
+    """Validate the shape of a provider-facing model ID without rewriting it."""
+    model_id = str(model or "").strip()
+    if not model_id:
+        return ""
+    if len(model_id) > 256 or any(ord(char) < 32 or ord(char) == 127 for char in model_id):
+        raise ValueError("System One model ID is empty, too long, or contains control characters")
+    return model_id
+
 
 def is_system_one_format(value: str | None) -> bool:
     return str(value or "").strip().lower() in {
@@ -56,7 +68,7 @@ def build_system_one_request(
     api_path: str = SYSTEM_ONE_DEFAULT_PATH,
 ) -> Tuple[str, Dict[str, str], Dict[str, Any]]:
     """Build a native System One request; never emits ``messages`` or ``stream``."""
-    model_id = str(model or "").strip()
+    model_id = normalize_system_one_model(model)
     if not model_id:
         raise ValueError("System One model is required")
     endpoint_base = str(base_url or "").strip().rstrip("/")
@@ -114,6 +126,23 @@ def _error_body(exc: urllib.error.HTTPError) -> str:
         return ""
 
 
+def _is_model_registry_error(body: str) -> bool:
+    text = str(body or "").lower()
+    return (
+        "unsupported typesafe model" in text
+        or "not served by this plugin" in text
+        or "declared jev model" in text
+    )
+
+
+def _model_registry_hint(model: str) -> str:
+    return (
+        f"TypeSafe 拒绝模型 {model!r}：这是供应商端模型注册/服务列表错误，"
+        "不是 System One 请求格式错误。请刷新 TypeSafe 模型目录或检查该 API Key 的模型权限；"
+        "客户端不会把请求模型静默替换成其他版本。"
+    )
+
+
 def execute_system_one_request(
     *,
     model: str,
@@ -134,6 +163,7 @@ def execute_system_one_request(
         model=model, state=state, questions=questions, base_url=base_url,
         api_key=api_key, api_path=api_path,
     )
+    requested_model = str(body["model"])
     tries = max(1, min(int(attempts or 1), 3))
     last_error = ""
     started = time.perf_counter()
@@ -159,18 +189,28 @@ def execute_system_one_request(
                     "request_sent_at": request_sent_at,
                     "response_received_at": response_received_at,
                     "api_format": SYSTEM_ONE_API_FORMAT,
+                    "requested_model": requested_model,
+                    "model_fallback": body.get("model") != requested_model,
                 })
                 return parsed
         except urllib.error.HTTPError as exc:
             body_text = _error_body(exc)
             last_error = f"HTTP {exc.code}: {body_text}"
+            registry_error = exc.code == 400 and _is_model_registry_error(body_text)
+            if registry_error:
+                last_error = f"{last_error} | {_model_registry_hint(body.get('model', ''))}"
             if exc.code not in (429, 529) or attempt + 1 >= tries:
                 return {
                     "ok": False, "status_code": exc.code, "endpoint": endpoint,
                     "latency_ms": int((time.perf_counter() - started) * 1000),
                     "request_sent_at": request_sent_at,
                     "response_received_at": response_received_at,
-                    "api_format": SYSTEM_ONE_API_FORMAT, "error": last_error,
+                    "api_format": SYSTEM_ONE_API_FORMAT,
+                    "model": body.get("model", ""),
+                    "requested_model": requested_model,
+                    "model_fallback": body.get("model") != requested_model,
+                    "model_registry_error": registry_error,
+                    "error": last_error,
                 }
         except (urllib.error.URLError, TimeoutError, ValueError, json.JSONDecodeError) as exc:
             last_error = str(exc)
@@ -182,13 +222,22 @@ def execute_system_one_request(
                     "latency_ms": int((time.perf_counter() - started) * 1000),
                     "request_sent_at": request_sent_at,
                     "response_received_at": response_received_at,
-                    "api_format": SYSTEM_ONE_API_FORMAT, "error": last_error,
+                    "api_format": SYSTEM_ONE_API_FORMAT,
+                    "model": requested_model,
+                    "requested_model": requested_model,
+                    "model_fallback": False,
+                    "model_registry_error": False,
+                    "error": last_error,
                 }
     return {
         "ok": False, "status_code": 0, "endpoint": endpoint,
         "request_sent_at": request_sent_at,
         "response_received_at": response_received_at,
         "api_format": SYSTEM_ONE_API_FORMAT,
+        "model": requested_model,
+        "requested_model": requested_model,
+        "model_fallback": False,
+        "model_registry_error": False,
         "error": last_error or "request failed",
     }
 

@@ -72,6 +72,10 @@ def evaluate(snapshot: Mapping[str, Any], runtime: Mapping[str, Any], *, now: fl
             "failure_safe": True,
             "error": result.get("error", "System One request failed"),
             "status_code": result.get("status_code", 0),
+            "model": result.get("model"),
+            "requested_model": result.get("requested_model"),
+            "model_fallback": bool(result.get("model_fallback")),
+            "model_registry_error": bool(result.get("model_registry_error")),
             "latency": sample,
             "timestamps": timestamps,
         }
@@ -87,8 +91,8 @@ def evaluate(snapshot: Mapping[str, Any], runtime: Mapping[str, Any], *, now: fl
         )
     record_latency_sample(sample)
     if not ok:
-        return {"ok": False, "action": "HOLD", "failure_safe": True, "error": reason, "decision": decision, "latency": sample, "timestamps": timestamps}
-    return {"ok": True, "action": decision["action"], "decision": decision, "state": state, "latency": sample, "timestamps": timestamps}
+        return {"ok": False, "action": "HOLD", "failure_safe": True, "error": reason, "decision": decision, "model": result.get("model"), "requested_model": result.get("requested_model"), "model_fallback": bool(result.get("model_fallback")), "latency": sample, "timestamps": timestamps}
+    return {"ok": True, "action": decision["action"], "decision": decision, "state": state, "model": result.get("model"), "requested_model": result.get("requested_model"), "model_fallback": bool(result.get("model_fallback")), "latency": sample, "timestamps": timestamps}
 
 
 def _action_id(decision: Mapping[str, Any], position: Mapping[str, Any]) -> str:

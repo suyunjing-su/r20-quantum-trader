@@ -284,11 +284,22 @@ def validate_model_runtime(config: Dict[str, Any], model_id: str, *, required_ca
         raise ValueError(f"供应商已禁用：{provider.get('name') or provider.get('id')}")
     fmt = str(target.get("api_format") or provider.get("api_format") or "openai_chat").strip()
     provider_models = provider.get("models")
-    if isinstance(provider_models, list):
-        if not any(str(item.get("id")) == str(model_id) for item in provider_models if isinstance(item, dict)):
-            raise ValueError(f"模型 {model_id} 未登记在供应商 {provider.get('id')} 名下")
-    elif is_system_one_format(fmt):
-        raise ValueError(f"TypeSafe 模型 {model_id} 缺少供应商模型登记")
+    model_declared = (
+        isinstance(provider_models, list)
+        and any(str(item.get("id")) == str(model_id) for item in provider_models if isinstance(item, dict))
+    )
+    if is_system_one_format(fmt):
+        # TypeSafe owns the model catalogue.  A model explicitly persisted in
+        # the provider-scoped flat record may be called even when discovery has
+        # not returned it yet (for example, immediately after a new release).
+        # Provider ownership, protocol, credentials, and capability checks
+        # below remain mandatory; discovery is a UI aid, not an allow-list.
+        if str(target.get("provider_id") or "") != str(provider.get("id") or ""):
+            raise ValueError(f"TypeSafe 模型 {model_id} 的供应商归属不匹配")
+    elif isinstance(provider_models, list) and not model_declared:
+        raise ValueError(f"模型 {model_id} 未登记在供应商 {provider.get('id')} 名下")
+    elif provider_models is None:
+        raise ValueError(f"模型 {model_id} 缺少供应商模型登记")
     if is_system_one_format(fmt) and not is_system_one_format(provider.get("api_format")):
         raise ValueError(f"TypeSafe 模型 {model_id} 的供应商协议不匹配")
     api_key = str(provider.get("api_key") or "").strip()

@@ -68,6 +68,7 @@ def last_result_status() -> dict[str, Any]:
     result: dict[str, Any] = {"available": True}
     for key in (
         "ok", "action", "worker_status", "error", "status_code", "endpoint",
+        "model", "requested_model", "model_fallback", "model_registry_error",
         "finished_at", "decision", "timestamps", "latency",
     ):
         if key in raw:
